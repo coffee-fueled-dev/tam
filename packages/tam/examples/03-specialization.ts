@@ -12,7 +12,7 @@
  * - Good coverage (reality honors commitments)
  */
 
-import { runExperiment, driftModes } from "./harness";
+import { runExperiment, driftModes, saveResultsToJson } from "./harness";
 
 async function main() {
   const result = await runExperiment("Multi-Mode Specialization", {
@@ -25,6 +25,9 @@ async function main() {
       specialistThreshold: 0.7, // Encourage specialization
     },
   });
+
+  // Save results to JSON
+  await saveResultsToJson(result, "examples/results/03-specialization.json");
 
   console.log("\n═══════════════════════════════════════════════════════════");
   console.log("  Port Analysis");

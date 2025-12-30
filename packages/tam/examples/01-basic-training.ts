@@ -14,7 +14,7 @@
  * - Agency correlates with accuracy
  */
 
-import { runExperiment, dampedSpring1D } from "./harness";
+import { runExperiment, dampedSpring1D, saveResultsToJson } from "./harness";
 
 async function main() {
   const result = await runExperiment("Basic Training", {
@@ -23,6 +23,9 @@ async function main() {
     checkpointEvery: 100,
     testSize: 100,
   });
+
+  // Save results to JSON
+  await saveResultsToJson(result, "examples/results/01-basic-training.json");
 
   // Cleanup
   result.bank?.dispose();

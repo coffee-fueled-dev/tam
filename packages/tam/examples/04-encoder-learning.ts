@@ -19,6 +19,7 @@ import {
   runExperiment,
   compareExperiments,
   noisyPendulum,
+  saveResultsToJson,
   type ExperimentResult,
 } from "./harness";
 import { IntraDomainEncoder } from "../src/geometric/intra-domain-encoder";
@@ -104,6 +105,11 @@ async function main() {
     }
   );
   results.push(resultLearnable);
+
+  // Save results to JSON
+  await saveResultsToJson(resultStatic, "examples/results/04-encoder-learning-static.json");
+  await saveResultsToJson(resultHandCrafted, "examples/results/04-encoder-learning-handcrafted.json");
+  await saveResultsToJson(resultLearnable, "examples/results/04-encoder-learning-learnable.json");
 
   // Compare
   compareExperiments(results);

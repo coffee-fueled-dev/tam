@@ -18,6 +18,7 @@ import {
   compareExperiments,
   dampedSpring1D,
   createMultiHorizonDomain,
+  saveResultsToJson,
   type ExperimentResult,
 } from "./harness";
 
@@ -46,6 +47,13 @@ async function main() {
     });
 
     results.push(result);
+  }
+
+  // Save results to JSON
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i]!;
+    const h = horizons[i]!;
+    await saveResultsToJson(result, `examples/results/02-multi-horizon-${h}step.json`);
   }
 
   // Compare results

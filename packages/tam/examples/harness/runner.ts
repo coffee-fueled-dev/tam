@@ -382,3 +382,55 @@ export function compareExperiments<S>(
 
   console.log();
 }
+
+// ============================================================================
+// Export Utilities
+// ============================================================================
+
+/**
+ * Save experiment result to JSON file.
+ *
+ * Serializes the experiment result (excluding the non-serializable bank)
+ * to a JSON file. Useful for archiving results and later analysis.
+ *
+ * @param result - The experiment result to save
+ * @param filepath - Path to save the JSON file (e.g., "results/01-basic.json")
+ *
+ * @example
+ * ```typescript
+ * const result = await runExperiment("Basic Training", config);
+ * await saveResultsToJson(result, "examples/results/01-basic.json");
+ * ```
+ */
+export async function saveResultsToJson<S>(
+  result: ExperimentResult<S>,
+  filepath: string
+): Promise<void> {
+  // Create serializable result (exclude bank)
+  const serializable = {
+    name: result.name,
+    config: {
+      domain: {
+        name: result.config.domain.name,
+        embeddingDim: result.config.domain.embeddingDim,
+        rawDim: result.config.domain.rawDim,
+      },
+      episodes: result.config.episodes,
+      checkpointEvery: result.config.checkpointEvery,
+      testSize: result.config.testSize,
+      horizons: result.config.horizons,
+      encoder: result.config.encoder,
+      bankConfig: result.config.bankConfig,
+      options: result.config.options,
+    },
+    checkpoints: result.checkpoints,
+    summary: result.summary,
+    timestamp: new Date().toISOString(),
+  };
+
+  // Write to file
+  const json = JSON.stringify(serializable, null, 2);
+  await Bun.write(filepath, json);
+
+  console.log(`✓ Results saved to ${filepath}`);
+}

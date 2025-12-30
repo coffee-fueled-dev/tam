@@ -573,6 +573,56 @@ async function main() {
   console.log("    2. The selection problem is too simple for TAM");
   console.log("    3. TAM selection is better suited for harder domains");
 
+  // Save results to JSON
+  const finalResults = results.map((r) => ({
+    strategy: r.strategy,
+    error: r.curve[r.curve.length - 1]!.error,
+    bindingRate: r.curve[r.curve.length - 1]!.bindingRate,
+    agency: r.curve[r.curve.length - 1]!.agency,
+    portCount: r.curve[r.curve.length - 1]!.portCount,
+  }));
+
+  const bestByError = finalResults.reduce((best, curr) =>
+    curr.error < best.error ? curr : best
+  );
+  const bestByBinding = finalResults.reduce((best, curr) =>
+    curr.bindingRate > best.bindingRate ? curr : best
+  );
+
+  const exportData = {
+    name: "Learned Port Selection Convergence Study",
+    config: {
+      totalEpisodes,
+      checkpointInterval,
+      domain: "1D Damped Spring",
+    },
+    strategies: results.map((r) => ({
+      name: r.strategy,
+      learningCurve: r.curve,
+      finalPerformance: r.curve[r.curve.length - 1],
+    })),
+    summary: {
+      finalResults,
+      bestByError: {
+        strategy: bestByError.strategy,
+        error: bestByError.error,
+      },
+      bestByBinding: {
+        strategy: bestByBinding.strategy,
+        bindingRate: bestByBinding.bindingRate,
+      },
+      tamConverged: tamFinal.error <= bestError * 1.05,
+      tamImprovement: tamImprovement,
+    },
+    timestamp: new Date().toISOString(),
+  };
+
+  await Bun.write(
+    "examples/results/06-learned-port-selection.json",
+    JSON.stringify(exportData, null, 2)
+  );
+  console.log("\n✓ Results saved to examples/results/06-learned-port-selection.json");
+
   // Cleanup
   for (const result of results) {
     result.finalBank.dispose();

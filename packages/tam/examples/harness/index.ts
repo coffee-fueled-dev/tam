@@ -31,7 +31,7 @@ export type {
 } from "./types";
 
 // Runner
-export { runExperiment, compareExperiments } from "./runner";
+export { runExperiment, compareExperiments, saveResultsToJson } from "./runner";
 
 // Standard domains
 export {

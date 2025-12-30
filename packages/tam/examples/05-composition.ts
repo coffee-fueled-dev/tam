@@ -106,19 +106,21 @@ const fullScaleDomain: DomainSpec<{ x: number; v: number }> = {
 // Evaluation by Region
 // ============================================================================
 
+interface RegionResults {
+  small: { error: number; count: number; agency?: number };
+  gap: { error: number; count: number; agency?: number };
+  large: { error: number; count: number; agency?: number };
+}
+
 function evaluateByRegion(
-  predictFn: (state: { x: number; v: number }) => { delta: number[] },
+  predictFn: (state: { x: number; v: number }) => { delta: number[]; agency?: number },
   testStates: Array<{ x: number; v: number }>,
   label: string
-): {
-  small: { error: number; count: number };
-  gap: { error: number; count: number };
-  large: { error: number; count: number };
-} {
-  const results = {
-    small: { error: 0, count: 0 },
-    gap: { error: 0, count: 0 },
-    large: { error: 0, count: 0 },
+): RegionResults {
+  const results: RegionResults = {
+    small: { error: 0, count: 0, agency: 0 },
+    gap: { error: 0, count: 0, agency: 0 },
+    large: { error: 0, count: 0, agency: 0 },
   };
 
   for (const state of testStates) {
@@ -138,32 +140,59 @@ function evaluateByRegion(
 
       // Categorize by region
       const absX = Math.abs(state.x);
+      let region: keyof RegionResults;
       if (absX < 0.5) {
-        results.small.error += error;
-        results.small.count++;
+        region = "small";
       } else if (absX < 1.0) {
-        results.gap.error += error;
-        results.gap.count++;
+        region = "gap";
       } else {
-        results.large.error += error;
-        results.large.count++;
+        region = "large";
+      }
+
+      results[region].error += error;
+      results[region].count++;
+      if (pred.agency !== undefined) {
+        results[region].agency = (results[region].agency || 0) + pred.agency;
       }
     } catch (e) {
       // Skip states that fail
     }
   }
 
-  // Average errors
-  if (results.small.count > 0) results.small.error /= results.small.count;
-  if (results.gap.count > 0) results.gap.error /= results.gap.count;
-  if (results.large.count > 0) results.large.error /= results.large.count;
+  // Average errors and agency
+  for (const region of ["small", "gap", "large"] as const) {
+    if (results[region].count > 0) {
+      results[region].error /= results[region].count;
+      if (results[region].agency !== undefined) {
+        results[region].agency! /= results[region].count;
+      }
+    }
+  }
 
   console.log(`\n${label}:`);
-  console.log(`  Small scale [0, 0.5): ${results.small.error.toFixed(4)} (n=${results.small.count})`);
-  console.log(`  Gap [0.5, 1.0):       ${results.gap.error.toFixed(4)} (n=${results.gap.count})`);
-  console.log(`  Large scale [1.0+):   ${results.large.error.toFixed(4)} (n=${results.large.count})`);
+  console.log(`  Small [0, 0.5):   Error ${results.small.error.toFixed(4)} | Agency ${((results.small.agency || 0) * 100).toFixed(1)}% | n=${results.small.count}`);
+  console.log(`  Gap [0.5, 1.0):   Error ${results.gap.error.toFixed(4)} | Agency ${((results.gap.agency || 0) * 100).toFixed(1)}% | n=${results.gap.count}`);
+  console.log(`  Large [1.0+):     Error ${results.large.error.toFixed(4)} | Agency ${((results.large.agency || 0) * 100).toFixed(1)}% | n=${results.large.count}`);
 
   return results;
+}
+
+// ============================================================================
+// Simple Training (TAM doesn't support incremental checkpointing)
+// ============================================================================
+
+async function trainActor(
+  tam: TAM,
+  domainName: string,
+  domain: DomainSpec<{ x: number; v: number }>,
+  epochs: number
+): Promise<any> {
+  const bank = await tam.learn(domainName, domain, {
+    epochs,
+    samplesPerEpoch: 50,
+    flushFrequency: 20,
+  });
+  return bank;
 }
 
 // ============================================================================
@@ -200,13 +229,8 @@ async function main() {
   console.log("Step 1: Learning Actor A (Small Scale)");
   console.log("─────────────────────────────────────────────────────────");
 
-  const bankA = await tam.learn("small-scale", smallScaleDomain, {
-    epochs: 100,
-    samplesPerEpoch: 50,
-    flushFrequency: 20,
-  });
-
-  console.log(`  Trained: ${bankA.getPortIds().length} ports`);
+  const bankA = await trainActor(tam, "small-scale", smallScaleDomain, 100);
+  console.log(`  ✓ Trained: ${bankA.getPortIds().length} ports`);
 
   // ============================================================================
   // Step 2: Learn Large-Scale Actor
@@ -216,13 +240,8 @@ async function main() {
   console.log("Step 2: Learning Actor B (Large Scale)");
   console.log("─────────────────────────────────────────────────────────");
 
-  const bankB = await tam.learn("large-scale", largeScaleDomain, {
-    epochs: 100,
-    samplesPerEpoch: 50,
-    flushFrequency: 20,
-  });
-
-  console.log(`  Trained: ${bankB.getPortIds().length} ports`);
+  const bankB = await trainActor(tam, "large-scale", largeScaleDomain, 100);
+  console.log(`  ✓ Trained: ${bankB.getPortIds().length} ports`);
 
   // ============================================================================
   // Step 3: Baseline (Full Scale)
@@ -232,13 +251,8 @@ async function main() {
   console.log("Step 3: Baseline (Train from Scratch on Full Scale)");
   console.log("─────────────────────────────────────────────────────────");
 
-  const bankBaseline = await tam.learn("full-scale", fullScaleDomain, {
-    epochs: 100,
-    samplesPerEpoch: 50,
-    flushFrequency: 20,
-  });
-
-  console.log(`  Trained: ${bankBaseline.getPortIds().length} ports`);
+  const bankBaseline = await trainActor(tam, "full-scale", fullScaleDomain, 100);
+  console.log(`  ✓ Trained: ${bankBaseline.getPortIds().length} ports`);
 
   // ============================================================================
   // Step 4: Discover Functors
@@ -313,7 +327,7 @@ async function main() {
   const regionResultsA = evaluateByRegion(
     (state) => {
       const pred = bankA.predictFromState("default", { state, context: {} }, 1)[0];
-      return pred ? { delta: pred.delta } : { delta: [0, 0] };
+      return pred ? { delta: pred.delta, agency: pred.agency } : { delta: [0, 0], agency: 0 };
     },
     testStates,
     "Actor A (Small)"
@@ -323,7 +337,7 @@ async function main() {
   const regionResultsB = evaluateByRegion(
     (state) => {
       const pred = bankB.predictFromState("default", { state, context: {} }, 1)[0];
-      return pred ? { delta: pred.delta } : { delta: [0, 0] };
+      return pred ? { delta: pred.delta, agency: pred.agency } : { delta: [0, 0], agency: 0 };
     },
     testStates,
     "Actor B (Large)"
@@ -333,7 +347,7 @@ async function main() {
   const regionResultsBase = evaluateByRegion(
     (state) => {
       const pred = bankBaseline.predictFromState("default", { state, context: {} }, 1)[0];
-      return pred ? { delta: pred.delta } : { delta: [0, 0] };
+      return pred ? { delta: pred.delta, agency: pred.agency } : { delta: [0, 0], agency: 0 };
     },
     testStates,
     "Baseline (Full)"
@@ -347,6 +361,13 @@ async function main() {
   console.log("  Composed Performance (True Functor Composition)");
   console.log("═══════════════════════════════════════════════════════════\n");
 
+  // Declare composedResults outside block so it's accessible for export
+  let composedResults: {
+    small: { error: number; count: number; aCount: number; bCount: number; atobCount: number; btoaCount: number };
+    gap: { error: number; count: number; aCount: number; bCount: number; atobCount: number; btoaCount: number };
+    large: { error: number; count: number; aCount: number; bCount: number; atobCount: number; btoaCount: number };
+  } | null = null;
+
   if (pathAtoB && pathBtoA) {
     console.log("Strategy: Use ComposedPort to leverage both actors' knowledge\n");
     console.log("  A→B: Actor A uses Actor B's large-scale expertise via functor");
@@ -356,7 +377,7 @@ async function main() {
     const composedAtoB = tam.compose(pathAtoB);
     const composedBtoA = tam.compose(pathBtoA);
 
-    const composedResults = {
+    composedResults = {
       small: { error: 0, count: 0, aCount: 0, bCount: 0, atobCount: 0, btoaCount: 0 },
       gap: { error: 0, count: 0, aCount: 0, bCount: 0, atobCount: 0, btoaCount: 0 },
       large: { error: 0, count: 0, aCount: 0, bCount: 0, atobCount: 0, btoaCount: 0 },
@@ -532,6 +553,99 @@ async function main() {
   console.log(`    - Registered domains: ${tam.listDomains().length}`);
   console.log(`    - Functor attempts: ${tam.getAttemptedPairs().length}`);
   console.log(`    - Successful paths: ${tam.getSuccessfulGraph().size}`);
+
+  // ============================================================================
+  // Export Results
+  // ============================================================================
+
+  console.log("\n─────────────────────────────────────────────────────────");
+  console.log("Exporting Results");
+  console.log("─────────────────────────────────────────────────────────");
+
+  const exportData = {
+    name: "Scale Composition - Coverage Extension",
+    config: {
+      domain: "1D Damped Spring",
+      epochs: 100,
+      actors: {
+        actorA: "Small scale (x ∈ [-0.5, 0.5])",
+        actorB: "Large scale (x ∈ [-2, -1] ∪ [1, 2])",
+        baseline: "Full scale (x ∈ [-2, 2])",
+        gap: "Intermediate (x ∈ [0.5, 1.0]) - UNSEEN",
+      },
+      finalPortCounts: {
+        actorA: bankA.getPortIds().length,
+        actorB: bankB.getPortIds().length,
+        baseline: bankBaseline.getPortIds().length,
+      },
+    },
+    functors: {
+      smallToLarge: pathAtoB
+        ? {
+            found: true,
+            bindingRate: pathAtoB.totalBindingRate,
+            steps: pathAtoB.steps.length,
+          }
+        : { found: false },
+      largeToSmall: pathBtoA
+        ? {
+            found: true,
+            bindingRate: pathBtoA.totalBindingRate,
+            steps: pathBtoA.steps.length,
+          }
+        : { found: false },
+      totalAttempted: attempted.length,
+    },
+    regionalPerformance: {
+      actorA: {
+        small: regionResultsA.small,
+        gap: regionResultsA.gap,
+        large: regionResultsA.large,
+      },
+      actorB: {
+        small: regionResultsB.small,
+        gap: regionResultsB.gap,
+        large: regionResultsB.large,
+      },
+      baseline: {
+        small: regionResultsBase.small,
+        gap: regionResultsBase.gap,
+        large: regionResultsBase.large,
+      },
+      composed: composedResults
+        ? {
+            small: composedResults.small,
+            gap: composedResults.gap,
+            large: composedResults.large,
+          }
+        : null,
+    },
+    summary: {
+      functorsDiscovered: (pathAtoB ? 1 : 0) + (pathBtoA ? 1 : 0),
+      compositionUsed: composedResults
+        ? (composedResults.gap.atobCount || 0) + (composedResults.gap.btoaCount || 0) > 0
+        : false,
+      gapPerformance: composedResults
+        ? {
+            actorA: regionResultsA.gap.error,
+            actorB: regionResultsB.gap.error,
+            baseline: regionResultsBase.gap.error,
+            composed: composedResults.gap.error,
+            improvement:
+              composedResults.gap.error < Math.min(regionResultsA.gap.error, regionResultsB.gap.error)
+                ? ((1 - composedResults.gap.error / Math.min(regionResultsA.gap.error, regionResultsB.gap.error)) * 100).toFixed(1) + "%"
+                : "none",
+          }
+        : null,
+    },
+    timestamp: new Date().toISOString(),
+  };
+
+  await Bun.write(
+    "examples/results/05-composition.json",
+    JSON.stringify(exportData, null, 2)
+  );
+  console.log("✓ Results saved to examples/results/05-composition.json");
 
   // Cleanup
   tam.dispose();
