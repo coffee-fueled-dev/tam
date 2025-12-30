@@ -112,10 +112,17 @@ export interface Port<S, C = unknown> {
   readonly name: string;
 
   /**
-   * Predict top-k outcomes for a situation.
+   * Predict top-k outcomes from a state embedding.
+   * PRIMARY INTERFACE - operates in embedding space.
    * Returns predictions sorted by score (best first).
    */
-  predict(sit: Situation<S, C>, k?: number): Prediction[];
+  predict(stateEmb: Vec, k?: number): Prediction[];
+
+  /**
+   * Predict top-k outcomes for a situation (convenience wrapper).
+   * Encodes the situation then calls predict(embedding).
+   */
+  predictFromState(sit: Situation<S, C>, k?: number): Prediction[];
 
   /**
    * Observe a transition and update the port's model.
@@ -154,8 +161,17 @@ export interface PortBank<S, C = unknown> {
   /** Observe a transition (routes to appropriate port) */
   observe(tr: Transition<S, C>): void;
 
-  /** Get predictions for an action in a situation */
-  predict(action: string, sit: Situation<S, C>, k?: number): Prediction[];
+  /**
+   * Get predictions for an action from a state embedding.
+   * PRIMARY INTERFACE - operates in embedding space.
+   */
+  predict(action: string, stateEmb: Vec, k?: number): Prediction[];
+
+  /**
+   * Get predictions for an action in a situation (convenience wrapper).
+   * Encodes the situation then calls predict(embedding).
+   */
+  predictFromState(action: string, sit: Situation<S, C>, k?: number): Prediction[];
 
   /** Get average agency across all ports */
   getAgency(): number;

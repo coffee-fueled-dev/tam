@@ -37,6 +37,8 @@ import { FixedRefinementPolicy } from "./refinement";
 import { GeometricPort } from "./port";
 import { evaluateBinding } from "./fibration";
 import { generateSpecialistEmbedding } from "./port-functor";
+import type { PortSelectionStrategy } from "./selection";
+import { MaxAgencySelectionStrategy } from "./selection";
 
 export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   // All ports by unique ID
@@ -55,6 +57,9 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   // Shared history and policy
   private readonly history: DefaultBindingHistory;
   private readonly policy: FixedRefinementPolicy;
+
+  // Port selection strategy
+  private readonly selectionStrategy: PortSelectionStrategy<S, C>;
 
   // Dynamic reference volume (calibrated from observed deltas)
   private dynamicReferenceVolume: number;
@@ -84,7 +89,8 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
 
   constructor(
     encoders: Encoders<S, C>,
-    config?: GeometricPortConfigInput
+    config?: GeometricPortConfigInput,
+    selectionStrategy?: PortSelectionStrategy<S, C>
   ) {
     this.enc = encoders;
 
@@ -120,6 +126,11 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       bimodalRatioThreshold: this.cfg.bimodalRatioThreshold,
     });
     this.policy = new FixedRefinementPolicy(this.cfg);
+
+    // Initialize selection strategy (defaults to max-agency)
+    this.selectionStrategy = selectionStrategy ?? new MaxAgencySelectionStrategy({
+      minAlignmentThreshold: this.cfg.minAlignmentThreshold,
+    });
   }
 
   /**
@@ -162,13 +173,12 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   }
 
   /**
-   * Select the best port for an action in a given situation.
-   * Uses agency-based selection: the port with highest agency (narrowest cone)
-   * among those with non-empty cones is chosen.
+   * Select the best port for an action given a state embedding.
+   * Delegates to the configured selection strategy.
    *
    * Returns null if no port is applicable (all have empty cones).
    */
-  selectPort(action: string, sit: Situation<S, C>): GeometricPort<S, C> | null {
+  selectPort(action: string, stateEmb: Vec): GeometricPort<S, C> | null {
     const candidates = this.portsByAction.get(action);
 
     if (!candidates || candidates.length === 0) {
@@ -176,25 +186,15 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       return this.createPort(action);
     }
 
-    // Compute agency for each candidate
-    const withAgency = candidates.map((port) => ({
-      port,
-      agency: port.computeAgencyFor(sit),
-      applicable: port.isApplicable(sit),
-    }));
+    // Delegate to selection strategy
+    const result = this.selectionStrategy.select({
+      action,
+      stateEmb,
+      candidates,
+      history: this.history,
+    });
 
-    // Filter to applicable ports (non-empty cones)
-    const eligible = withAgency.filter(({ applicable }) => applicable);
-
-    if (eligible.length === 0) {
-      // No port applies - return null (caller should handle, e.g., proliferate)
-      return null;
-    }
-
-    // Select max agency (narrowest cone = most specific commitment)
-    return eligible.reduce((best, curr) =>
-      curr.agency > best.agency ? curr : best
-    ).port;
+    return result.port;
   }
 
   /**
@@ -230,8 +230,13 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
    * Observe a transition with agency-based port selection and potential proliferation.
    */
   async observe(tr: Transition<S, C>): Promise<void> {
+    // Encode situation first
+    const stateEmb = this.enc.embedSituation(tr.before);
+    const actualDelta = this.enc.delta(tr.before, tr.after);
+    const situationKey = this.situationToKey(stateEmb);
+
     // 1. Select best port for this situation (agency-based)
-    let port = this.selectPort(tr.action, tr.before);
+    let port = this.selectPort(tr.action, stateEmb);
 
     // Handle case where no port is applicable
     if (!port) {
@@ -242,19 +247,15 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
     // Track for encoder training
     this.lastSelectedPort = port;
 
-    const stateEmb = this.enc.embedSituation(tr.before);
-    const actualDelta = this.enc.delta(tr.before, tr.after);
-    const situationKey = this.situationToKey(stateEmb);
-
     // 2. Update dynamic reference volume
     this.updateReferenceVolume(actualDelta);
 
     // 3. Get cone and evaluate binding
-    const cone = port.getCone(tr.before);
+    const cone = port.getCone(stateEmb);
     const outcome = evaluateBinding(actualDelta, cone);
 
     // 4. Compute and record agency for fiber-based proliferation
-    const agency = port.computeAgencyFor(tr.before);
+    const agency = port.computeAgencyFor(stateEmb);
     this.history.recordAgency(port.id, agency);
 
     // 5. Record binding outcome in history
@@ -403,16 +404,26 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   }
 
   /**
-   * Get predictions for an action in a situation.
+   * Get predictions for an action from a state embedding.
+   * PRIMARY INTERFACE - operates in embedding space.
    * Uses agency-based port selection.
    */
-  predict(action: string, sit: Situation<S, C>, k?: number): Prediction[] {
-    const port = this.selectPort(action, sit);
+  predict(action: string, stateEmb: Vec, k?: number): Prediction[] {
+    const port = this.selectPort(action, stateEmb);
     if (!port) {
       // No applicable port - return empty predictions
       return [];
     }
-    return port.predict(sit, k);
+    return port.predict(stateEmb, k);
+  }
+
+  /**
+   * Get predictions for an action in a situation (convenience wrapper).
+   * Encodes the situation then calls predict(embedding).
+   */
+  predictFromState(action: string, sit: Situation<S, C>, k?: number): Prediction[] {
+    const stateEmb = this.enc.embedSituation(sit);
+    return this.predict(action, stateEmb, k);
   }
 
   /**
@@ -557,6 +568,7 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   dispose(): void {
     this.causalNet.dispose();
     this.commitmentNet.dispose();
+    this.selectionStrategy.dispose?.();
     this.allPorts.clear();
     this.portsByAction.clear();
   }

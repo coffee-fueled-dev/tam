@@ -56,3 +56,13 @@ export {
   type EncoderBridgeConfig,
 } from "./encoder-bridge";
 
+// Port selection strategies
+export {
+  type PortSelectionStrategy,
+  type SelectionContext,
+  type SelectionResult,
+  MaxAgencySelectionStrategy,
+  BindingWeightedSelectionStrategy,
+  RandomSelectionStrategy,
+} from "./selection";
+

@@ -68,20 +68,26 @@ export class ComposedPort {
       intermediates.push({ domain: step.to, embedding: currentEmbedding });
     }
 
-    // Get prediction from target port
-    const targetPortIds = this.targetPortBank.getPortIds();
-    const targetPort = this.targetPortBank.get(targetPortIds[0] || "default");
+    // Get prediction from target port using the transformed embedding directly
+    // This is the key fix: predict() now operates in embedding space!
+    const targetAction = "default"; // Could be parameterized
+    const predictions = this.targetPortBank.predict(targetAction, currentEmbedding, 1);
 
-    // Create a synthetic situation in target domain from embedding
-    // Note: This is a simplified approach - in practice, you'd need
-    // a proper embedding-to-state mapping for the target domain
-    const targetSit = { state: currentEmbedding as unknown, context: {} };
-    const cone = targetPort.getCone(targetSit);
-    const delta = cone.center;
+    if (predictions.length === 0) {
+      // No applicable port - return zero prediction with empty cone
+      return {
+        delta: currentEmbedding.map(() => 0),
+        cone: { center: currentEmbedding.map(() => 0), radius: currentEmbedding.map(() => 0) },
+        intermediates,
+        composedBindingRate: this.path.totalBindingRate,
+      };
+    }
+
+    const prediction = predictions[0]!;
 
     return {
-      delta,
-      cone,
+      delta: prediction.delta,
+      cone: prediction.cone!,
       intermediates,
       composedBindingRate: this.path.totalBindingRate,
     };

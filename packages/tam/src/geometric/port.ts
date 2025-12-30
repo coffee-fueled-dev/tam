@@ -186,7 +186,8 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
   }
 
   /**
-   * Get the cone for a situation (polysemous: depends on situation).
+   * Get the cone for a state embedding (polysemous: depends on situation).
+   * PRIMARY INTERFACE - operates in embedding space.
    *
    * Uses the geometric formula:
    *   radius = aperture × α / (1 + d)
@@ -195,9 +196,7 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
    *   α = alignment (cosine similarity between port and situation)
    *   d = distance (commitment level from CommitmentNet)
    */
-  getCone(sit: Situation<S, C>): Cone {
-    const stateEmb = this.enc.embedSituation(sit);
-
+  getCone(stateEmb: Vec): Cone {
     // Fibration: project to trajectory space (center of cone)
     const center = this.causalNet.predict(stateEmb, this.embedding);
 
@@ -224,11 +223,21 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
   }
 
   /**
-   * Predict outcomes for a situation.
+   * Get the cone for a situation (convenience wrapper).
+   * Encodes the situation then calls getCone(embedding).
+   */
+  getConeFromState(sit: Situation<S, C>): Cone {
+    const stateEmb = this.enc.embedSituation(sit);
+    return this.getCone(stateEmb);
+  }
+
+  /**
+   * Predict outcomes from a state embedding.
+   * PRIMARY INTERFACE - operates in embedding space.
    * Returns the predicted trajectory as a single prediction with agency.
    */
-  predict(sit: Situation<S, C>, _k?: number): Prediction[] {
-    const cone = this.getCone(sit);
+  predict(stateEmb: Vec, _k?: number): Prediction[] {
+    const cone = this.getCone(stateEmb);
     const agency = this.computeAgency(cone);
 
     return [
@@ -236,8 +245,18 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
         delta: cone.center,
         score: 0, // Single mode
         agency,
+        cone,
       },
     ];
+  }
+
+  /**
+   * Predict outcomes for a situation (convenience wrapper).
+   * Encodes the situation then calls predict(embedding).
+   */
+  predictFromState(sit: Situation<S, C>, k?: number): Prediction[] {
+    const stateEmb = this.enc.embedSituation(sit);
+    return this.predict(stateEmb, k);
   }
 
   /**
@@ -252,8 +271,8 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
     const actualDelta = this.enc.delta(tr.before, tr.after);
     const situationKey = this.situationToKey(stateEmb);
 
-    // 1. Get cone (commitment)
-    const cone = this.getCone(tr.before);
+    // 1. Get cone (commitment) - use embedding directly
+    const cone = this.getCone(stateEmb);
     this.lastCone = cone;
     this.lastSituation = tr.before;
 
@@ -316,21 +335,30 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
    */
   getAgency(): number {
     if (!this.lastSituation) return 0;
-    return this.computeAgencyFor(this.lastSituation);
+    return this.computeAgencyForState(this.lastSituation);
   }
 
   /**
-   * Compute agency for ANY situation (not just last observed).
-   * This enables port selection based on agency for the current situation.
+   * Compute agency for an embedding (not just last observed).
+   * PRIMARY INTERFACE - operates in embedding space.
    *
    * Agency = 1 - (cone volume / reference volume)
    * High agency = narrow cone = specific commitment
    * Low agency = wide cone = vague commitment
    * Zero agency = empty cone = port doesn't apply
    */
-  computeAgencyFor(sit: Situation<S, C>): number {
-    const cone = this.getCone(sit);
+  computeAgencyFor(stateEmb: Vec): number {
+    const cone = this.getCone(stateEmb);
     return this.computeAgency(cone);
+  }
+
+  /**
+   * Compute agency for a situation (convenience wrapper).
+   * Encodes the situation then calls computeAgencyFor(embedding).
+   */
+  computeAgencyForState(sit: Situation<S, C>): number {
+    const stateEmb = this.enc.embedSituation(sit);
+    return this.computeAgencyFor(stateEmb);
   }
 
   /**
@@ -393,12 +421,20 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
   }
 
   /**
-   * Check if this port is applicable (non-empty cone) for a situation.
+   * Check if this port is applicable (non-empty cone) for an embedding.
+   * PRIMARY INTERFACE - operates in embedding space.
    */
-  isApplicable(sit: Situation<S, C>): boolean {
-    const stateEmb = this.enc.embedSituation(sit);
+  isApplicable(stateEmb: Vec): boolean {
     const alignment = this.computeAlignment(stateEmb);
     return alignment >= this.cfg.minAlignmentThreshold;
+  }
+
+  /**
+   * Check if this port is applicable for a situation (convenience wrapper).
+   */
+  isApplicableForState(sit: Situation<S, C>): boolean {
+    const stateEmb = this.enc.embedSituation(sit);
+    return this.isApplicable(stateEmb);
   }
 
   /**
