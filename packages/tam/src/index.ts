@@ -103,6 +103,20 @@ export {
   // Port and bank
   GeometricPort,
   GeometricPortBank,
+  // Port functor discovery
+  PortFunctor,
+  discoverPortFunctor,
+  generateSpecialistEmbedding,
+  type PortFunctorDiscoveryConfig,
+  defaultPortFunctorConfig,
+  // Intra-domain encoder learning
+  IntraDomainEncoder,
+  createLearnableEncoder,
+  type IntraDomainEncoderConfig,
+  defaultIntraDomainEncoderConfig,
+  EncoderBridge,
+  createEncoderBridge,
+  type EncoderBridgeConfig,
 } from "./geometric";
 
 // ============================================================================

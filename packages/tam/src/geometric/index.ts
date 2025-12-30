@@ -42,3 +42,17 @@ export {
   defaultPortFunctorConfig,
 } from "./port-functor";
 
+// Intra-domain encoder learning
+export {
+  IntraDomainEncoder,
+  createLearnableEncoder,
+  type IntraDomainEncoderConfig,
+  defaultIntraDomainEncoderConfig,
+} from "./intra-domain-encoder";
+
+export {
+  EncoderBridge,
+  createEncoderBridge,
+  type EncoderBridgeConfig,
+} from "./encoder-bridge";
+

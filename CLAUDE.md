@@ -194,6 +194,66 @@ Instead of detecting bimodal failures:
 3. Spawn specialist port (not triggered by individual failures)
 4. Cooldown period prevents rapid proliferation
 
+### Intra-Domain Encoder Learning (NEW)
+**New feature**: Learn encoder within domain via end-to-end backprop through binding objective.
+
+Instead of hand-crafting embedders, learn `E: S_raw → X` such that:
+- Binding succeeds: trajectories fall within predicted cones
+- Agency is high: cones are narrow (informative predictions)
+- Representation is smooth: temporal coherence
+
+**Architecture**:
+```
+raw_state → IntraDomainEncoder → embedding → CausalNet/CommitmentNet → cone
+                                                                          ↓
+                                                       binding_loss + agency_loss
+                                                                          ↓
+                                                               backprop to encoder
+```
+
+**Differentiable losses**:
+- `L_binding`: Soft distance from trajectory to cone (smooth version of discrete predicate)
+- `L_agency`: -log(agency) = log(vol(cone)) (encourages narrow cones)
+- `L_smoothness`: ||E(s_t) - E(s_{t-1})||² (temporal coherence)
+
+**Benefits**:
+- **No hand-crafted features**: System discovers relevant features automatically
+- **Adaptive compression**: Learns minimal representation that preserves predictability
+- **Noise robustness**: Learns to ignore irrelevant features
+- **Functor inversion**: Same principle as composition-based learning, applied internally
+
+**Configuration**:
+```typescript
+{
+  enableEncoderLearning: true,     // Enable joint encoder training
+  encoderRawDim: 10,               // Raw feature dimension
+  encoderHiddenSizes: [32, 16],    // Encoder network architecture
+  encoderLearningRate: 0.001,      // Lower than port networks
+  encoderAgencyWeight: 0.1,        // Encourage narrow cones
+  encoderSmoothnessWeight: 0.05,   // Temporal coherence
+}
+```
+
+**Usage with EncoderBridge**:
+```typescript
+const learnableEncoder = new IntraDomainEncoder({
+  rawDim: 10,
+  embeddingDim: 4,
+});
+
+const bridge = createEncoderBridge({
+  extractRaw: (state) => [state.x, state.y, ...allFeatures],
+  learnableEncoder,
+});
+
+const bank = new GeometricPortBank(bridge.encoders, config);
+// Encoder learns during training via joint optimization
+```
+
+**Experiment**: See `examples/experiments/intra-encoder.ts`
+
+**Status**: Architecture implemented, full integration pending
+
 ### Port Functor Discovery (Intra-Domain Composition)
 **New feature**: Ports within a domain share a learned manifold, enabling systematic transforms:
 

@@ -422,6 +422,38 @@ export interface GeometricPortConfig {
    */
   portFunctorMaxEpochs: number;
 
+  // --- Intra-Domain Encoder Learning ---
+  /**
+   * Enable learnable encoder within domain.
+   * When true and rawDim is specified, learns encoder via end-to-end backprop
+   * through binding objective. Otherwise uses static hand-crafted encoder.
+   * Default: false (use static encoder).
+   */
+  enableEncoderLearning: boolean;
+  /**
+   * Dimension of raw state features (before encoding).
+   * Required if enableEncoderLearning is true. If not specified, encoder learning disabled.
+   */
+  encoderRawDim?: number;
+  /**
+   * Hidden layer sizes for learnable encoder.
+   */
+  encoderHiddenSizes: number[];
+  /**
+   * Learning rate for encoder (typically lower than port networks).
+   */
+  encoderLearningRate: number;
+  /**
+   * Weight for agency regularization in encoder loss.
+   * Encourages encoder to produce embeddings that enable narrow cones.
+   */
+  encoderAgencyWeight: number;
+  /**
+   * Weight for temporal smoothness in encoder loss.
+   * Encourages consecutive states to have similar embeddings.
+   */
+  encoderSmoothnessWeight: number;
+
   // --- Legacy (deprecated, kept for backward compatibility) ---
   /** @deprecated Use proliferationMinSamples instead */
   minFailuresForBimodal: number;
@@ -466,6 +498,14 @@ export const defaultGeometricPortConfig: GeometricPortConfig = {
   enablePortFunctors: false, // Off by default; use random perturbation
   portFunctorTolerance: 0.3, // Accept if RMSE < 0.3
   portFunctorMaxEpochs: 50, // Quick search in learned space
+
+  // Intra-domain encoder learning
+  enableEncoderLearning: false, // Off by default; use static encoder
+  encoderRawDim: undefined, // Must be specified to enable
+  encoderHiddenSizes: [32, 16], // Encoder network architecture
+  encoderLearningRate: 0.001, // Lower than port networks (0.01)
+  encoderAgencyWeight: 0.1, // Encourage narrow cones
+  encoderSmoothnessWeight: 0.05, // Temporal coherence
 
   // Legacy (deprecated)
   minFailuresForBimodal: 20,

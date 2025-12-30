@@ -79,6 +79,9 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
     randomBased: 0,
   };
 
+  // Track last selected port for encoder training
+  private lastSelectedPort: GeometricPort<S, C> | null = null;
+
   constructor(
     encoders: Encoders<S, C>,
     config?: GeometricPortConfigInput
@@ -235,6 +238,9 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       // Create a new port for this action with a fresh embedding
       port = this.createPort(tr.action);
     }
+
+    // Track for encoder training
+    this.lastSelectedPort = port;
 
     const stateEmb = this.enc.embedSituation(tr.before);
     const actualDelta = this.enc.delta(tr.before, tr.after);
@@ -476,6 +482,27 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   }
 
   /**
+   * Get the CausalNet instance (for encoder training integration).
+   */
+  getCausalNet(): CausalNet {
+    return this.causalNet;
+  }
+
+  /**
+   * Get the CommitmentNet instance (for encoder training integration).
+   */
+  getCommitmentNet(): CommitmentNet {
+    return this.commitmentNet;
+  }
+
+  /**
+   * Get the last selected port (for encoder training integration).
+   */
+  getLastSelectedPort(): GeometricPort<S, C> | null {
+    return this.lastSelectedPort;
+  }
+
+  /**
    * Flush all buffered training data.
    */
   flush(): void {
@@ -508,6 +535,20 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       commitmentNet: this.commitmentNet.snapshot(),
       history: this.history.snapshot(),
     };
+  }
+
+  /**
+   * Get all ports (for diagnostics and experiments).
+   */
+  getAllPorts(): GeometricPort<S, C>[] {
+    return Array.from(this.allPorts.values());
+  }
+
+  /**
+   * Get port functor statistics (for diagnostics and experiments).
+   */
+  getPortFunctorStats(): typeof this.portFunctorStats {
+    return { ...this.portFunctorStats };
   }
 
   /**
