@@ -21,6 +21,7 @@ export {
   type Transition,
   type Encoders,
   type Prediction,
+  type MultiModalPrediction,
   type Port,
   type PortBank,
   // Geometric port types
@@ -91,6 +92,7 @@ export {
   CommitmentNet,
   // Fibration utilities
   assembleCone,
+  assembleConeWithCovariance,
   evaluateBinding,
   isInNarrowZone,
   coneVolume,

@@ -36,6 +36,7 @@ import { DefaultBindingHistory } from "./history";
 import { FixedRefinementPolicy } from "./refinement";
 import { GeometricPort } from "./port";
 import { evaluateBinding } from "./fibration";
+import { generateSpecialistEmbedding } from "./port-functor";
 
 export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   // All ports by unique ID
@@ -62,9 +63,21 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   // Proliferation tracking
   private proliferationPending: Array<{
     parentId: string;
-    situation: Situation<S, C>;
-    trajectory: Vec;
   }> = [];
+
+  // Track recent failures per port for functor discovery
+  private recentFailures = new Map<
+    string,
+    Array<{ situationEmb: Vec; trajectory: Vec }>
+  >();
+  private readonly maxFailuresPerPort = 20;
+
+  // Port functor statistics (for diagnostics)
+  private portFunctorStats = {
+    totalProliferations: 0,
+    functorBased: 0,
+    randomBased: 0,
+  };
 
   constructor(
     encoders: Encoders<S, C>,
@@ -213,7 +226,7 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   /**
    * Observe a transition with agency-based port selection and potential proliferation.
    */
-  observe(tr: Transition<S, C>): void {
+  async observe(tr: Transition<S, C>): Promise<void> {
     // 1. Select best port for this situation (agency-based)
     let port = this.selectPort(tr.action, tr.before);
 
@@ -241,11 +254,19 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
     // 5. Record binding outcome in history
     this.history.record(port.id, situationKey, outcome);
 
+    // 6. Record calibration diagnostics
+    // Normalized residual: distance from center / radius
+    const normalizedDistance = this.computeNormalizedDistance(actualDelta, cone);
+    this.history.recordNormalizedResidual(port.id, normalizedDistance);
+    this.history.recordAgencyBindingPair(port.id, agency, outcome.success);
+
     if (!outcome.success) {
       this.history.recordFailureTrajectory(port.id, actualDelta);
+      // Also record for port functor discovery
+      this.recordRecentFailure(port.id, stateEmb, actualDelta);
     }
 
-    // 6. Decide refinement action
+    // 7. Decide refinement action
     const action = this.policy.decide(
       outcome,
       port.id,
@@ -253,9 +274,9 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       this.history
     );
 
-    // 7. Handle proliferation separately
+    // 8. Handle proliferation separately
     if (action === "proliferate") {
-      this.scheduleProliferation(port.id, tr.before, actualDelta);
+      this.scheduleProliferation(port.id);
       // Record that proliferation occurred (for cooldown)
       this.history.recordProliferation(port.id);
       // Still train CausalNet on the observation
@@ -265,45 +286,87 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       port.observe(tr);
     }
 
-    // 8. Process pending proliferations
-    this.processProliferations();
+    // 9. Process pending proliferations
+    await this.processProliferations();
+  }
+
+  /**
+   * Record a recent failure for port functor discovery.
+   */
+  private recordRecentFailure(
+    portId: string,
+    situationEmb: Vec,
+    trajectory: Vec
+  ): void {
+    let failures = this.recentFailures.get(portId);
+    if (!failures) {
+      failures = [];
+      this.recentFailures.set(portId, failures);
+    }
+
+    failures.push({ situationEmb: [...situationEmb], trajectory: [...trajectory] });
+
+    // Keep only recent failures
+    if (failures.length > this.maxFailuresPerPort) {
+      failures.shift();
+    }
   }
 
   /**
    * Schedule a new port to be created from proliferation.
    */
-  private scheduleProliferation(
-    parentId: string,
-    situation: Situation<S, C>,
-    trajectory: Vec
-  ): void {
-    this.proliferationPending.push({
-      parentId,
-      situation,
-      trajectory,
-    });
+  private scheduleProliferation(parentId: string): void {
+    this.proliferationPending.push({ parentId });
   }
 
   /**
    * Process pending proliferations (create new specialist ports).
    * New ports share the SAME action as parent, but have different embeddings.
+   *
+   * Uses hybrid approach:
+   * 1. Try functor discovery if enabled and failures are structured
+   * 2. Fall back to random perturbation otherwise
    */
-  private processProliferations(): void {
-    for (const { parentId, situation, trajectory } of this.proliferationPending) {
+  private async processProliferations(): Promise<void> {
+    for (const { parentId } of this.proliferationPending) {
       const parent = this.allPorts.get(parentId);
       if (!parent) continue;
 
-      // Create new port with perturbed embedding (same action, different ID)
-      const newEmbedding = parent.embedding.map(
-        (v) => v + (Math.random() - 0.5) * 0.2
-      );
+      // Get recent failures for this port
+      const failures = this.recentFailures.get(parentId) ?? [];
+
+      // Hybrid approach: try functor discovery, fallback to random
+      const { embedding: newEmbedding, usedFunctor } =
+        await generateSpecialistEmbedding(
+          parent.embedding,
+          failures,
+          this.causalNet,
+          this.cfg.enablePortFunctors,
+          {
+            tolerance: this.cfg.portFunctorTolerance,
+            maxEpochs: this.cfg.portFunctorMaxEpochs,
+            minSamples: 5,
+          }
+        );
+
+      // Track statistics
+      this.portFunctorStats.totalProliferations++;
+      if (usedFunctor) {
+        this.portFunctorStats.functorBased++;
+      } else {
+        this.portFunctorStats.randomBased++;
+      }
 
       // New port shares same action (will compete with parent via agency)
       const newPort = this.createPort(parent.action, newEmbedding, parent.aperture);
 
-      // Train the new port on the triggering trajectory
-      const stateEmb = this.enc.embedSituation(situation);
-      this.causalNet.observe(stateEmb, newEmbedding, trajectory);
+      // Train the new port on recent failures
+      for (const { situationEmb, trajectory } of failures.slice(0, 5)) {
+        this.causalNet.observe(situationEmb, newEmbedding, trajectory);
+      }
+
+      // Clear failures for this port (new port will handle them)
+      this.recentFailures.delete(parentId);
     }
 
     this.proliferationPending = [];
@@ -314,6 +377,23 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
    */
   private situationToKey(stateEmb: Vec): string {
     return stateEmb.map((v) => Math.round(v * 10) / 10).join(",");
+  }
+
+  /**
+   * Compute normalized distance for calibration tracking.
+   * This is the same distance used in evaluateBinding but as a raw number.
+   */
+  private computeNormalizedDistance(trajectory: Vec, cone: { center: Vec; radius: Vec }): number {
+    if (trajectory.length !== cone.center.length) return Infinity;
+
+    let sumSq = 0;
+    for (let i = 0; i < trajectory.length; i++) {
+      const diff = trajectory[i]! - cone.center[i]!;
+      const r = Math.max(cone.radius[i]!, 1e-8);
+      sumSq += (diff / r) ** 2;
+    }
+
+    return Math.sqrt(sumSq / trajectory.length);
   }
 
   /**
@@ -376,6 +456,26 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   }
 
   /**
+   * Get calibration diagnostics for all ports.
+   * Useful for checking if agency is actually predictive of binding success.
+   */
+  getCalibrationDiagnostics(): Record<string, ReturnType<typeof this.history.getCalibrationDiagnostics>> {
+    const result: Record<string, ReturnType<typeof this.history.getCalibrationDiagnostics>> = {};
+    for (const portId of this.allPorts.keys()) {
+      result[portId] = this.history.getCalibrationDiagnostics(portId);
+    }
+    return result;
+  }
+
+  /**
+   * Get port functor statistics.
+   * Shows how many proliferations used functor discovery vs random perturbation.
+   */
+  getPortFunctorStats(): typeof this.portFunctorStats {
+    return { ...this.portFunctorStats };
+  }
+
+  /**
    * Flush all buffered training data.
    */
   flush(): void {
@@ -402,6 +502,7 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       totalAgency: this.getAgency(),
       referenceVolume: this.dynamicReferenceVolume,
       useDynamicReference: this.cfg.useDynamicReference,
+      portFunctorStats: this.portFunctorStats,
       portsByAction,
       causalNet: this.causalNet.snapshot(),
       commitmentNet: this.commitmentNet.snapshot(),

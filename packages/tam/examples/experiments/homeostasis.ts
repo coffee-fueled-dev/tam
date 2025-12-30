@@ -9,7 +9,12 @@
  * A crystallized model maximizes this across diverse in-domain situations.
  */
 
-import { TAM, GeometricPortBank, type DomainSpec } from "../../src";
+import {
+  TAM,
+  GeometricPortBank,
+  evaluateBinding,
+  type DomainSpec,
+} from "../../src";
 import type { Vec } from "../../src/vec";
 
 // ============================================================================
@@ -135,7 +140,8 @@ async function testDomain<S>(
     agency: results.reduce((s, r) => s + r.agency, 0) / results.length,
     bindingRate:
       results.filter((r) => r.bindingSuccess).length / results.length,
-    homeostasis: results.reduce((s, r) => s + r.homeostasis, 0) / results.length,
+    homeostasis:
+      results.reduce((s, r) => s + r.homeostasis, 0) / results.length,
   });
 
   const inSummary = summarize(inDomain);
@@ -185,11 +191,9 @@ function testSituations<S>(
     const afterEmb = embedder(after);
     const actualDelta = afterEmb.map((a, j) => a - beforeEmb[j]!);
 
-    // Check if actual delta is within predicted cone
-    const bindingSuccess = actualDelta.every((d, j) => {
-      const dist = Math.abs(d - cone.center[j]!);
-      return dist <= cone.radius[j]!;
-    });
+    // Use canonical binding predicate (ellipsoid distance, same as fibration.ts)
+    const bindingOutcome = evaluateBinding(actualDelta, cone);
+    const bindingSuccess = bindingOutcome.success;
 
     results.push({
       situation: stateToString(before),
@@ -279,7 +283,9 @@ async function main() {
   console.log("=".repeat(70));
   console.log();
   console.log("Part 1: In-domain vs Out-of-domain performance");
-  console.log("Part 2: Online adaptation - does the model learn from failures?");
+  console.log(
+    "Part 2: Online adaptation - does the model learn from failures?"
+  );
   console.log();
 
   const TRAIN_EPOCHS = 300;
@@ -301,12 +307,16 @@ async function main() {
     console.log("PART 1: Initial Performance");
     console.log("                    Agency    BindingRate   Homeostasis");
     console.log(
-      `  In-Domain:        ${(s.inDomainAgency * 100).toFixed(1).padStart(5)}%` +
+      `  In-Domain:        ${(s.inDomainAgency * 100)
+        .toFixed(1)
+        .padStart(5)}%` +
         `      ${(s.inDomainBindingRate * 100).toFixed(1).padStart(5)}%` +
         `        ${(s.inDomainHomeostasis * 100).toFixed(1).padStart(5)}%`
     );
     console.log(
-      `  Out-of-Domain:    ${(s.outOfDomainAgency * 100).toFixed(1).padStart(5)}%` +
+      `  Out-of-Domain:    ${(s.outOfDomainAgency * 100)
+        .toFixed(1)
+        .padStart(5)}%` +
         `      ${(s.outOfDomainBindingRate * 100).toFixed(1).padStart(5)}%` +
         `        ${(s.outOfDomainHomeostasis * 100).toFixed(1).padStart(5)}%`
     );
@@ -330,25 +340,32 @@ async function main() {
     );
 
     console.log(
-      `  Before adaptation: Agency = ${(adaptation.agencyBefore * 100).toFixed(1)}%, ` +
-        `Binding = ${(adaptation.bindingRateBefore * 100).toFixed(1)}%`
+      `  Before adaptation: Agency = ${(adaptation.agencyBefore * 100).toFixed(
+        1
+      )}%, ` + `Binding = ${(adaptation.bindingRateBefore * 100).toFixed(1)}%`
     );
     console.log(
-      `  After adaptation:  Agency = ${(adaptation.agencyAfter * 100).toFixed(1)}%, ` +
-        `Binding = ${(adaptation.bindingRateAfter * 100).toFixed(1)}%`
+      `  After adaptation:  Agency = ${(adaptation.agencyAfter * 100).toFixed(
+        1
+      )}%, ` + `Binding = ${(adaptation.bindingRateAfter * 100).toFixed(1)}%`
     );
 
     const agencyDelta = adaptation.agencyAfter - adaptation.agencyBefore;
-    const bindingDelta = adaptation.bindingRateAfter - adaptation.bindingRateBefore;
+    const bindingDelta =
+      adaptation.bindingRateAfter - adaptation.bindingRateBefore;
 
     console.log();
     if (bindingDelta > 0.1) {
       console.log("  ✓ Model adapted: Binding rate improved after exposure");
     }
     if (agencyDelta < -0.1 && adaptation.bindingRateAfter < 0.5) {
-      console.log("  ✓ Model widened cones: Agency decreased (epistemic humility)");
+      console.log(
+        "  ✓ Model widened cones: Agency decreased (epistemic humility)"
+      );
     } else if (agencyDelta > 0 && adaptation.bindingRateAfter > 0.5) {
-      console.log("  ✓ Model crystallized: Agency increased with better binding");
+      console.log(
+        "  ✓ Model crystallized: Agency increased with better binding"
+      );
     } else if (Math.abs(agencyDelta) < 0.1) {
       console.log("  ~ Agency stable during adaptation");
     }
@@ -367,9 +384,13 @@ async function main() {
   console.log("=".repeat(70));
   console.log();
   console.log("TAM is an online learning framework. What matters:");
-  console.log("  1. Initial OOD confidence is fine (hasn't been proven wrong yet)");
+  console.log(
+    "  1. Initial OOD confidence is fine (hasn't been proven wrong yet)"
+  );
   console.log("  2. After failures, model should adapt:");
-  console.log("     - Widen cones (lower agency) if dynamics are unpredictable");
+  console.log(
+    "     - Widen cones (lower agency) if dynamics are unpredictable"
+  );
   console.log("     - Narrow cones (higher agency) once dynamics are learned");
   console.log("  3. Homeostasis = high agency + high binding in steady state");
   console.log();
@@ -378,6 +399,3 @@ async function main() {
 }
 
 main().catch(console.error);
-
-main().catch(console.error);
-

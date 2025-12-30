@@ -204,8 +204,24 @@ export interface CompositionPath {
   /** Product of individual binding rates */
   totalBindingRate: number;
 
+  /**
+   * Commutativity score: how well this path agrees with alternative paths.
+   * 0-1 scale: 1 = perfectly commutative with alternatives, 0 = disagrees.
+   *
+   * High commutativity is a strong signal of Logical Locality:
+   * if Scale → Shift and Shift → Scale produce identical results,
+   * the model has captured true compositional structure.
+   */
+  commutativityScore?: number;
+
   /** Human-readable description */
   describe(): string;
+
+  /**
+   * Quality score combining binding rate and commutativity.
+   * Higher = more trustworthy composition.
+   */
+  getQualityScore?(): number;
 }
 
 /**

@@ -64,6 +64,31 @@ export interface Prediction {
 
   /** Agency: how specific/committed this prediction is (0 = uncertain, 1 = certain) */
   agency: number;
+
+  /** Optional: the full cone for this prediction mode */
+  cone?: Cone;
+
+  /** Optional: mode index for multi-modal predictions */
+  modeIndex?: number;
+}
+
+/**
+ * Multi-modal prediction: a mixture of cones representing "either-or" outcomes.
+ * For ARC-style tasks where one action might have distinct valid outcomes
+ * (e.g., object could move OR change color).
+ */
+export interface MultiModalPrediction {
+  /** Individual modes, each with a weight (mixing coefficient) */
+  modes: Array<{
+    prediction: Prediction;
+    weight: number; // Mixing coefficient, sums to 1 across modes
+  }>;
+
+  /** Total agency across all modes (weighted average) */
+  totalAgency: number;
+
+  /** Entropy of the mode distribution (high = uncertain which mode) */
+  modeEntropy: number;
 }
 
 // ============================================================================
@@ -149,12 +174,29 @@ export interface PortBank<S, C = unknown> {
 /**
  * A cone represents a committed tolerance region in trajectory space.
  * The actor commits to accepting trajectories within this cone.
+ *
+ * Supports both isotropic (scalar radius) and anisotropic (covariance) forms.
  */
 export interface Cone {
   /** Center of the cone (predicted trajectory from CausalNet) */
   center: Vec;
-  /** Per-dimension radius (tolerance from CommitmentNet) */
+
+  /** Per-dimension radius (tolerance from CommitmentNet) - isotropic version */
   radius: Vec;
+
+  /**
+   * Optional: Full covariance matrix for ellipsoidal cones.
+   * Allows agent to be "committed" on some axes while "uncommitted" on others.
+   * Stored as flattened lower-triangular Cholesky factor for efficiency.
+   * If present, radius is ignored and covariance is used.
+   */
+  covariance?: Vec; // Flattened lower-triangular Cholesky factor
+
+  /**
+   * Optional: Precision matrix (inverse covariance) for efficient Mahalanobis distance.
+   * If present, used directly instead of inverting covariance.
+   */
+  precision?: Vec; // Flattened precision matrix
 }
 
 /**
@@ -361,6 +403,25 @@ export interface GeometricPortConfig {
    */
   proliferationCooldown: number;
 
+  // --- Port Functor Discovery (Intra-Domain Composition) ---
+  /**
+   * Enable port functor discovery for structured proliferation.
+   * When true, attempts to learn systematic transformations between ports
+   * instead of using random perturbation. Falls back to random if discovery fails.
+   * Default: false (use random perturbation).
+   */
+  enablePortFunctors: boolean;
+  /**
+   * Error tolerance for accepting a discovered port functor.
+   * Functor is accepted if RMSE < tolerance when mapping parent → target embedding.
+   */
+  portFunctorTolerance: number;
+  /**
+   * Maximum training epochs for port functor discovery.
+   * Since ports are already in learned space, this can be relatively small.
+   */
+  portFunctorMaxEpochs: number;
+
   // --- Legacy (deprecated, kept for backward compatibility) ---
   /** @deprecated Use proliferationMinSamples instead */
   minFailuresForBimodal: number;
@@ -400,6 +461,11 @@ export const defaultGeometricPortConfig: GeometricPortConfig = {
   proliferationAgencyThreshold: 0.3, // Proliferate if agency consistently below 30%
   proliferationMinSamples: 20, // Need enough data before deciding
   proliferationCooldown: 50, // Samples between proliferations
+
+  // Port functor discovery
+  enablePortFunctors: false, // Off by default; use random perturbation
+  portFunctorTolerance: 0.3, // Accept if RMSE < 0.3
+  portFunctorMaxEpochs: 50, // Quick search in learned space
 
   // Legacy (deprecated)
   minFailuresForBimodal: 20,

@@ -23,6 +23,9 @@ interface PortHistory {
   recentAgencies: number[]; // Rolling window of agency values
   totalSamples: number; // Total observations for this port
   lastProliferationSample: number; // Sample count at last proliferation
+  // Calibration diagnostics
+  normalizedResiduals: number[]; // Rolling window of (τ-center)/radius magnitudes
+  agencyBindingPairs: Array<{ agency: number; success: boolean }>; // For calibration curve
 }
 
 export class DefaultBindingHistory implements BindingHistory {
@@ -64,6 +67,8 @@ export class DefaultBindingHistory implements BindingHistory {
         recentAgencies: [],
         totalSamples: 0,
         lastProliferationSample: 0,
+        normalizedResiduals: [],
+        agencyBindingPairs: [],
       };
       this.history.set(portId, ph);
     }
@@ -277,6 +282,122 @@ export class DefaultBindingHistory implements BindingHistory {
     return samplesSinceProliferation < cooldownPeriod;
   }
 
+  // ============================================================================
+  // Calibration Diagnostics
+  // ============================================================================
+
+  /**
+   * Record a normalized residual for calibration tracking.
+   * The normalized residual is ||(τ - center) / radius|| - if calibrated,
+   * this should have a consistent distribution (centered around 0.5 for well-calibrated).
+   */
+  recordNormalizedResidual(portId: string, normalizedDistance: number): void {
+    const ph = this.getPortHistory(portId);
+    ph.normalizedResiduals.push(normalizedDistance);
+
+    // Trim to window size
+    if (ph.normalizedResiduals.length > this.agencyWindowSize * 2) {
+      ph.normalizedResiduals.shift();
+    }
+  }
+
+  /**
+   * Record an agency-binding pair for calibration curve analysis.
+   * Allows computing "if agency = X, what's the actual binding rate?"
+   */
+  recordAgencyBindingPair(portId: string, agency: number, success: boolean): void {
+    const ph = this.getPortHistory(portId);
+    ph.agencyBindingPairs.push({ agency, success });
+
+    // Trim to window size
+    if (ph.agencyBindingPairs.length > this.agencyWindowSize * 4) {
+      ph.agencyBindingPairs.shift();
+    }
+  }
+
+  /**
+   * Get calibration diagnostics for a port.
+   * Returns statistics about how well agency predicts binding success.
+   */
+  getCalibrationDiagnostics(portId: string): {
+    meanNormalizedResidual: number;
+    stdNormalizedResidual: number;
+    coverageRate: number; // % of residuals <= 1 (inside cone)
+    agencyBindingCorrelation: number; // Higher = agency predicts binding well
+    calibrationBuckets: Array<{ agencyRange: string; bindingRate: number; count: number }>;
+  } {
+    const ph = this.history.get(portId);
+    if (!ph) {
+      return {
+        meanNormalizedResidual: 0,
+        stdNormalizedResidual: 0,
+        coverageRate: 0,
+        agencyBindingCorrelation: 0,
+        calibrationBuckets: [],
+      };
+    }
+
+    // Normalized residual statistics
+    const residuals = ph.normalizedResiduals;
+    const n = residuals.length;
+    const mean = n > 0 ? residuals.reduce((s, r) => s + r, 0) / n : 0;
+    const variance = n > 1
+      ? residuals.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1)
+      : 0;
+    const std = Math.sqrt(variance);
+    const coverageRate = n > 0
+      ? residuals.filter((r) => r <= 1).length / n
+      : 0;
+
+    // Agency-binding calibration buckets
+    const buckets = [
+      { min: 0, max: 0.2, label: "0-20%", successes: 0, count: 0 },
+      { min: 0.2, max: 0.4, label: "20-40%", successes: 0, count: 0 },
+      { min: 0.4, max: 0.6, label: "40-60%", successes: 0, count: 0 },
+      { min: 0.6, max: 0.8, label: "60-80%", successes: 0, count: 0 },
+      { min: 0.8, max: 1.0, label: "80-100%", successes: 0, count: 0 },
+    ];
+
+    for (const { agency, success } of ph.agencyBindingPairs) {
+      for (const bucket of buckets) {
+        if (agency >= bucket.min && agency < bucket.max) {
+          bucket.count++;
+          if (success) bucket.successes++;
+          break;
+        }
+      }
+    }
+
+    const calibrationBuckets = buckets.map((b) => ({
+      agencyRange: b.label,
+      bindingRate: b.count > 0 ? b.successes / b.count : 0,
+      count: b.count,
+    }));
+
+    // Simple correlation: do higher agency buckets have higher binding rates?
+    const bucketRates = calibrationBuckets
+      .filter((b) => b.count >= 3) // Need enough samples
+      .map((b) => b.bindingRate);
+
+    let correlation = 0;
+    if (bucketRates.length >= 2) {
+      // Check if rates increase with agency (monotonicity)
+      let increases = 0;
+      for (let i = 1; i < bucketRates.length; i++) {
+        if (bucketRates[i]! >= bucketRates[i - 1]!) increases++;
+      }
+      correlation = increases / (bucketRates.length - 1);
+    }
+
+    return {
+      meanNormalizedResidual: mean,
+      stdNormalizedResidual: std,
+      coverageRate,
+      agencyBindingCorrelation: correlation,
+      calibrationBuckets,
+    };
+  }
+
   private distance(a: Vec, b: Vec): number {
     let sum = 0;
     for (let i = 0; i < a.length; i++) {
@@ -311,12 +432,14 @@ export class DefaultBindingHistory implements BindingHistory {
   snapshot(): unknown {
     const portStats: Record<string, unknown> = {};
     for (const [portId, ph] of this.history.entries()) {
+      const diagnostics = this.getCalibrationDiagnostics(portId);
       portStats[portId] = {
         situationCount: ph.outcomes.size,
         failureTrajectories: ph.failureTrajectories.length,
         totalSamples: ph.totalSamples,
         recentAgencyWindow: ph.recentAgencies.length,
         averageAgency: this.getAverageAgency(portId),
+        calibration: diagnostics,
       };
     }
     return {

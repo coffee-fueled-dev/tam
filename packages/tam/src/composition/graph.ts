@@ -5,25 +5,36 @@
  * - Trying direct paths first
  * - Falling back to multi-hop if direct fails
  * - Returning null if no path found within budget
+ *
+ * Path quality is evaluated by:
+ * - totalBindingRate: Product of binding rates along the path
+ * - commutativityScore: Agreement between alternative paths (if multiple exist)
+ *
+ * Commutativity is a strong signal of Logical Locality:
+ * If Scale → Shift produces the same result as Shift → Scale,
+ * the model has captured true compositional structure.
  */
 
 import type { PortRegistry } from "./registry";
 import type { FunctorCache } from "./cache";
-import type { CompositionPath, CompositionStep, FunctorResult } from "./types";
+import type { CompositionPath, CompositionStep, FunctorResult, FunctorNetwork } from "./types";
+import type { Vec } from "../vec";
 
 /**
- * Implementation of CompositionPath.
+ * Implementation of CompositionPath with commutativity tracking.
  */
 class CompositionPathImpl implements CompositionPath {
   steps: CompositionStep[];
   totalBindingRate: number;
+  commutativityScore?: number; // 0-1, how well this path agrees with alternatives
 
-  constructor(steps: CompositionStep[]) {
+  constructor(steps: CompositionStep[], commutativityScore?: number) {
     this.steps = steps;
     this.totalBindingRate = steps.reduce(
       (acc, step) => acc * step.bindingRate,
       1
     );
+    this.commutativityScore = commutativityScore;
   }
 
   describe(): string {
@@ -33,7 +44,21 @@ class CompositionPathImpl implements CompositionPath {
     for (const step of this.steps) {
       parts.push(step.to);
     }
-    return parts.join(" → ");
+    let desc = parts.join(" → ");
+    if (this.commutativityScore !== undefined) {
+      desc += ` [comm: ${(this.commutativityScore * 100).toFixed(1)}%]`;
+    }
+    return desc;
+  }
+
+  /**
+   * Quality score combining binding rate and commutativity.
+   * Higher = more trustworthy composition.
+   */
+  getQualityScore(): number {
+    const commWeight = this.commutativityScore ?? 0.5; // Default to uncertain
+    // Geometric mean of binding rate and commutativity
+    return Math.sqrt(this.totalBindingRate * commWeight);
   }
 }
 
@@ -221,5 +246,186 @@ export class CompositionGraph {
     }
 
     return graph;
+  }
+
+  /**
+   * Check commutativity between two paths.
+   *
+   * Given paths P1 and P2 from source to target, tests whether they produce
+   * approximately the same result for random inputs.
+   *
+   * Returns a score from 0-1:
+   * - 1.0: Paths are perfectly commutative (identical outputs)
+   * - 0.0: Paths produce completely different outputs
+   *
+   * This is a strong signal of Logical Locality: if the model has captured
+   * true compositional structure, different paths to the same destination
+   * should agree.
+   */
+  async checkCommutativity(
+    path1: CompositionPath,
+    path2: CompositionPath,
+    numSamples: number = 20
+  ): Promise<number> {
+    // Paths must have same source and target
+    if (path1.steps.length === 0 || path2.steps.length === 0) {
+      return 1.0; // Empty paths are trivially commutative
+    }
+
+    const source1 = path1.steps[0]!.from;
+    const target1 = path1.steps[path1.steps.length - 1]!.to;
+    const source2 = path2.steps[0]!.from;
+    const target2 = path2.steps[path2.steps.length - 1]!.to;
+
+    if (source1 !== source2 || target1 !== target2) {
+      return 0; // Different endpoints, not comparable
+    }
+
+    // Generate random inputs and compare outputs
+    let totalAgreement = 0;
+
+    for (let i = 0; i < numSamples; i++) {
+      // Generate random input in source embedding space
+      const input = this.generateRandomInput(8); // Assume 8-dim embedding
+
+      // Apply path1
+      const output1 = this.applyPath(input, path1);
+
+      // Apply path2
+      const output2 = this.applyPath(input, path2);
+
+      // Compute agreement (1 - normalized distance)
+      const agreement = this.computeAgreement(output1, output2);
+      totalAgreement += agreement;
+    }
+
+    return totalAgreement / numSamples;
+  }
+
+  /**
+   * Generate a random input vector.
+   */
+  private generateRandomInput(dim: number): Vec {
+    return Array.from({ length: dim }, () => Math.random() * 2 - 1);
+  }
+
+  /**
+   * Apply a composition path to an input.
+   */
+  private applyPath(input: Vec, path: CompositionPath): Vec {
+    let current = input;
+    for (const step of path.steps) {
+      current = step.functor.apply(current);
+    }
+    return current;
+  }
+
+  /**
+   * Compute agreement between two outputs (1 - normalized distance).
+   */
+  private computeAgreement(a: Vec, b: Vec): number {
+    if (a.length !== b.length) return 0;
+
+    let sumSq = 0;
+    let maxMag = 0;
+    for (let i = 0; i < a.length; i++) {
+      sumSq += (a[i]! - b[i]!) ** 2;
+      maxMag = Math.max(maxMag, Math.abs(a[i]!), Math.abs(b[i]!));
+    }
+
+    const distance = Math.sqrt(sumSq);
+    const normalized = distance / (maxMag * Math.sqrt(a.length) + 1e-8);
+
+    // Convert to agreement: 1 = identical, 0 = very different
+    return Math.max(0, 1 - normalized);
+  }
+
+  /**
+   * Find all paths between two domains and rank by commutativity.
+   * More expensive but provides stronger confidence in composition quality.
+   */
+  async findAllPaths(
+    source: string,
+    target: string,
+    maxHops: number = 3
+  ): Promise<CompositionPath[]> {
+    const paths: CompositionPath[] = [];
+
+    // Find paths using DFS (allow multiple paths)
+    await this.findPathsDFS(source, target, [], new Set(), maxHops, paths);
+
+    // If we have multiple paths, compute pairwise commutativity
+    if (paths.length >= 2) {
+      const scores = new Map<CompositionPath, number>();
+
+      for (const path of paths) {
+        let totalComm = 0;
+        let count = 0;
+
+        for (const other of paths) {
+          if (path !== other) {
+            const comm = await this.checkCommutativity(path, other);
+            totalComm += comm;
+            count++;
+          }
+        }
+
+        scores.set(path, count > 0 ? totalComm / count : 0.5);
+      }
+
+      // Create new paths with commutativity scores
+      return paths.map(
+        (p) =>
+          new CompositionPathImpl(
+            (p as CompositionPathImpl).steps,
+            scores.get(p)
+          )
+      );
+    }
+
+    return paths;
+  }
+
+  /**
+   * DFS to find all paths between two domains.
+   */
+  private async findPathsDFS(
+    current: string,
+    target: string,
+    pathSoFar: CompositionStep[],
+    visited: Set<string>,
+    maxHops: number,
+    results: CompositionPath[]
+  ): Promise<void> {
+    if (current === target) {
+      results.push(new CompositionPathImpl([...pathSoFar]));
+      return;
+    }
+
+    if (pathSoFar.length >= maxHops) {
+      return;
+    }
+
+    visited.add(current);
+
+    for (const nextDomain of this.registry.list()) {
+      if (visited.has(nextDomain)) continue;
+
+      const result = await this.cache.getFunctor(current, nextDomain);
+      if (result.status === "found" && result.functor) {
+        pathSoFar.push({
+          from: current,
+          to: nextDomain,
+          functor: result.functor,
+          bindingRate: result.bindingRate,
+        });
+
+        await this.findPathsDFS(nextDomain, target, pathSoFar, visited, maxHops, results);
+
+        pathSoFar.pop();
+      }
+    }
+
+    visited.delete(current);
   }
 }

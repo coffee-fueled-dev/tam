@@ -16,6 +16,7 @@ export { CommitmentNet } from "./commitment";
 // Fibration utilities
 export {
   assembleCone,
+  assembleConeWithCovariance,
   evaluateBinding,
   isInNarrowZone,
   coneVolume,
@@ -31,4 +32,13 @@ export { FixedRefinementPolicy } from "./refinement";
 // Port and port bank
 export { GeometricPort } from "./port";
 export { GeometricPortBank } from "./bank";
+
+// Port functor discovery (intra-domain composition)
+export {
+  PortFunctor,
+  discoverPortFunctor,
+  generateSpecialistEmbedding,
+  type PortFunctorDiscoveryConfig,
+  defaultPortFunctorConfig,
+} from "./port-functor";
 
