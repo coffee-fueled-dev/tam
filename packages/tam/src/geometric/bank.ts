@@ -33,6 +33,7 @@ import { magnitude } from "../vec";
 import { CausalNet } from "./causal";
 import { CommitmentNet } from "./commitment";
 import { DefaultBindingHistory } from "./history";
+import type { RefinementPolicy } from "../types";
 import { FixedRefinementPolicy } from "./refinement";
 import { GeometricPort } from "./port";
 import { evaluateBinding } from "./fibration";
@@ -90,7 +91,8 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   constructor(
     encoders: Encoders<S, C>,
     config?: GeometricPortConfigInput,
-    selectionStrategy?: PortSelectionStrategy<S, C>
+    selectionStrategy?: PortSelectionStrategy<S, C>,
+    refinementPolicy?: RefinementPolicy
   ) {
     this.enc = encoders;
 
@@ -124,8 +126,9 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       familiarityThreshold: this.cfg.familiarityThreshold,
       minFailuresForBimodal: this.cfg.minFailuresForBimodal,
       bimodalRatioThreshold: this.cfg.bimodalRatioThreshold,
+      bindingRateDecay: this.cfg.bindingRateDecay,
     });
-    this.policy = new FixedRefinementPolicy(this.cfg);
+    this.policy = refinementPolicy ?? new FixedRefinementPolicy(this.cfg);
 
     // Initialize selection strategy (defaults to max-agency)
     this.selectionStrategy = selectionStrategy ?? new MaxAgencySelectionStrategy({
@@ -227,6 +230,89 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   }
 
   /**
+   * Observe a transition directly in embedding space (for composition).
+   * Bypasses encoders and uses provided embeddings directly.
+   *
+   * Used by ComposedPort to train target domain with functored embeddings.
+   */
+  async observeEmbedding(params: {
+    beforeEmb: Vec;
+    afterEmb: Vec;
+    action?: string;
+  }): Promise<void> {
+    const { beforeEmb, afterEmb, action = "default" } = params;
+    const actualDelta = afterEmb.map((a, i) => a - beforeEmb[i]!);
+    const situationKey = this.situationToKey(beforeEmb);
+
+    // 1. Select best port for this situation
+    let port = this.selectPort(action, beforeEmb);
+    if (!port) {
+      port = this.createPort(action);
+    }
+    this.lastSelectedPort = port;
+
+    // 2. Update dynamic reference volume
+    this.updateReferenceVolume(actualDelta);
+
+    // 3. Get cone and evaluate binding
+    const cone = port.getCone(beforeEmb);
+    const outcome = evaluateBinding(actualDelta, cone);
+
+    // 4. Compute and record agency
+    const agency = port.computeAgencyFor(beforeEmb);
+    this.history.recordAgency(port.id, agency);
+
+    // 5. Record binding outcome
+    this.history.record(port.id, situationKey, outcome);
+
+    // 6. Record calibration diagnostics
+    const normalizedDistance = this.computeNormalizedDistance(actualDelta, cone);
+    this.history.recordNormalizedResidual(port.id, normalizedDistance);
+    this.history.recordAgencyBindingPair(port.id, agency, outcome.success);
+
+    if (!outcome.success) {
+      this.history.recordFailureTrajectory(port.id, actualDelta);
+      this.recordRecentFailure(port.id, beforeEmb, actualDelta);
+    }
+
+    // 7. Decide refinement action
+    const refinementAction = this.policy.decide(
+      outcome,
+      port.id,
+      situationKey,
+      this.history
+    );
+
+    // 8. Train networks directly with embeddings
+    if (refinementAction === "proliferate") {
+      this.scheduleProliferation(port.id);
+      this.history.recordProliferation(port.id);
+      this.causalNet.observe(beforeEmb, port.embedding, actualDelta);
+      (port as any).trainEmbedding(beforeEmb, actualDelta);
+    } else {
+      // Train both networks using embeddings
+      this.causalNet.observe(beforeEmb, port.embedding, actualDelta);
+      (port as any).trainEmbedding(beforeEmb, actualDelta);
+
+      // Train CommitmentNet based on refinement action
+      if (refinementAction === "narrow") {
+        this.commitmentNet.queueRefinement(beforeEmb, port.embedding, "narrow");
+      } else if (refinementAction === "widen") {
+        const violation = outcome.success ? 0 : outcome.violation;
+        this.commitmentNet.queueRefinement(
+          beforeEmb,
+          port.embedding,
+          "widen",
+          violation
+        );
+      }
+    }
+
+    // 9. Process pending proliferations
+    await this.processProliferations();
+  }
+
+  /**
    * Observe a transition with agency-based port selection and potential proliferation.
    */
   async observe(tr: Transition<S, C>): Promise<void> {
@@ -288,8 +374,10 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
       this.history.recordProliferation(port.id);
       // Still train CausalNet on the observation
       this.causalNet.observe(stateEmb, port.embedding, actualDelta);
+      // Train port embedding even during proliferation
+      (port as any).trainEmbedding(stateEmb, actualDelta);
     } else {
-      // Normal observation (trains both networks)
+      // Normal observation (trains both networks AND embedding)
       port.observe(tr);
     }
 
@@ -553,13 +641,6 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
    */
   getAllPorts(): GeometricPort<S, C>[] {
     return Array.from(this.allPorts.values());
-  }
-
-  /**
-   * Get port functor statistics (for diagnostics and experiments).
-   */
-  getPortFunctorStats(): typeof this.portFunctorStats {
-    return { ...this.portFunctorStats };
   }
 
   /**

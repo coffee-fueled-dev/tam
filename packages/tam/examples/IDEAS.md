@@ -254,6 +254,210 @@ tamComposed.importBank("right", rightBank);
 
 ---
 
+## Refinement Policy Issues (Discovered 2025-12-30)
+
+### Issue: Asymmetric Training in CommitmentNet ✅ FIXED
+
+**Problem**: Narrowing and widening use fundamentally different training objectives:
+
+```typescript
+// OLD trainNarrow(): Unbounded maximization
+minimize(-mean(distance))  // "Make it as big as possible"
+
+// OLD trainWiden(): Supervised regression with explicit target
+target = currentDistance - (violation × 0.5)
+minimize(MSE(distance, target))
+```
+
+**Impact**:
+- Unbounded maximization is unstable, especially in high dimensions
+- No principled stopping criterion for narrowing
+- Asymmetry makes system learn to widen but not narrow effectively
+- Leads to distance collapse (experiment 09d shows distance: 0.59 → 0.0005)
+
+**Root Cause**: Fixed thresholds (`narrowThreshold = 0.5`) don't adapt to domain characteristics or dimensionality.
+
+**Fix Applied (2025-12-30)**: Symmetric supervised learning for both directions:
+```typescript
+// trainNarrow(): Supervised increase
+target = currentDistance × (1 + narrowScale);  // e.g., +50%
+minimize(MSE(distance, target));
+
+// trainWiden(): Supervised decrease
+target = currentDistance - (violation × widenScale);
+minimize(MSE(distance, target));
+```
+Both use explicit targets with configurable scale factors (default 0.5).
+
+---
+
+### Proposed Fix: Calibration-Based Learning ✅ SUPERSEDED BY EMA CONTROL
+
+**Approach**: CommitmentNet should learn to achieve target binding rate, not arbitrary distances.
+
+**Note**: This approach inspired the implemented EMA-based control policy (see below), which achieves the same goal more directly at the policy level rather than in the training objective.
+
+```typescript
+// After observing binding outcome:
+const currentBindingRate = history.getRecentBindingRate(portId);
+const targetRate = this.cfg.equilibriumRate; // e.g., 0.95
+
+// Compute target distance that would achieve desired binding rate
+if (currentBindingRate > targetRate) {
+  // Binding too much → increase distance (narrow)
+  targetDistance = currentDistance × (1 + adjustmentRate);
+} else {
+  // Binding too little → decrease distance (widen)
+  targetDistance = currentDistance × (1 - adjustmentRate);
+}
+
+// Symmetric supervised learning!
+loss = MSE(predictedDistance, targetDistance);
+```
+
+**Benefits**:
+- ✅ Symmetric: Both directions use supervised learning
+- ✅ Self-calibrating: Learns correct distance for desired binding rate
+- ✅ No fixed thresholds: Target is always equilibriumRate (e.g., 95%)
+- ✅ Adapts to dimensionality naturally
+
+**Analogy**: Temperature scaling / Platt scaling for geometric commitments. Similar to how probabilistic classifiers calibrate their confidence scores.
+
+---
+
+### Issue: Dimensional Contamination in High-Dimensional Spaces
+
+**Problem**: In mixed predictable/unpredictable systems (e.g., 2D causal spring + 8D noise), binding evaluation averages error across ALL dimensions:
+
+```typescript
+// In evaluateBinding()
+for (let i = 0; i < dim; i++) {
+  sumSq += (diff[i]! / radius[i]!) ** 2;
+}
+distance = sqrt(sumSq / dim);  // Average across all dims!
+margin = 1 - distance;
+```
+
+**Impact in 10D with 2 causal + 8 noise dimensions**:
+- Causal dims: perfect predictions (error ≈ 0)
+- Noise dims: unpredictable (error ≈ radius)
+- Total: `distance = sqrt(8/10) ≈ 0.89`
+- `margin = 0.11 < narrowThreshold (0.5)` → **NO narrowing occurs**
+- Only widening happens → distance collapses → agency → 0%
+
+**Result**: System achieves 100% coverage on causal dims but reports 0% agency due to noise contamination.
+
+---
+
+### Fiber-Based Dimensional Attention (Implementation via Per-Dim Alignment)
+
+**Core Insight**: Port embeddings already encode dimensional structure but we collapse it to scalar via cosine similarity.
+
+**Current (Isotropic)**:
+```typescript
+// Collapse embedding to scalar
+alignment = max(0, cosineSimilarity(port.embedding, state));
+
+// Same radius for all dimensions
+radius[i] = aperture × alignment / (1 + distance);  // All radii equal
+```
+
+**Proposed (Anisotropic via Per-Dimension Alignment)**:
+```typescript
+// Per-dimension alignment (no collapse)
+alignment[i] = sigmoid(port.embedding[i] × state[i]);
+
+// Different radius per dimension
+radius[i] = aperture × alignment[i] / (1 + distance);
+```
+
+**Why This Works**:
+- Port embedding learns which dimensions it cares about
+- High embedding value → high alignment → narrow radius on that dim
+- Low embedding value → low alignment → wide radius (ignores that dim)
+- **Anisotropic cones** naturally emerge from fibration structure
+- Distance (scalar) measures overall commitment, alignment (vector) measures dimensional relevance
+
+**Benefits**:
+- ✅ No additional parameters (embedding already exists)
+- ✅ Scales to any dimension
+- ✅ Philosophically clean: embedding = attention, distance = commitment
+- ✅ Naturally implements "fiber-based attention" through existing geometry
+- ✅ Binding evaluation already supports anisotropic cones via Mahalanobis distance
+
+**Theoretical Grounding**:
+- Heteroscedastic modeling (different variance per dimension)
+- Inverse-variance weighting (standard in sensor fusion, Kalman filtering)
+- Mahalanobis distance (proper metric for elliptical distributions)
+
+**This IS the fiber-based dimensional attention mechanism** - implemented by properly using the fibration's dimensional structure rather than collapsing it prematurely.
+
+---
+
+### Implemented Fix: EMA-Based Control-Theoretic Refinement (2025-12-30)
+
+**Approach**: Replace threshold-based policy with binding-rate feedback control using exponential moving average (EMA).
+
+**Implementation**:
+```typescript
+// In BindingHistory.record()
+const success = outcome.success ? 1.0 : 0.0;
+ph.bindingRateEMA = decay * success + (1 - decay) * ph.bindingRateEMA;
+
+// In BindingRateRefinementPolicy.decide()
+const bindingRate = history.getBindingRate(portId);
+const error = bindingRate - this.equilibriumRate;
+
+if (error > this.tolerance) {
+  return "narrow";  // Binding too much
+} else if (error < -this.tolerance) {
+  return "widen";   // Binding too little
+} else {
+  return "noop";    // At equilibrium
+}
+```
+
+**Benefits**:
+- ✅ Removes arbitrary thresholds (no more margin > 0.5)
+- ✅ Uses empirical binding rate as feedback signal
+- ✅ EMA adapts naturally to domain dynamics
+- ✅ Configurable equilibriumRate (e.g., 95%) and tolerance (e.g., ±5%)
+- ✅ Decay rate controls effective window size (0.1 ≈ 10 samples)
+
+**Status**: ✅ Implemented in `src/geometric/refinement.ts` as `BindingRateRefinementPolicy`
+
+---
+
+### Future Enhancement: Attention-Weighted Binding Rate
+
+**Idea**: Weight binding rate by agency to focus refinement on high-commitment decisions.
+
+**Motivation**: Currently EMA treats all outcomes equally, but:
+- High agency (narrow cone) bindings are precise commitments
+- Low agency (wide cone) bindings are exploratory/uncertain
+- We should refine based on confident predictions, not noisy ones
+
+**Proposed Implementation**:
+```typescript
+// In BindingHistory.record()
+const success = outcome.success ? 1.0 : 0.0;
+const weight = outcome.agency ?? 1.0;  // Use agency as attention weight
+
+// Weighted EMA update
+ph.bindingRateEMA =
+  (decay * weight * success + (1 - decay) * ph.bindingRateEMA) /
+  (decay * weight + (1 - decay));
+```
+
+**Benefits**:
+- Refinement focuses on high-confidence regions where narrow/widen matters
+- Low-agency regions naturally get less influence (exploratory phase)
+- Philosophically clean: agency = attention, consistency with fiber geometry
+
+**Status**: 📝 Noted for future implementation
+
+---
+
 ## Notes on Discovered Behavior
 
 ### Composition with `composeWith`
@@ -275,3 +479,11 @@ In all experiments (05a-05d), functor discovery achieved 100% binding rate betwe
 - **Online approach** (05d): Composition consistently improved (8.8% better, 43% fewer ports)
 
 This validates TAM's design philosophy: composition is for **accelerating adaptation**, not frozen reuse.
+
+
+Just as we learn functors between ports (scale invariance), we should learn functors between dimensions. If a port specializes to dimensions [0,1] and another to [2,3], the relationship between them is a functor - a mapping in the categorical sense.
+
+  Implication:
+  - Ports naturally proliferate along dimensional boundaries
+  - Dimensional relationships (e.g., "velocity predicts position") are learned functors
+  - This is essentially automatic dimensionality reduction through port specialization

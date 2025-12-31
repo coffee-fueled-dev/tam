@@ -86,8 +86,41 @@ export function evaluateBinding(trajectory: Vec, cone: Cone): BindingOutcome {
   } else if (cone.covariance) {
     // Use Cholesky factor to compute Mahalanobis distance
     distance = Math.sqrt(mahalanobisDistanceWithCholesky(diff, cone.covariance, dim) / dim);
+  } else if (cone.alignment) {
+    // Alignment-weighted binding: weight by which dimensions we attend to
+    //
+    // Use alignment-weighted reference radius for normalization.
+    // This prevents many low-attention dimensions (with tiny radii) from
+    // dragging down the reference, which would make errors in high-attention
+    // dimensions appear falsely large.
+    //
+    // Example: 8 noise dims with radius 0.004, 2 causal dims with radius 0.7
+    //   Arithmetic mean: (2×0.7 + 8×0.004)/10 = 0.1 (too small!)
+    //   Weighted mean: 0.7×0.7 + 0.3×0.25 + ... = 0.58 (correctly weighted!)
+    let weightedSumSq = 0;
+    let totalWeight = 0;
+
+    // Use alignment-weighted mean radius as reference
+    let weightedMeanRadius = 0;
+    for (let i = 0; i < dim; i++) {
+      const align = cone.alignment[i] ?? (1.0 / dim);
+      weightedMeanRadius += align * (cone.radius[i] ?? 1.0);
+    }
+    const refRadius = Math.max(weightedMeanRadius, 1e-8);
+
+    for (let i = 0; i < dim; i++) {
+      const align = cone.alignment[i] ?? (1.0 / dim);
+      // Normalize error by reference radius (not per-dimension radius)
+      const normalizedError = (diff[i]! / refRadius) ** 2;
+      // Weight by alignment: high-alignment dims matter more
+      weightedSumSq += align * normalizedError;
+      totalWeight += align;
+    }
+
+    // Average weighted by alignment (with softmax, totalWeight = 1)
+    distance = Math.sqrt(weightedSumSq / Math.max(totalWeight, 1e-8));
   } else {
-    // Fallback to diagonal (isotropic) version
+    // Fallback to unweighted diagonal version (backward compatibility)
     let sumSq = 0;
     for (let i = 0; i < dim; i++) {
       const r = Math.max(cone.radius[i]!, 1e-8);

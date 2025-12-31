@@ -26,6 +26,8 @@ interface PortHistory {
   // Calibration diagnostics
   normalizedResiduals: number[]; // Rolling window of (τ-center)/radius magnitudes
   agencyBindingPairs: Array<{ agency: number; success: boolean }>; // For calibration curve
+  // EMA-based binding rate for control-theoretic refinement
+  bindingRateEMA: number; // Exponential moving average of binding success rate
 }
 
 export class DefaultBindingHistory implements BindingHistory {
@@ -39,6 +41,7 @@ export class DefaultBindingHistory implements BindingHistory {
   private readonly minFailuresForBimodal: number;
   private readonly bimodalRatioThreshold: number;
   private readonly agencyWindowSize: number; // Rolling window for agency
+  private readonly bindingRateDecay: number; // EMA decay rate
 
   constructor(opts?: {
     maxOutcomesPerSituation?: number;
@@ -48,6 +51,7 @@ export class DefaultBindingHistory implements BindingHistory {
     minFailuresForBimodal?: number;
     bimodalRatioThreshold?: number;
     agencyWindowSize?: number;
+    bindingRateDecay?: number;
   }) {
     this.maxOutcomesPerSituation = opts?.maxOutcomesPerSituation ?? 100;
     this.maxFailureTrajectories = opts?.maxFailureTrajectories ?? 50;
@@ -56,6 +60,7 @@ export class DefaultBindingHistory implements BindingHistory {
     this.minFailuresForBimodal = opts?.minFailuresForBimodal ?? 10; // Conservative default
     this.bimodalRatioThreshold = opts?.bimodalRatioThreshold ?? 0.25;
     this.agencyWindowSize = opts?.agencyWindowSize ?? 50; // Rolling window
+    this.bindingRateDecay = opts?.bindingRateDecay ?? 0.1; // EMA decay (effective ~10 sample window)
   }
 
   private getPortHistory(portId: string): PortHistory {
@@ -69,6 +74,7 @@ export class DefaultBindingHistory implements BindingHistory {
         lastProliferationSample: 0,
         normalizedResiduals: [],
         agencyBindingPairs: [],
+        bindingRateEMA: 0.5, // Neutral prior for new ports
       };
       this.history.set(portId, ph);
     }
@@ -77,6 +83,12 @@ export class DefaultBindingHistory implements BindingHistory {
 
   record(portId: string, situationKey: string, outcome: BindingOutcome): void {
     const ph = this.getPortHistory(portId);
+
+    // Update exponential moving average of binding rate
+    const success = outcome.success ? 1.0 : 0.0;
+    ph.bindingRateEMA =
+      this.bindingRateDecay * success +
+      (1 - this.bindingRateDecay) * ph.bindingRateEMA;
 
     // Track situation visits globally
     this.situationCounts.set(
@@ -280,6 +292,17 @@ export class DefaultBindingHistory implements BindingHistory {
     const samplesSinceProliferation =
       ph.totalSamples - ph.lastProliferationSample;
     return samplesSinceProliferation < cooldownPeriod;
+  }
+
+  /**
+   * Get exponential moving average of binding rate for a port.
+   * Returns value in [0, 1] where 1.0 = always succeeds, 0.0 = always fails.
+   * Returns 0.5 (neutral prior) for ports with no history.
+   */
+  getBindingRate(portId: string): number {
+    const ph = this.history.get(portId);
+    if (!ph) return 0.5; // Neutral prior for new ports
+    return ph.bindingRateEMA;
   }
 
   // ============================================================================

@@ -46,13 +46,21 @@ import { DefaultBindingHistory } from "./history";
 import { FixedRefinementPolicy } from "./refinement";
 
 /**
+ * Sigmoid activation function: σ(x) = 1 / (1 + e^(-x))
+ * Maps real values to [0, 1] range.
+ */
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
+/**
  * GeometricPort: combines embedding with shared network references.
  */
 export class GeometricPort<S, C = unknown> implements Port<S, C> {
   public readonly action: string;
   public readonly name: string;
   public readonly id: string;
-  public readonly embedding: Vec;
+  public embedding: Vec; // Mutable - trained via binding outcomes
   public readonly aperture: number;
 
   private readonly enc: Encoders<S, C>;
@@ -122,13 +130,74 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
   }
 
   /**
-   * Compute alignment between port and situation.
+   * Compute per-dimension alignment between port and situation.
+   * Returns a vector of alignment values [0,1] for each dimension.
+   *
+   * This enables anisotropic cones where the port attends more strongly
+   * to some dimensions than others, implementing fiber-based dimensional attention.
+   *
+   * Uses element-wise product with sigmoid activation:
+   *   alignment[i] = sigmoid(port.embedding[i] × state[i])
+   *
+   * High embedding value → high sensitivity to that dimension
+   * Low embedding value → dimension is ignored (wide cone on that axis)
+   */
+  private computePerDimAlignment(stateEmb: Vec): Vec {
+    const portDim = this.embedding.length;
+    const stateDim = stateEmb.length;
+
+    // Handle dimension mismatch via projection
+    if (portDim !== stateDim) {
+      // Project to common dimension
+      const portProj = portDim > stateDim
+        ? this.projectToSize(this.embedding, stateDim)
+        : this.embedding;
+
+      const dim = Math.min(portDim, stateDim);
+      // Use softmax for relative attention (prevents saturation, enforces competition)
+      return this.softmax(portProj.slice(0, dim));
+    }
+
+    // Dimensions match - compute per-dimension alignment via softmax
+    // Softmax enforces relative attention: increasing attention to some dimensions
+    // automatically decreases attention to others (zero-sum game)
+    // Prevents sigmoid saturation where all alignments → 1.0
+    return this.softmax(this.embedding);
+  }
+
+  /**
+   * Softmax activation for computing relative dimensional attention.
+   * Returns a probability distribution over dimensions.
+   *
+   * Uses temperature scaling to control concentration:
+   * - High temperature → more uniform distribution (less extreme)
+   * - Low temperature → more peaked distribution (more extreme)
+   */
+  private softmax(vec: Vec): Vec {
+    // Temperature parameter: higher = smoother attention distribution
+    // With 10D, we want moderate differentiation, not extreme concentration
+    const temperature = 2.0;
+
+    // Scale by temperature before softmax
+    const scaled = vec.map((x) => x / temperature);
+
+    // Numerical stability: subtract max before exp
+    const maxVal = Math.max(...scaled);
+    const exps = scaled.map((x) => Math.exp(x - maxVal));
+    const sumExps = exps.reduce((a, b) => a + b, 0);
+    return exps.map((e) => e / sumExps);
+  }
+
+  /**
+   * Compute global alignment between port and situation (scalar).
    * α = max(0, cos(θ)) where θ is the angle between port and situation embeddings.
    * Returns 0 when orthogonal (port doesn't apply), 1 when perfectly aligned.
    *
    * When port and state have different dimensions, we project the larger
    * to the smaller using average pooling. This preserves directional structure
    * without information loss for distance/similarity computation.
+   *
+   * @deprecated Use computePerDimAlignment() for anisotropic cones
    */
   private computeAlignment(stateEmb: Vec): number {
     const portDim = this.embedding.length;
@@ -189,37 +258,40 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
    * Get the cone for a state embedding (polysemous: depends on situation).
    * PRIMARY INTERFACE - operates in embedding space.
    *
-   * Uses the geometric formula:
-   *   radius = aperture × α / (1 + d)
+   * Uses the geometric formula with anisotropic (per-dimension) radii:
+   *   radius[i] = aperture × α[i] / (1 + d)
    *
    * Where:
-   *   α = alignment (cosine similarity between port and situation)
-   *   d = distance (commitment level from CommitmentNet)
+   *   α[i] = per-dimension alignment (fiber-based dimensional attention)
+   *   d = distance (scalar commitment level from CommitmentNet)
+   *
+   * This creates elliptical cones that attend more strongly to some dimensions.
    */
   getCone(stateEmb: Vec): Cone {
     // Fibration: project to trajectory space (center of cone)
     const center = this.causalNet.predict(stateEmb, this.embedding);
 
-    // Alignment: viewing angle factor
-    const alignment = this.computeAlignment(stateEmb);
+    // Per-dimension alignment: dimensional attention
+    const alignments = this.computePerDimAlignment(stateEmb);
 
-    // Distance: commitment level (higher = more committed = narrower cone)
+    // Distance: scalar commitment level (higher = more committed = narrower cone)
     const distance = this.commitmentNet.predictDistance(
       stateEmb,
       this.embedding
     );
 
-    // Cache for diagnostics
-    this.lastAlignment = alignment;
+    // Cache for diagnostics (use mean alignment for backward compatibility)
+    this.lastAlignment = alignments.reduce((sum, a) => sum + a, 0) / alignments.length;
     this.lastDistance = distance;
 
-    // Effective radius = aperture × alignment / (1 + distance)
-    // When alignment = 0, radius = 0 (empty cone, port doesn't apply)
-    // When distance → ∞, radius → 0 (very narrow cone, high agency)
-    const scale = alignment / (1 + distance);
-    const effectiveRadius = center.map(() => this.aperture * scale);
+    // Anisotropic radii = aperture × alignment[i] / (1 + distance)
+    // Each dimension gets its own radius based on how much the port attends to it
+    // High alignment[i] → narrow radius on dimension i (port cares about this dim)
+    // Low alignment[i] → wide radius on dimension i (port ignores this dim)
+    const effectiveRadius = alignments.map(a => this.aperture * a / (1 + distance));
 
-    return assembleCone(center, effectiveRadius);
+    // Include alignment in cone for alignment-weighted binding evaluation
+    return { center, radius: effectiveRadius, alignment: alignments };
   }
 
   /**
@@ -314,6 +386,9 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
     // Always train CausalNet toward actual trajectory (learns the causal manifold)
     this.causalNet.observe(stateEmb, this.embedding, actualDelta);
 
+    // Train embedding based on per-dimension binding performance
+    this.trainEmbedding(stateEmb, actualDelta);
+
     // Train CommitmentNet based on refinement action
     if (action === "narrow") {
       this.commitmentNet.queueRefinement(stateEmb, this.embedding, "narrow");
@@ -327,6 +402,44 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
       );
     }
     // "noop" and "proliferate" don't train CommitmentNet for this port
+  }
+
+  /**
+   * Train port embedding based on per-dimension binding outcomes.
+   *
+   * Goal: Learn which dimensions this port should attend to.
+   * - Increase embedding[i] for dimensions where predictions are good
+   * - Decrease embedding[i] for dimensions where predictions are bad
+   *
+   * With state-independent alignment (alignment[i] = sigmoid(embedding[i])):
+   * - To increase attention: embedding[i] += learningRate
+   * - To decrease attention: embedding[i] -= learningRate
+   */
+  private trainEmbedding(stateEmb: Vec, actualDelta: Vec): void {
+    // Get current cone to evaluate per-dimension performance
+    const cone = this.getCone(stateEmb);
+    const prediction = cone.center;
+    const radii = cone.radius;
+
+    const learningRate = this.cfg.embeddingLearningRate;
+    const dim = Math.min(this.embedding.length, stateEmb.length);
+
+    // Update embedding based on per-dimension success/failure
+    for (let i = 0; i < dim; i++) {
+      // Per-dimension error
+      const error = Math.abs((actualDelta[i] ?? 0) - (prediction[i] ?? 0));
+      const radius = radii[i] ?? 1.0;
+      const success = error < radius;
+
+      if (success) {
+        // Prediction was good → increase attention to this dimension
+        this.embedding[i] = (this.embedding[i] ?? 0) + learningRate;
+      } else {
+        // Prediction was bad → decrease attention to this dimension
+        // Use smaller step for decreases to bias toward attending
+        this.embedding[i] = (this.embedding[i] ?? 0) - learningRate * 0.5;
+      }
+    }
   }
 
   /**
@@ -362,21 +475,27 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
   }
 
   /**
-   * Compute agency from a cone.
-   * Agency = 1 - volume/referenceVolume (clamped to [0, 1])
+   * Compute agency from commitment level (distance), not cone volume.
    *
-   * Uses dynamic reference volume from bank (total trajectory space).
+   * Agency measures COMMITMENT SPECIFICITY (learned confidence),
+   * NOT affordance specificity (viewing angle/alignment).
+   *
+   * Alignment still affects cone radius and binding success,
+   * but doesn't inflate agency. This prevents geometric mismatch
+   * from being confused with epistemic certainty.
+   *
+   * Agency = distance / (1 + distance)
+   * - distance = 0: agency = 0 (no commitment, maximally uncertain)
+   * - distance → ∞: agency → 1 (maximum commitment)
    */
   private computeAgency(cone: Cone): number {
     // Check for empty cone (alignment = 0 → all radii = 0)
     const anyNonZero = cone.radius.some((r) => r > 1e-8);
     if (!anyNonZero) return 0; // Empty cone = no agency (port doesn't apply)
 
-    const logVolume = coneLogVolume(cone);
-    const refLogVolume = cone.radius.length * Math.log(this.referenceVolume);
-    const logRatio = logVolume - refLogVolume;
-    const ratio = Math.exp(logRatio / cone.radius.length); // Geometric mean
-    return Math.max(0, Math.min(1, 1 - ratio));
+    // Agency based on distance (commitment level), not final volume
+    const distance = this.lastDistance ?? 0;
+    return Math.min(1, distance / (1 + distance));
   }
 
   /**
@@ -385,6 +504,20 @@ export class GeometricPort<S, C = unknown> implements Port<S, C> {
   private situationToKey(stateEmb: Vec): string {
     // Quantize to reduce key space
     return stateEmb.map((v) => Math.round(v * 10) / 10).join(",");
+  }
+
+  /**
+   * Get last computed distance (for diagnostics).
+   */
+  getLastDistance(): number {
+    return this.lastDistance;
+  }
+
+  /**
+   * Get last computed alignment (for diagnostics).
+   */
+  getLastAlignment(): number {
+    return this.lastAlignment;
   }
 
   /**

@@ -27,7 +27,11 @@ export {
 export { DefaultBindingHistory } from "./history";
 
 // Refinement policy
-export { FixedRefinementPolicy } from "./refinement";
+export {
+  FixedRefinementPolicy,
+  BindingRateRefinementPolicy,
+  AgencyGradientRefinementPolicy,
+} from "./refinement";
 
 // Port and port bank
 export { GeometricPort } from "./port";

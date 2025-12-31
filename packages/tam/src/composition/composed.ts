@@ -94,6 +94,44 @@ export class ComposedPort {
   }
 
   /**
+   * Observe a transition and adapt the target port online.
+   * Enables compositional learning: bootstrap from primitives + adapt to novel dynamics.
+   *
+   * @param transition - Transition in source domain
+   */
+  async observe(transition: {
+    before: unknown;
+    after: unknown;
+    action?: string;
+  }): Promise<void> {
+    // Map source states through functors to target domain
+    const beforeEmb = this.applyFunctors(
+      this.sourceEmbedder(transition.before)
+    );
+    const afterEmb = this.applyFunctors(
+      this.sourceEmbedder(transition.after)
+    );
+
+    // Train target port in embedding space
+    await this.targetPortBank.observeEmbedding({
+      beforeEmb,
+      afterEmb,
+      action: transition.action ?? "default",
+    });
+  }
+
+  /**
+   * Apply all functors in the path to an embedding.
+   */
+  private applyFunctors(embedding: Vec): Vec {
+    let current = embedding;
+    for (const step of this.path.steps) {
+      current = step.functor.apply(current);
+    }
+    return current;
+  }
+
+  /**
    * Get the description of the composition path.
    */
   describe(): string {

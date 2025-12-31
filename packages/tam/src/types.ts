@@ -201,6 +201,13 @@ export interface Cone {
   radius: Vec;
 
   /**
+   * Per-dimension alignment (attention weights) from port embedding.
+   * Indicates which dimensions the port is responsible for predicting.
+   * Used to weight binding evaluation - don't penalize low-alignment dimensions.
+   */
+  alignment?: Vec;
+
+  /**
    * Optional: Full covariance matrix for ellipsoidal cones.
    * Allows agent to be "committed" on some axes while "uncommitted" on others.
    * Stored as flattened lower-triangular Cholesky factor for efficiency.
@@ -289,6 +296,9 @@ export interface BindingHistory {
   /** Get total sample count for a port */
   getSampleCount(portId: string): number;
 
+  /** Get exponential moving average of binding rate for a port (for EMA-based refinement) */
+  getBindingRate(portId: string): number;
+
   /** Record last proliferation time for cooldown tracking */
   recordProliferation(portId: string): void;
 
@@ -348,6 +358,10 @@ export interface CommitmentNetConfig {
   minRadius: number;
   /** Threshold for "near center" when deciding to narrow */
   narrowThreshold: number;
+  /** Additive step for narrowing: target = current + narrowStep (escapes zero trap) */
+  narrowStep: number;
+  /** Additive step for widening: target = current - (violation × widenStep) */
+  widenStep: number;
 }
 
 export const defaultCommitmentNetConfig: CommitmentNetConfig = {
@@ -357,6 +371,8 @@ export const defaultCommitmentNetConfig: CommitmentNetConfig = {
   initialRadius: 2.0, // Wide initial cone
   minRadius: 0.01, // Prevent collapse
   narrowThreshold: 0.5, // Only narrow if trajectory is in inner 50% of cone
+  narrowStep: 0.1, // Add 0.1 to distance on successful binding (escapes zero)
+  widenStep: 0.2, // Reduce distance by (violation × 0.2) on failure
 };
 
 /**
@@ -365,6 +381,8 @@ export const defaultCommitmentNetConfig: CommitmentNetConfig = {
 export interface GeometricPortConfig {
   /** Dimension of port embeddings (action manifold) */
   embeddingDim: number;
+  /** Learning rate for embedding updates (per-dimension gradient from binding outcomes) */
+  embeddingLearningRate: number;
   /** Configuration for CausalNet */
   causal: CausalNetConfig;
   /** Configuration for CommitmentNet */
@@ -375,6 +393,10 @@ export interface GeometricPortConfig {
   useDynamicReference: boolean;
   /** Success rate threshold for equilibrium (stop narrowing) */
   equilibriumRate: number;
+  /** Tolerance band for equilibrium (accept equilibriumRate ± tolerance) */
+  bindingRateTolerance: number;
+  /** Decay rate for exponential moving average of binding rate (0 = no update, 1 = only latest) */
+  bindingRateDecay: number;
   /** Minimum samples before situation is considered familiar */
   familiarityThreshold: number;
 
@@ -489,11 +511,14 @@ export type GeometricPortConfigInput = Partial<
 
 export const defaultGeometricPortConfig: GeometricPortConfig = {
   embeddingDim: 8,
+  embeddingLearningRate: 0.01, // Embedding updates from per-dimension binding outcomes
   causal: defaultCausalNetConfig,
   commitment: defaultCommitmentNetConfig,
   referenceVolume: 1.0,
   useDynamicReference: true, // Dynamically calibrate from observed deltas
   equilibriumRate: 0.95, // Stop narrowing at 95% success rate
+  bindingRateTolerance: 0.05, // Accept binding rate within ±5% of target
+  bindingRateDecay: 0.1, // EMA decay (effective ~10 sample window)
   familiarityThreshold: 10,
 
   // Geometric port properties
