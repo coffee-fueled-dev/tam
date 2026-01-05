@@ -1,0 +1,9 @@
+{
+  "runId": "v2-double-grokking-1767598849386",
+  "timestamp": "2026-01-05T07:40:49.390Z",
+  "experiment": "V2 Double Grokking",
+  "config": {
+    "samples": 10000,
+    "checkpointEvery": 100
+  }
+}

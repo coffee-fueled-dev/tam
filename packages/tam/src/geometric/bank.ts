@@ -644,6 +644,38 @@ export class GeometricPortBank<S, C = unknown> implements PortBank<S, C> {
   }
 
   /**
+   * Export all ports for composition.
+   * Returns serialized port data that can be imported into another bank.
+   */
+  exportPorts(): Array<{
+    id: string;
+    action: string;
+    embedding: Vec;
+  }> {
+    return Array.from(this.allPorts.values()).map(port => ({
+      id: port.id,
+      action: port.action,
+      embedding: [...port.embedding],
+    }));
+  }
+
+  /**
+   * Import a port from another bank.
+   * Creates a new port with the given embedding as a candidate specialist.
+   *
+   * Used for emergent composition: imported ports compete with native ports
+   * via agency-based selection and may be sidelined if they perform poorly.
+   */
+  importPort(data: {
+    action: string;
+    embedding: Vec;
+  }): void {
+    // Create port with imported embedding
+    this.createPort(data.action, data.embedding);
+    // Port is automatically registered in maps and ready for selection
+  }
+
+  /**
    * Clean up all resources.
    */
   dispose(): void {

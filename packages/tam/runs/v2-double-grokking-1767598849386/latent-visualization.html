@@ -1,0 +1,6899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>V2 Double Grokking - Latent Space</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    h1 {
+      margin-top: 0;
+      color: #333;
+    }
+
+    .metadata {
+      background: #f8f8f8;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+
+    .metadata code {
+      background: #e0e0e0;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .controls {
+      margin: 20px 0;
+      padding: 15px;
+      background: #f8f8f8;
+      border-radius: 4px;
+    }
+
+    .chart-container {
+      display: flex;
+      gap: 30px;
+      margin-top: 20px;
+    }
+
+    .chart {
+      flex: 1;
+    }
+
+    .port-circle {
+      stroke: #fff;
+      stroke-width: 2;
+    }
+
+    .port-label {
+      font-size: 10px;
+      font-weight: bold;
+      fill: #333;
+      pointer-events: none;
+    }
+
+    .axis-label {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .heatmap-cell {
+      stroke: #fff;
+      stroke-width: 1;
+    }
+
+    .tooltip {
+      position: absolute;
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .slider {
+      width: 100%;
+      margin: 10px 0;
+    }
+
+    .checkpoint-info {
+      font-weight: bold;
+      color: #3498db;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>V2 Double Grokking - Latent Space</h1>
+
+    <div class="metadata">
+      <strong>Run ID:</strong> <code>v2-double-grokking-1767598849386</code><br>
+      <strong>Timestamp:</strong> 1/5/2026, 2:40:49 AM<br>
+      <strong>Checkpoints:</strong> 100
+    </div>
+
+    <div class="controls">
+      <div>
+        <label for="checkpoint-slider">Checkpoint: <span id="checkpoint-label" class="checkpoint-info"></span></label>
+        <input type="range" id="checkpoint-slider" class="slider" min="0" max="99" value="99">
+      </div>
+    </div>
+
+    <div class="chart-container">
+      <div class="chart" id="embedding-chart"></div>
+      <div class="chart" id="heatmap-chart"></div>
+    </div>
+    <div id="tooltip" class="tooltip"></div>
+  </div>
+
+  <script>
+    const checkpoints = [
+  {
+    "sample": 100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0728049501944421,
+          0.12109191469998447
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 0.6015407053044044,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 0.5220698899972532,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 0.5401814480487076,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 0.6067720833258239,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 0.5201345527976907,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 0.5799692506755889,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 0.5320559387633331,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 0.5798246877426622,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 0.5722739640943251,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 0.5221564430852267,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.056438215173581024,
+          0.09724423298371597
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 0.6708309254766819,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 0.5524373054755314,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 0.5931923214855052,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 0.6792210397093589,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 0.5668259515420306,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 0.6401517321324708,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 0.575533762419344,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 0.6488667647604003,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 0.6421456848549716,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 0.5736562768590602,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.05754249066931342,
+          0.0816954059933219
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 0.7740692685283659,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 0.5928851172684271,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 0.6700656914635973,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 0.7861321398673573,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 0.6265536181284449,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 0.7262044169856536,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 0.6345767724671183,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 0.7380920019486724,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 0.7366906424083177,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 0.6418257957515817,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.05147618557361044,
+          0.0776993608003193
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 0.9232825982105969,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 0.6450628101471485,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 0.7684434985477859,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 0.9470976141973487,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 0.7119883406738514,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 0.8469896171862286,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 0.7186096072413914,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 0.8625723442104877,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 0.8667118099800452,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 0.7399853840430765,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.04242781773295319,
+          0.07462236810609636
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 1.1418666078827169,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 0.7154867874028995,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 0.8936094484963264,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 1.1666889759728412,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 0.825352309323393,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 1.0067382948905035,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 0.8256519422622604,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 1.0273526189474882,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 1.036740697334923,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 0.8667767361474076,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.040308573403817785,
+          0.07332191158655503
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 1.4505597358159326,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 0.8135130670146966,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 1.0654682731308,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 1.4686728799231779,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 0.9800232044616064,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 1.2238325026480987,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 0.9697560123181596,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 1.2522328220727508,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 1.2727835916922183,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 1.039126816751607,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.036442664710093865,
+          0.0641070281836258
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 1.9455095758961407,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 0.937717316262732,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 1.3199734604448201,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 1.9712073654156304,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 1.1792068728971914,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 1.569163306043543,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 1.1500567904668988,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 1.607496722622005,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 1.6466912011163748,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 1.2717641345922581,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.023532895907051297,
+          0.04870579859376247
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 2.7379082900704863,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 1.0985478498250973,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 1.6335046543582628,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 2.7397360759188474,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 1.4333740109656996,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 2.0671111554938273,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 1.4023331507297694,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 2.0875902807349127,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 2.1263336267656836,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 1.5699950123390045,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.016555223280484803,
+          0.045265905833273876
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 3.9877471070078574,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 1.342686155168323,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 2.1427914091987854,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 3.9783938624589013,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 1.8176052217656806,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 2.8430953760946265,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 1.803211829504466,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 2.857960708786512,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 2.9244207745367983,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 2.041870678578577,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.010114594425378407,
+          0.043091076720011466
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 5.848056794445539,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 1.6484661956707731,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 2.797700574762109,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 5.81601198498912,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 2.2115209175841164,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 3.9484070413998915,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 2.2793375119456893,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 3.9281855470641514,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 3.995225831251342,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 2.550994347441815,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.015215621969767633,
+          0.0412201175217305
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.363806764136457,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 2.047899107399944,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 3.6476869515486032,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.416768602071237,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 2.7950306439622743,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 4.959556589021466,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 2.9867160763002767,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 5.023320765948454,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 5.322637631219688,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 3.294030544278382,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.014382294938706039,
+          0.047098090867753295
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.99169101257505,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 2.28530857018463,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 4.1169041212427535,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.09735521741768,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 3.168695087608876,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 5.403396191967202,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 3.417011688265291,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 5.563039802018114,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 6.023789452020406,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 3.754567582359958,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.022037790737608226,
+          0.047917688783317834
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.826622845666018,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 2.8482950341602318,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 5.146490668688053,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.0659663704344,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 4.221507702533483,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.108425275240927,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 4.647196933437168,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.495372059789439,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 7.488297862049464,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 4.98801534971022,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.02962803243767997,
+          0.05217839673764818
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.08220760544403,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 3.2578325902051986,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 5.507058104704205,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.175226816773742,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 4.893050030831164,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.256959452045498,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 5.625823729530566,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.6592605173031005,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 7.8471872069730155,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 5.6709554545757594,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.02525536053751944,
+          0.05530074481634567
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.003564137928898,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 3.4823612556148835,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 6.037450795360247,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.275460173518667,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 5.588128135334744,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.397717678128648,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 6.161522714400969,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.0397571233215395,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.57067011654393,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 6.529722078425731,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.027004483421422892,
+          0.057381379030524766
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.326917004415208,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 3.6490477303445363,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 5.9080848028383235,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.491960933990274,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 5.888492342591077,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 5.97635512421151,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 6.777237532928638,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.617262944132452,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.150759070240989,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 6.701809083369857,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.02581013129142759,
+          0.06133869678635659
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.321310017394113,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 4.186007491324767,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 6.829422911349312,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.55608756278475,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.085402553122284,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.720786906651833,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 8.171784784699172,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.553976905532151,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.496366171409516,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.069950737041049,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.016647003192707698,
+          0.05850053905394152
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.95290439671251,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 4.913074466894404,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.80430233303052,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 11.040291774482512,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.228155614048589,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.7543657227796805,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.88894541572757,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.65818023800671,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.912132678693872,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.394358959635545,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 1900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.02024394148045785,
+          0.05337488150586286
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.942188359277017,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 4.880034782810744,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.748596642465513,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 11.016278874786476,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.027277005832959,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.72575775721544,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.550446353709514,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.597688844672863,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.811745360707647,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.272693434997672,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.013964232625780459,
+          0.060256786942000706
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 12.712734219663242,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.6009215239696735,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.45983055275503,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 12.578908339505235,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.004832123267077,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 8.705391860317164,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.449221229251007,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 9.511691410382243,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 11.809943193771872,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.246115749664815,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.01899928838365771,
+          0.060761792527368644
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.519525493474701,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.467904050833503,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.828381661731156,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 10.43123049063109,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.925488665857841,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.481227837515966,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.64624776165238,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.286348357075278,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.535705489101957,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.987429930293024,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.017650568308135897,
+          0.06326899542454494
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.526737075480112,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.595345027330055,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.885000030176523,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 10.426689412495483,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.991422961767535,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.505181260040229,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.880734630261628,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.284026026637664,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.493168060208308,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.04468963000235,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.020115890258980293,
+          0.06414811606671877
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.86287125555302,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.419601165735884,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.589955332318672,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.811338839572839,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.537399731738246,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.128277248364202,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.242223479499692,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.889507826475762,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.975550124852235,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.598917052627229,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.020834518597950175,
+          0.06176676483313886
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.117532963471882,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.6628805531551585,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.88161467467266,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 10.09782708548209,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 10.925421423356731,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.523102923085505,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 15.195664265198653,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.552579596525774,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 11.30471549645684,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 12.172660464981169,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0217506442426704,
+          0.05470409262451572
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.53941126524931,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.308324307065917,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.770248780717144,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.24233990119628,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.767121333018599,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.834554328749624,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 14.444757952529287,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.516319537366419,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.671169944759356,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.613110201830827,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03301881647538991,
+          0.047952784252143395
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.8160282189729,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.342991294407757,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.048118974018061,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.586568879927839,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.828859115725722,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.066731499385577,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.988115631392953,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.824320822470411,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.05943886818866,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.84320602712508,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03032197506946954,
+          0.045570063436985206
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.2528341498671,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.293250802471877,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.051316618766023,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 10.003348816680601,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.422809943109488,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.310087246933673,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.467783915847487,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.006665624246487,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.163379802522092,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.486172570463644,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.033363530196230735,
+          0.038988240103958974
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.919375613619351,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.439132536649689,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.328896338841664,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.859877965150574,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.780340859805834,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.274799944984112,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.928131536391534,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.127459841284153,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.526683217759073,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.960191120611212,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 2900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0314653688606131,
+          0.041488976986104174
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 11.400532228326318,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.3483604163071385,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 9.222490348070808,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 11.231232238116661,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 11.103858399735472,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 8.17017662981854,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 16.479465894356498,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.99216902191514,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 11.597148346539456,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 12.373926605233825,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03276232616004827,
+          0.04221217552921068
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.602045600940519,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.3565419795541525,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.9360985605652585,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.457917924104631,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.470757194325424,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.000563559367962,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.767599827564181,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.722537870361495,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.894467016961373,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.547822722550375,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03852447235220673,
+          0.03456413971264808
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.29911577955425,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.130364941662361,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.4553800211606935,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.058083328519924,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.983163932051742,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.690232152471398,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.247930894166174,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.279638683406385,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.202956098111866,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.901259710572365,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.04179416176875847,
+          0.031264775180703426
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.727434850448574,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.7185692737351665,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.476921732955287,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 10.549547086074064,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.808376995544261,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.71192891595139,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 14.270618102417009,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.443395659563418,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.72184901958206,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.95926653665684,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03482118289664244,
+          0.021380914846318835
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.387447416415837,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.956553219383941,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.220640975936332,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.125785192351826,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.580852143925625,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.689688435555407,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.724992766279888,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.17529378918741,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.004308069327175,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.442064166258797,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03371517693025964,
+          0.024373562944638258
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.613891799420818,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.999400574456422,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.493129850031285,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.469170981218852,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.651961997712215,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.9558406011596325,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.45425525455772,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.5062348590709,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.404971012245614,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.638457974035976,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.027435441217511694,
+          0.02353350819877683
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.928317290508947,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.737519049857727,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.029991303197813,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.74185356188658,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.26841857720609,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.460191778047381,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.086537795893875,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.966024034798861,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.754111806449725,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.136493119229224,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0282977095425867,
+          0.024667702492399014
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.328139163896566,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.685141440470292,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.341343901909145,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 10.153781997419797,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.874599305692993,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.505328764648411,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 14.364252502887656,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.172788715512725,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.425812493817403,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 11.046238120629733,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.032555916015215604,
+          0.020988556027670666
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.177210516906406,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.13745367368058,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.5669052637880085,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.988401765460106,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.198543260000624,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.7250249806997076,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.2160195281418,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.294840308869165,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.278288660685408,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.198040157430972,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.030489435857804156,
+          0.013825066989184611
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.976875032950774,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.601084712831073,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 6.856106009835548,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.640965664327386,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.007104240704374,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.442383379403499,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.507694595879903,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.849250468864836,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.479844774621847,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.858154637020498,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 3900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03487356834797878,
+          0.0071928840056778125
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 10.967603475456137,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.592650681340908,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.505729100042643,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 10.721486434630851,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.711221141832704,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.8980074186368165,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.677736014530437,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.53472246819499,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.737094115261701,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.976701770961968,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03545157977342793,
+          0.006382370835276495
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.3309890554657,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.87258456914531,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.451344774239916,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.11774584005646,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.435501593146853,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.843463560137002,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.796410235822576,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.37452628387989,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.242703482089807,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.494467184998388,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03582617941270201,
+          0.015402583410265036
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.474751133838879,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.863904614098388,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.692464481365457,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.435401178811752,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 10.334236860163982,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.324780684841169,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 14.405826644783298,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.150692634356645,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.620770017881771,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 11.706978828819977,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.02871055652763161,
+          0.019799954839511556
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.241739792333965,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.959087670667003,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.448434681940301,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.216265634469991,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.734763879506492,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.429140835787898,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.962735351592901,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.081187365158173,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.007774763136633,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.828091784634582,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.02897744347349223,
+          0.02054758348444885
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.855679603714208,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.651538348805391,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.789767208573614,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.491885134789468,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.013866531249526,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.260045300353996,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.391471802291933,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.7146456906884255,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.42133983395834,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.020140251800635,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.039160202178914354,
+          0.02355422911810348
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.16610225545427,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.836030710123144,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.945193833650372,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.910740249122151,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.443972026261088,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.000464460336515,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.893970830848312,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.56882788941506,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.426952082949061,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.48578461939959,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03681244639127745,
+          0.014776994670740414
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.484123256762519,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.1733923442965555,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.106593296118077,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.24817480136007,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.272663597073363,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.49451396277292,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.230041077105298,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.93717297765793,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.48731618531155,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.160411300937952,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.04036715058524608,
+          0.01907339250548542
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.13354178632406,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.693758545044039,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.855768225248966,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.925106260928148,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.981547789824935,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.099091717015352,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.899775998517656,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.633989991094461,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.400124052534249,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.061302661313508,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.03180702411272994,
+          0.021259383757970225
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.40114625705383,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.354490084058162,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.6222827586119,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.34089467745221,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.781062804490402,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.712501637296517,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.233616718563965,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.305798421812228,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.128997740192693,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.866936091883709,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.029071115426027097,
+          0.02297653898731761
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.447754825008023,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.605357991257363,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.197045343772189,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.567767208033686,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.363683911004815,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.992461386513837,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.479849821991296,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.745030410555336,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.865816085228479,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.656264545736244,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 4900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.029878914007358797,
+          0.023995636232916156
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.044946309705258,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.265488350020943,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.56318930975169,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.032169152622254,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.752771140333957,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.546706279804763,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.816975114851385,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.153015944624179,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.972307843472791,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.861001087820982,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.01888300900185937,
+          0.022845892773485147
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.643461076842724,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.792183172236447,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.631194020208091,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.418075933740658,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.076288724944895,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.833753570062366,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.172838010833704,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.273615496173452,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.949285205955093,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.030594072453646,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.006327951275536397,
+          0.023833155517153242
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.164621090463234,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.450132357354018,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.290318140520648,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.01761742284355,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.551194902750186,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.558976921825775,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.307051807945493,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.992212587892048,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.620499966736697,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.486166232479999,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0032682122853100815,
+          0.020463731677921468
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.943418015219937,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.194652592933098,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.0082442753941905,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.868813241221175,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.142793718622405,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.416979707228098,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.714750557716787,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.797625475559155,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.286963439689076,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.039302989956294,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0037374453450484697,
+          0.015408314068247471
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.57478425625554,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.87853837389346,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 9.319377080033302,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.751948287959463,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 11.033810569020888,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.994519139550515,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 15.601444744851692,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.728684925673985,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 11.111494777597532,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 12.460027517733513,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.003923049227236266,
+          0.005524508081847371
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.024711519684272,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.2826358231605175,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.586060559550981,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.168831982631733,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 10.058626604608335,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.493904244102001,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 14.009015288991508,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.130751499421446,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 10.229804117106651,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 11.370216541289638,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.00980120140004688,
+          -0.0039024413752926247
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.49666528810315,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.697818781910407,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.867630075711853,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.661053715670208,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.061005842956842,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.049013241175256,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.563517760937065,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.560477542058054,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.352984620118342,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.205260403914581,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.009502733723316503,
+          -0.005120909727700065
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.425891816441512,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.302436766644714,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.318597046963278,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.465870110172345,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.203205750602365,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.827834797794717,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.42440427254209,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.210125057848843,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.707329108729883,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.20915192516754,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.011123208855496794,
+          0.0015561680886030656
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.61758338230352,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.743746697005632,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.723552064534563,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.643710942260476,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.760652293245956,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.064703355709034,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.296357055362737,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.4933668720596085,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.113257802144249,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.836991782762919,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.002133936448499626,
+          0.002681048143484215
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.946279283415896,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.331119736331754,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.340938356605341,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.071636642481586,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.346324366646407,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.644059446711729,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.42158093296494,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.086692697663734,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.67905140424866,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.411230751948573,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 5900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.009696463954132933,
+          0.0010658283163223902
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.36611919542739,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.680791296996949,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.489797198386248,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.402115761291403,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.542196056591239,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.890844671562957,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.069061502114227,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.269930627031921,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.782890041346537,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.595936282239355,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.00957449319878011,
+          -0.002005633027500839
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.208057207775115,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.930460366986001,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.00876557581737,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.295941018227367,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.84656916832717,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.5437010091026355,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.28458319792234,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.9779451863572435,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.558778871721673,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.061973957092869,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.006277650529462035,
+          -0.009142817291585127
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.694802484962254,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.000015909045595,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.32182275667275,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.967701101430775,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.462587343731041,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.4170879049799,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.600210096809846,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.01116989384444,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.860022358879153,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.810226827582845,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.009850194573151042,
+          -0.01083050728944672
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.87729802839634,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.051614923416959,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.370783916571591,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.1447731702319,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.453041184965006,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.520668616656603,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.61812661264732,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.092413625937764,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.922388585620615,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.801967424589396,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.003124736364499851,
+          -0.005201374070939494
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.908561535473455,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.3779905962095444,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.214251908046645,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.976900614235986,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.317702039294458,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.590135512657071,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.35136706223161,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.959805080302249,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.387152106678126,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.349661609895112,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.011408854526099544,
+          -0.0008137117456663489
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.723764160901798,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.734354652473173,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 6.698355496356112,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.842849615223742,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.25729776631688,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.423270121056006,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.494909861522675,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.750322574469021,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 7.910948440057461,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.23238211904184,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0070698672664286305,
+          -0.0020311118479679454
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.954453506861567,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.6686622868408625,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.581123380932403,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.01918374901862,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.384415294581945,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.3263119824423875,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.282458675214832,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.645283012236207,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.909033948205561,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.483086062500309,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.010500199491475497,
+          0.0059421737155390415
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.318871643802037,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.163292865113652,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.01247239192289,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.354612877408432,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.929204349941182,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.67072266052306,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.189570144322875,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.020006737264326,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.320732718718391,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.068930473705418,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.011129660914402822,
+          0.009889742443020535
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.1262460616192,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.237233086715548,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.208803895374245,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.260468121062047,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.132767647494994,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.668756343554101,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.318510606960249,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.111154981866603,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.50520603504939,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.36051061014149,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.020306696756245222,
+          0.010394167098598679
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.742439144527435,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.938497832413329,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.863056708703114,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.866687576804356,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.62625686509308,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.332899887816409,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.679347811466583,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.762799831968953,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.078177531966867,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.80817514072921,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 6900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.01637170336655521,
+          0.009064149526841649
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.182031605738128,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.964309883558229,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.744857873702626,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.31901728018757,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.745653623058601,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.986302247709077,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.010891279685026,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.455496761020894,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.822317068660949,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.846737718877836,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.008359880095889905,
+          0.0016390719732511739
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.580882091569577,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.793217632198569,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.549475339661798,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.780182862798661,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.696126015401708,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.6112775089084295,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.98961717537716,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.137774217444549,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.605638667848396,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.770400365977636,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.010957977792519552,
+          0.00016844739084362798
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.28727585994847,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.588233353067656,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.530242898044511,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.539219975344114,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 9.897793182348465,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.273396043647744,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 13.555128028758208,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.93990893524508,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.650010687120071,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 11.227212401080092,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.015963880279704763,
+          -0.0013397349157237357
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.439768420834984,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.09748214715472,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.900830780369414,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.55312167707907,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.78130690986331,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.161588444150654,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.100146932561604,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.645981225657157,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.962665005579343,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.935171234016424,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.01601112268341492,
+          0.00014452093676836842
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.810010310394661,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.868114620726796,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.991041667879595,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.963529182008946,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.521943972176732,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.394240402414232,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.188427540495553,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.897740592887013,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.188048632839966,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.780159645309265,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.009448686848153559,
+          0.002015538774798288
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.741100628004848,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.018729945182256,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.914993187004375,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.834536704677706,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.631199076967077,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.314359710387182,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.621349263611407,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.775401521651424,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.027894531616889,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.795312939172424,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.010213291461719615,
+          0.0028595207026874555
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.043624340518228,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.464921694262382,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 6.8072492890720655,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.936800490297241,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.538791640114625,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.556633774792232,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.700279268279857,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.7938627693214855,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 7.595708916813584,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.337096701951001,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.012026333472575276,
+          -0.0032661838999099996
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.972633713451687,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.022567576609959,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.922570880088451,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.054631581707978,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.474360798197159,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.440625824167814,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.315988267750372,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.862805758989692,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.024312523907657,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.669798661022966,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.012345575317799468,
+          -0.001971681902989076
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.760244314320992,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.883237940970096,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.831159775958674,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.900374806502729,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.260394430756797,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.330928187991734,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.941233485166205,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.775053421042109,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.909207757573464,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.483264276366862,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.005284227104386255,
+          -0.0009420917637950124
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.84868267837976,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 5.905566409122047,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 6.631918614151211,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.853608187982366,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 6.944833350994701,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.421074258855791,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.13322252324991,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.711753430835945,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 7.543010877854196,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 7.889747825464981,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 7900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.0013390599124139323,
+          0.0026723460660525444
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.110946786669741,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.820263941855726,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.6081876956922505,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.099387424171942,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.969915178466305,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.412458849916713,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.746641714165712,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.737514767224548,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.680246272684524,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.069239222037478,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.003829456565364597,
+          0.004235532051968538
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.989659339730036,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.218701087065232,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.883230389393637,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.983397085946132,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.476878519824986,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.425235753978029,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.60888780814889,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.766512912057615,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.813890000804452,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.573433194063739,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.001432735811728191,
+          0.008377990530202517
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.539028518339379,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.3422846355994436,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.177046964433403,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.720704893700168,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.981793137254328,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.317496948057023,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.057859250873424,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.806060099980314,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.109934294253438,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.194173135273779,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.007121826384885948,
+          -0.0035334092597749116
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 9.108886495415286,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.397987520420631,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.317249460941577,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.30126840007412,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.98045602260797,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.678102097781468,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 12.009055195939103,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.139340875943562,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.380890083840097,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.243365572906482,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.016985261670903053,
+          0.000905646306562767
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.743054088055645,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.972331035409424,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.640693631293634,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.80382598873473,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.231111369003548,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.252073871715375,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.194289561595209,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.582738464941935,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.59023510856715,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.29722410046501,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.010420057743588403,
+          0.0028053722333814908
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.679565901873762,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.171415324357108,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 6.733358117257387,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.74552933524787,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.152560371553516,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.4334988993288444,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.695845333347682,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.706253186220363,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 7.512916756379463,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.048513281671006,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.0014907560888311692,
+          0.0029143803592763715
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.822950741780577,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.449011676580365,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.261060738717402,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.031508924191483,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.910246667841992,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.548601928614429,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.93124155878263,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.9935086719176995,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.179696423787755,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.071607567979981,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0065149578552186165,
+          0.00207749474807686
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.266789566112632,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.9151638572387055,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.50588162302353,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.397423122689473,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.979372155469436,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.030006837670261,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.850217593217701,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.358574703377907,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.322308929283246,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.962151582184301,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.007180761984489076,
+          0.0043400131547099065
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.761416433467754,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.885423835006672,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.415083036424921,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.934563964682871,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.037669936512268,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.751642282648431,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.72281451907881,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.124564528281689,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.144130098513594,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.962793281802162,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.008529207754463027,
+          0.010071712373599918
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.767996623133895,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.996807237766769,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.68409800253122,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.03702881265834,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.216880449695896,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.8860206827143,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.745701824978863,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.330032029695717,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.484026673108518,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.210297900585655,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 8900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.006611750772423591,
+          0.007523850781500615
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.80339894991279,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.009588589405022,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.6995476405629235,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.064646495581396,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.259326542486148,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.897971251513124,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.827575371798668,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.365447529879817,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.494615901186299,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.257324991987216,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.005432414357660484,
+          -0.0009785270918433293
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.970300471060211,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.859403386863347,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.41757683332102,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.127452996630328,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.851496133469351,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.87263941421816,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.54925906570782,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.251705241115436,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.199509896929255,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.8133760566469,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9100,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.006530116221427884,
+          0.005333891743863668
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.255830892791247,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.160624951313683,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.955180934115311,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.518322241794865,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.382370848426802,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.248079910801445,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.909941337843241,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.699293391588895,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.820580907510923,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.441604200030374,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9200,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.007896636494093388,
+          0.006345019378138722
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.808090669501452,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.573997561532239,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 8.58390425363775,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 9.154582970404425,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.984822572375148,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.765540723483392,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 11.460818188818688,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 8.296847842556753,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 9.567850690183159,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 10.212403794243013,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9300,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          -0.0013211081022598407,
+          0.003545497751805386
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.984315706049123,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 7.112450252760246,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.796366308037705,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.224866792047147,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.386861059111686,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.021946518820135,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.935487335366123,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.472593642514017,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.571065358503635,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.39767944386262,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9400,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.005065635209091692,
+          -0.0021309404657321295
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.751247770893719,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.689851012202471,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.691566816731372,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.128788690337794,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 8.086905006534504,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.896512823419981,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.018424900819454,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.434156732500715,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.582006086578719,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 9.201917184329822,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9500,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.0020946249116862038,
+          0.00497618337182527
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.855055410046679,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.438710751839669,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.206334385401705,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.082414135301077,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.386737060142088,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.816703566211288,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.357142055150078,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.158536348022079,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.034802590443917,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.312995176066384,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9600,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.011378197971116586,
+          0.0029837128287242055
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.108872773360035,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.755499658928977,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.339452621510876,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.2473944600416,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.657339684786772,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.930652401278603,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.023376084743854,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.262252403225407,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.124754459607088,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.567074621323655,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9700,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.001600082946787438,
+          0.010608820432093035
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.140811857327657,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.893552916910232,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.54075388982205,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.349212654911248,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.82521402890149,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.07845743425361,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 10.04446539249183,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.418943764600197,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.357820683527745,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.753428958085218,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9800,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.005211640155389144,
+          0.00917768212156686
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.745179866887116,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.694776460708598,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.3524240926278805,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.989368108337897,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.670302442691892,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.800005432374082,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.770228368618085,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.168844388452129,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.119968932923248,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.579698529646112,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 9900,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.007283591331830677,
+          0.009152221595519096
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 7.450816406179575,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.491816128185957,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.1337232869697,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 7.67117437818137,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.472920704567752,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 6.538347401446336,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.489956673687944,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 6.9409206076707255,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 7.882959005493546,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.370110244615363,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "sample": 10000,
+    "ports": [
+      {
+        "portIdx": 0,
+        "embedding": [
+          0.018481183121209364,
+          0.0051869848976255845
+        ],
+        "commitments": [
+          {
+            "stateIdx": 0,
+            "concentration": 8.167617388048178,
+            "selected": true
+          },
+          {
+            "stateIdx": 1,
+            "concentration": 6.760903223344109,
+            "selected": true
+          },
+          {
+            "stateIdx": 2,
+            "concentration": 7.61418661248467,
+            "selected": true
+          },
+          {
+            "stateIdx": 3,
+            "concentration": 8.45163310385139,
+            "selected": true
+          },
+          {
+            "stateIdx": 4,
+            "concentration": 7.768217565442739,
+            "selected": true
+          },
+          {
+            "stateIdx": 5,
+            "concentration": 7.0948839678185704,
+            "selected": true
+          },
+          {
+            "stateIdx": 6,
+            "concentration": 9.705433374294875,
+            "selected": true
+          },
+          {
+            "stateIdx": 7,
+            "concentration": 7.562400151429206,
+            "selected": true
+          },
+          {
+            "stateIdx": 8,
+            "concentration": 8.550427124941276,
+            "selected": true
+          },
+          {
+            "stateIdx": 9,
+            "concentration": 8.812402738602195,
+            "selected": true
+          }
+        ]
+      }
+    ]
+  }
+];
+    const representativeStates = [0,1,2,3,4,5,6,7,8,9];
+
+    // PCA helper function with consistent orientation
+    let lastPC1 = null;
+    let lastPC2 = null;
+
+    function pca2D(embeddings) {
+      // Center the data
+      const dim = embeddings[0].length;
+      const means = [];
+      for (let d = 0; d < dim; d++) {
+        means.push(d3.mean(embeddings, emb => emb[d]));
+      }
+
+      const centered = embeddings.map(emb =>
+        emb.map((val, d) => val - means[d])
+      );
+
+      // Compute covariance matrix
+      const cov = [];
+      for (let i = 0; i < dim; i++) {
+        cov[i] = [];
+        for (let j = 0; j < dim; j++) {
+          let sum = 0;
+          for (const c of centered) {
+            sum += c[i] * c[j];
+          }
+          cov[i][j] = sum / centered.length;
+        }
+      }
+
+      // Power iteration to find top 2 eigenvectors
+      function powerIteration(matrix, numIters = 20) {
+        let v = Array(dim).fill(0).map(() => Math.random());
+        let norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+        v = v.map(x => x / norm);
+
+        for (let iter = 0; iter < numIters; iter++) {
+          const Av = matrix.map(row =>
+            row.reduce((sum, val, i) => sum + val * v[i], 0)
+          );
+          norm = Math.sqrt(Av.reduce((s, x) => s + x * x, 0));
+          v = Av.map(x => x / norm);
+        }
+
+        return v;
+      }
+
+      let pc1 = powerIteration(cov);
+
+      // Deflate to find second component
+      const cov2 = cov.map((row, i) =>
+        row.map((val, j) => val - pc1[i] * pc1[j] * (cov.map((r, k) => r[i] * pc1[k]).reduce((a, b) => a + b, 0)))
+      );
+      let pc2 = powerIteration(cov2);
+
+      // Fix sign ambiguity: ensure consistent orientation across checkpoints
+      if (lastPC1 !== null) {
+        // Dot product with previous PC1 - flip if negative (opposite direction)
+        const dot1 = pc1.reduce((sum, val, i) => sum + val * lastPC1[i], 0);
+        if (dot1 < 0) {
+          pc1 = pc1.map(v => -v);
+        }
+      }
+
+      if (lastPC2 !== null) {
+        // Dot product with previous PC2 - flip if negative
+        const dot2 = pc2.reduce((sum, val, i) => sum + val * lastPC2[i], 0);
+        if (dot2 < 0) {
+          pc2 = pc2.map(v => -v);
+        }
+      }
+
+      // Store for next checkpoint
+      lastPC1 = pc1;
+      lastPC2 = pc2;
+
+      // Project onto PC1 and PC2
+      return centered.map(c => [
+        c.reduce((sum, val, i) => sum + val * pc1[i], 0),
+        c.reduce((sum, val, i) => sum + val * pc2[i], 0)
+      ]);
+    }
+
+    // Slider control
+    document.getElementById('checkpoint-slider').addEventListener('input', function(e) {
+      visualize(parseInt(e.target.value));
+    });
+
+    // Initialize with last checkpoint
+    visualize(checkpoints.length - 1);
+
+    function visualize(checkpointIdx) {
+      const checkpoint = checkpoints[checkpointIdx];
+      document.getElementById('checkpoint-label').textContent =
+        `Sample ${checkpoint.sample} (${checkpoint.ports.length} ports)`;
+
+      // Clear previous charts
+      d3.select('#embedding-chart').html('');
+      d3.select('#heatmap-chart').html('');
+
+      visualizeEmbeddings(checkpoint);
+      visualizeHeatmap(checkpoint);
+    }
+
+    function visualizeEmbeddings(checkpoint) {
+      const margin = { top: 40, right: 20, bottom: 60, left: 60 };
+      const width = 600 - margin.left - margin.right;
+      const height = 500 - margin.top - margin.bottom;
+
+      const svg = d3.select('#embedding-chart')
+        .append('svg')
+        .attr('width', width + margin.left + margin.right)
+        .attr('height', height + margin.top + margin.bottom)
+        .append('g')
+        .attr('transform', `translate(${margin.left},${margin.top})`);
+
+      // Check dimensionality and apply PCA if needed
+      const allEmbeddings = checkpoint.ports.map(p => p.embedding);
+      const embeddingDim = allEmbeddings[0].length;
+      let projectedEmbeddings;
+      let usedPCA = false;
+
+      if (embeddingDim > 2) {
+        projectedEmbeddings = pca2D(allEmbeddings);
+        usedPCA = true;
+      } else {
+        projectedEmbeddings = allEmbeddings;
+      }
+
+      // Title
+      const titleText = usedPCA
+        ? `Port Embeddings (PCA: ${embeddingDim}D → 2D)`
+        : 'Port Embeddings with Cone Ranges (Polysemanticity)';
+      svg.append('text')
+        .attr('x', width / 2)
+        .attr('y', -15)
+        .attr('text-anchor', 'middle')
+        .style('font-size', '14px')
+        .style('font-weight', 'bold')
+        .text(titleText);
+
+      // Find extent of projected embeddings
+      const xExtent = d3.extent(projectedEmbeddings, d => d[0]);
+      const yExtent = d3.extent(projectedEmbeddings, d => d[1]);
+
+      const xScale = d3.scaleLinear()
+        .domain([xExtent[0] - 0.5, xExtent[1] + 0.5])
+        .range([0, width]);
+
+      const yScale = d3.scaleLinear()
+        .domain([yExtent[0] - 0.5, yExtent[1] + 0.5])
+        .range([height, 0]);
+
+      // Color scale for ports
+      const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
+
+      // Axes
+      const xAxisLabel = usedPCA ? 'PC1' : 'Dimension 1 (e.g., position)';
+      const yAxisLabel = usedPCA ? 'PC2' : 'Dimension 2 (e.g., velocity)';
+
+      svg.append('g')
+        .attr('transform', `translate(0,${height})`)
+        .call(d3.axisBottom(xScale))
+        .append('text')
+        .attr('class', 'axis-label')
+        .attr('x', width / 2)
+        .attr('y', 40)
+        .attr('fill', 'black')
+        .text(xAxisLabel);
+
+      svg.append('g')
+        .call(d3.axisLeft(yScale))
+        .append('text')
+        .attr('class', 'axis-label')
+        .attr('transform', 'rotate(-90)')
+        .attr('x', -height / 2)
+        .attr('y', -45)
+        .attr('fill', 'black')
+        .attr('text-anchor', 'middle')
+        .text(yAxisLabel);
+
+      const tooltip = d3.select('#tooltip');
+
+      // Draw ports with varying sizes per state
+      checkpoint.ports.forEach((port, idx) => {
+        const projEmb = projectedEmbeddings[idx];
+        const minConc = d3.min(port.commitments, c => c.concentration);
+        const maxConc = d3.max(port.commitments, c => c.concentration);
+
+        // Draw min concentration circle (widest cone - faint)
+        const maxRadius = 300 / minConc;
+        svg.append('circle')
+          .attr('class', 'port-circle')
+          .attr('cx', xScale(projEmb[0]))
+          .attr('cy', yScale(projEmb[1]))
+          .attr('r', Math.min(maxRadius, 50))
+          .attr('fill', colorScale(port.portIdx))
+          .attr('opacity', 0.1)
+          .attr('stroke', 'none');
+
+        // Draw max concentration circle (narrowest cone - bold)
+        const minRadius = 300 / maxConc;
+        svg.append('circle')
+          .attr('class', 'port-circle')
+          .attr('cx', xScale(projEmb[0]))
+          .attr('cy', yScale(projEmb[1]))
+          .attr('r', Math.min(minRadius, 50))
+          .attr('fill', colorScale(port.portIdx))
+          .attr('opacity', 0.6)
+          .on('mouseover', function(event) {
+            const origEmbStr = port.embedding.map(v => v.toFixed(2)).join(', ');
+            const projEmbStr = usedPCA
+              ? `<br/>Projected: [${projEmb.map(v => v.toFixed(2)).join(', ')}]`
+              : '';
+            tooltip
+              .style('opacity', 1)
+              .style('left', (event.pageX + 10) + 'px')
+              .style('top', (event.pageY - 10) + 'px')
+              .html(`
+                <strong>Port ${port.portIdx}</strong><br/>
+                Embedding: [${origEmbStr}]${projEmbStr}<br/>
+                Max concentration (narrowest): ${maxConc.toFixed(3)}<br/>
+                Min concentration (widest): ${minConc.toFixed(3)}<br/>
+                Range shows polysemanticity
+              `);
+          })
+          .on('mouseout', () => tooltip.style('opacity', 0));
+
+        svg.append('text')
+          .attr('class', 'port-label')
+          .attr('x', xScale(projEmb[0]))
+          .attr('y', yScale(projEmb[1]))
+          .attr('dy', 4)
+          .attr('text-anchor', 'middle')
+          .text(port.portIdx);
+      });
+    }
+
+    function visualizeHeatmap(checkpoint) {
+      const margin = { top: 40, right: 20, bottom: 60, left: 60 };
+      const width = 600 - margin.left - margin.right;
+      const height = 500 - margin.top - margin.bottom;
+
+      const svg = d3.select('#heatmap-chart')
+        .append('svg')
+        .attr('width', width + margin.left + margin.right)
+        .attr('height', height + margin.top + margin.bottom)
+        .append('g')
+        .attr('transform', `translate(${margin.left},${margin.top})`);
+
+      // Title
+      svg.append('text')
+        .attr('x', width / 2)
+        .attr('y', -15)
+        .attr('text-anchor', 'middle')
+        .style('font-size', '14px')
+        .style('font-weight', 'bold')
+        .text('Port Commitment Concentrations at Test States');
+
+      const numPorts = checkpoint.ports.length;
+      const numStates = representativeStates.length;
+
+      const cellWidth = width / numStates;
+      const cellHeight = height / numPorts;
+
+      // Extract concentrations for color scale
+      const allConcentrations = checkpoint.ports.flatMap(p => p.commitments.map(c => c.concentration));
+      const colorScale = d3.scaleSequential(d3.interpolateYlGn)
+        .domain([0, d3.max(allConcentrations)]);
+
+      const tooltip = d3.select('#tooltip');
+
+      // Draw heatmap
+      checkpoint.ports.forEach((port, portIdx) => {
+        port.commitments.forEach(commit => {
+          svg.append('rect')
+            .attr('class', 'heatmap-cell')
+            .attr('x', commit.stateIdx * cellWidth)
+            .attr('y', portIdx * cellHeight)
+            .attr('width', cellWidth)
+            .attr('height', cellHeight)
+            .attr('fill', colorScale(commit.concentration))
+            .attr('stroke-width', commit.selected ? 3 : 1)
+            .attr('stroke', commit.selected ? '#000' : '#fff')
+            .on('mouseover', function(event) {
+              tooltip
+                .style('opacity', 1)
+                .style('left', (event.pageX + 10) + 'px')
+                .style('top', (event.pageY - 10) + 'px')
+                .html(`
+                  <strong>Port ${port.portIdx} @ State ${commit.stateIdx}</strong><br/>
+                  Concentration: ${commit.concentration.toFixed(3)}<br/>
+                  Cone: ${(1/commit.concentration).toFixed(3)} (radius)<br/>
+                  Selected: ${commit.selected ? 'Yes' : 'No'}
+                `);
+            })
+            .on('mouseout', () => tooltip.style('opacity', 0));
+        });
+      });
+
+      // X axis (states)
+      svg.append('g')
+        .attr('transform', `translate(0,${height})`)
+        .call(d3.axisBottom(d3.scaleLinear().domain([0, numStates]).range([0, width])).ticks(numStates))
+        .append('text')
+        .attr('class', 'axis-label')
+        .attr('x', width / 2)
+        .attr('y', 40)
+        .attr('fill', 'black')
+        .text('Test State Index');
+
+      // Y axis (ports)
+      svg.append('g')
+        .call(d3.axisLeft(d3.scaleLinear().domain([0, numPorts]).range([0, height])).ticks(numPorts))
+        .append('text')
+        .attr('class', 'axis-label')
+        .attr('transform', 'rotate(-90)')
+        .attr('x', -height / 2)
+        .attr('y', -45)
+        .attr('fill', 'black')
+        .attr('text-anchor', 'middle')
+        .text('Port Index');
+
+      // Color legend
+      const legendWidth = 200;
+      const legendHeight = 20;
+      const legend = svg.append('g')
+        .attr('class', 'legend')
+        .attr('transform', `translate(${width - legendWidth}, ${height + 35})`);
+
+      const legendScale = d3.scaleLinear()
+        .domain([0, d3.max(allConcentrations)])
+        .range([0, legendWidth]);
+
+      const legendAxis = d3.axisBottom(legendScale).ticks(5);
+
+      // Gradient
+      const defs = svg.append('defs');
+      const gradient = defs.append('linearGradient')
+        .attr('id', 'legend-gradient');
+
+      gradient.selectAll('stop')
+        .data(d3.range(0, 1.1, 0.1))
+        .enter().append('stop')
+        .attr('offset', d => `${d * 100}%`)
+        .attr('stop-color', d => colorScale(d * d3.max(allConcentrations)));
+
+      legend.append('rect')
+        .attr('width', legendWidth)
+        .attr('height', legendHeight)
+        .style('fill', 'url(#legend-gradient)');
+
+      legend.append('g')
+        .attr('transform', `translate(0,${legendHeight})`)
+        .call(legendAxis);
+
+      legend.append('text')
+        .attr('x', legendWidth / 2)
+        .attr('y', -5)
+        .attr('text-anchor', 'middle')
+        .style('font-size', '11px')
+        .text('Concentration (higher = narrower cone)');
+    }
+  </script>
+</body>
+</html>

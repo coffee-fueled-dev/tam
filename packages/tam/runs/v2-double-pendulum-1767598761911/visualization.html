@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>V2 Double Pendulum - TAM v2 Training</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    h1 {
+      margin-top: 0;
+      color: #333;
+    }
+
+    .metadata {
+      background: #f8f8f8;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+
+    .metadata code {
+      background: #e0e0e0;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .chart {
+      margin-top: 20px;
+    }
+
+    .line {
+      fill: none;
+      stroke-width: 2.5;
+    }
+
+    .line-error-test {
+      stroke: #e74c3c;
+    }
+
+    .line-error-train {
+      stroke: #e74c3c;
+      stroke-dasharray: 5,5;
+      opacity: 0.7;
+    }
+
+    .line-agency-test {
+      stroke: #3498db;
+    }
+
+    .line-agency-train {
+      stroke: #3498db;
+      stroke-dasharray: 5,5;
+      opacity: 0.7;
+    }
+
+    .line-binding-test {
+      stroke: #2ecc71;
+    }
+
+    .line-binding-train {
+      stroke: #2ecc71;
+      stroke-dasharray: 5,5;
+      opacity: 0.7;
+    }
+
+    .line-calibration-test {
+      stroke: #9b59b6;
+    }
+
+    .line-calibration-train {
+      stroke: #9b59b6;
+      stroke-dasharray: 5,5;
+      opacity: 0.7;
+    }
+
+    .axis-label {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .legend {
+      font-size: 14px;
+    }
+
+    .grid line {
+      stroke: #e0e0e0;
+      stroke-opacity: 0.7;
+      shape-rendering: crispEdges;
+    }
+
+    .grid path {
+      stroke-width: 0;
+    }
+
+    .tooltip {
+      position: absolute;
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>V2 Double Pendulum</h1>
+
+    <div class="metadata">
+      <strong>Run ID:</strong> <code>v2-double-pendulum-1767598761911</code><br>
+      <strong>Timestamp:</strong> 1/5/2026, 2:39:21 AM<br>
+      <strong>Final Ports:</strong> 41
+    </div>
+
+    <div id="chart" class="chart"></div>
+    <div id="tooltip" class="tooltip"></div>
+  </div>
+
+  <script>
+    const data = [
+  {
+    "sample": 150,
+    "portCount": 1,
+    "testAgency": 0.4171453027680134,
+    "testError": 0.6117339695097935,
+    "testBindingRate": 0,
+    "trainAgency": 0.4360651674170084,
+    "trainError": 0.5753284202978294,
+    "trainBindingRate": 0.013333333333333334,
+    "testCalibrationGap": 0.4171453027680134,
+    "trainCalibrationGap": 0.4227318340836751,
+    "avgConeRadius": 0.1465623342875963
+  },
+  {
+    "sample": 300,
+    "portCount": 1,
+    "testAgency": 0.296298913639035,
+    "testError": 0.916361118040713,
+    "testBindingRate": 0,
+    "trainAgency": 0.32257633696570964,
+    "trainError": 0.8526391341646178,
+    "trainBindingRate": 0.006666666666666667,
+    "testCalibrationGap": 0.296298913639035,
+    "trainCalibrationGap": 0.315909670299043,
+    "avgConeRadius": 0.1781250977424725
+  },
+  {
+    "sample": 450,
+    "portCount": 1,
+    "testAgency": 0.16663045285514902,
+    "testError": 1.4015505487149094,
+    "testBindingRate": 0,
+    "trainAgency": 0.1872930047152212,
+    "trainError": 1.2833170722692002,
+    "trainBindingRate": 0.0044444444444444444,
+    "testCalibrationGap": 0.16663045285514902,
+    "trainCalibrationGap": 0.18284856027077676,
+    "avgConeRadius": 0.20727180447089624
+  },
+  {
+    "sample": 600,
+    "portCount": 2,
+    "testAgency": 0.07091083581052363,
+    "testError": 1.999936884200439,
+    "testBindingRate": 0,
+    "trainAgency": 0.08375928501420807,
+    "trainError": 1.8923925597003495,
+    "trainBindingRate": 0.0033333333333333335,
+    "testCalibrationGap": 0.07091083581052363,
+    "trainCalibrationGap": 0.08042595168087474,
+    "avgConeRadius": 0.230089950707274
+  },
+  {
+    "sample": 750,
+    "portCount": 4,
+    "testAgency": 0.02919624753728212,
+    "testError": 2.756248444110745,
+    "testBindingRate": 0,
+    "trainAgency": 0.03755703865809557,
+    "trainError": 2.526955538903874,
+    "trainBindingRate": 0.0026666666666666666,
+    "testCalibrationGap": 0.02919624753728212,
+    "trainCalibrationGap": 0.03489037199142891,
+    "avgConeRadius": 0.24269882617365024
+  },
+  {
+    "sample": 900,
+    "portCount": 5,
+    "testAgency": 0.022188793634027763,
+    "testError": 2.9969622114493086,
+    "testBindingRate": 0,
+    "trainAgency": 0.023703285119305324,
+    "trainError": 2.979197966993755,
+    "trainBindingRate": 0.0022222222222222222,
+    "testCalibrationGap": 0.022188793634027763,
+    "trainCalibrationGap": 0.0214810628970831,
+    "avgConeRadius": 0.2445238612865112
+  },
+  {
+    "sample": 1050,
+    "portCount": 6,
+    "testAgency": 0.01853080794727982,
+    "testError": 3.1397133073410854,
+    "testBindingRate": 0,
+    "trainAgency": 0.02021228553311819,
+    "trainError": 3.0768914815559167,
+    "trainBindingRate": 0.0019047619047619048,
+    "testCalibrationGap": 0.01853080794727982,
+    "trainCalibrationGap": 0.018307523628356283,
+    "avgConeRadius": 0.2456038644210327
+  },
+  {
+    "sample": 1200,
+    "portCount": 8,
+    "testAgency": 0.014568896660222971,
+    "testError": 3.3270011781333966,
+    "testBindingRate": 0,
+    "trainAgency": 0.014736815323665662,
+    "trainError": 3.387682143642795,
+    "trainBindingRate": 0.0016666666666666668,
+    "testCalibrationGap": 0.014568896660222971,
+    "trainCalibrationGap": 0.013070148656998995,
+    "avgConeRadius": 0.24629012589049046
+  },
+  {
+    "sample": 1350,
+    "portCount": 9,
+    "testAgency": 0.011651122633300728,
+    "testError": 3.5042476389342947,
+    "testBindingRate": 0,
+    "trainAgency": 0.01302545554441138,
+    "trainError": 3.4603410881732946,
+    "trainBindingRate": 0.0014814814814814814,
+    "testCalibrationGap": 0.011651122633300728,
+    "trainCalibrationGap": 0.0115439740629299,
+    "avgConeRadius": 0.24715089376080232
+  },
+  {
+    "sample": 1500,
+    "portCount": 10,
+    "testAgency": 0.008711165154856412,
+    "testError": 3.729900247967923,
+    "testBindingRate": 0,
+    "trainAgency": 0.010748329443497004,
+    "trainError": 3.619088469329549,
+    "trainBindingRate": 0.0013333333333333333,
+    "testCalibrationGap": 0.008711165154856412,
+    "trainCalibrationGap": 0.00941499611016367,
+    "avgConeRadius": 0.24770241827452716
+  },
+  {
+    "sample": 1650,
+    "portCount": 12,
+    "testAgency": 0.006395771264190136,
+    "testError": 3.9810999304182633,
+    "testBindingRate": 0,
+    "trainAgency": 0.0087949238725179,
+    "trainError": 3.772947332285355,
+    "trainBindingRate": 0.0012121212121212121,
+    "testCalibrationGap": 0.006395771264190136,
+    "trainCalibrationGap": 0.0075828026603966875,
+    "avgConeRadius": 0.24827289848549688
+  },
+  {
+    "sample": 1800,
+    "portCount": 13,
+    "testAgency": 0.005404901045192299,
+    "testError": 4.164789101503462,
+    "testBindingRate": 0,
+    "trainAgency": 0.006680522500770936,
+    "trainError": 4.0639369216109555,
+    "trainBindingRate": 0.0011111111111111111,
+    "testCalibrationGap": 0.005404901045192299,
+    "trainCalibrationGap": 0.005569411389659825,
+    "avgConeRadius": 0.2489082680366978
+  },
+  {
+    "sample": 1950,
+    "portCount": 14,
+    "testAgency": 0.003589313537599081,
+    "testError": 4.423003117617849,
+    "testBindingRate": 0,
+    "trainAgency": 0.005300010184733096,
+    "trainError": 4.270139318381798,
+    "trainBindingRate": 0.0010256410256410256,
+    "testCalibrationGap": 0.003589313537599081,
+    "trainCalibrationGap": 0.00427436915909207,
+    "avgConeRadius": 0.24917055047260375
+  },
+  {
+    "sample": 2100,
+    "portCount": 16,
+    "testAgency": 0.002409127244309237,
+    "testError": 4.740132994936794,
+    "testBindingRate": 0,
+    "trainAgency": 0.004163899225138746,
+    "trainError": 4.578485992480893,
+    "trainBindingRate": 0.0009523809523809524,
+    "testCalibrationGap": 0.002409127244309237,
+    "trainCalibrationGap": 0.0032115182727577934,
+    "avgConeRadius": 0.24933481824084738
+  },
+  {
+    "sample": 2250,
+    "portCount": 17,
+    "testAgency": 0.003861194671111718,
+    "testError": 4.767372715437981,
+    "testBindingRate": 0,
+    "trainAgency": 0.0033315983728324384,
+    "trainError": 4.816768490088808,
+    "trainBindingRate": 0.0008888888888888889,
+    "testCalibrationGap": 0.003861194671111718,
+    "trainCalibrationGap": 0.0024427094839435497,
+    "avgConeRadius": 0.24924473991915458
+  },
+  {
+    "sample": 2400,
+    "portCount": 19,
+    "testAgency": 0.001168035714532466,
+    "testError": 5.293882640671968,
+    "testBindingRate": 0,
+    "trainAgency": 0.0026274092280336625,
+    "trainError": 5.185985344338476,
+    "trainBindingRate": 0.0008333333333333334,
+    "testCalibrationGap": 0.001168035714532466,
+    "trainCalibrationGap": 0.001794075894700329,
+    "avgConeRadius": 0.24970277613287445
+  },
+  {
+    "sample": 2550,
+    "portCount": 20,
+    "testAgency": 0.0007931542479798382,
+    "testError": 5.604463517446808,
+    "testBindingRate": 0,
+    "trainAgency": 0.0021693100732928586,
+    "trainError": 5.502037549194748,
+    "trainBindingRate": 0.000784313725490196,
+    "testCalibrationGap": 0.0007931542479798382,
+    "trainCalibrationGap": 0.0013849963478026624,
+    "avgConeRadius": 0.24981827055651276
+  },
+  {
+    "sample": 2700,
+    "portCount": 21,
+    "testAgency": 0.0021184556142997742,
+    "testError": 5.782724681403165,
+    "testBindingRate": 0,
+    "trainAgency": 0.0018728415230231568,
+    "trainError": 5.7845312769190285,
+    "trainBindingRate": 0.0007407407407407407,
+    "testCalibrationGap": 0.0021184556142997742,
+    "trainCalibrationGap": 0.001132100782282416,
+    "avgConeRadius": 0.24988791095031732
+  },
+  {
+    "sample": 2850,
+    "portCount": 23,
+    "testAgency": 0.00029348935015381124,
+    "testError": 6.3721821654350945,
+    "testBindingRate": 0,
+    "trainAgency": 0.001699038458663526,
+    "trainError": 6.06130907071112,
+    "trainBindingRate": 0.0007017543859649122,
+    "testCalibrationGap": 0.00029348935015381124,
+    "trainCalibrationGap": 0.0009972840726986138,
+    "avgConeRadius": 0.2499327585659647
+  },
+  {
+    "sample": 3000,
+    "portCount": 24,
+    "testAgency": 0.00017295531626158498,
+    "testError": 6.7826684372102735,
+    "testBindingRate": 0,
+    "trainAgency": 0.0015029319725625519,
+    "trainError": 6.493450454759248,
+    "trainBindingRate": 0.0006666666666666666,
+    "testCalibrationGap": 0.00017295531626158498,
+    "trainCalibrationGap": 0.0008362653058958852,
+    "avgConeRadius": 0.24995836003233024
+  },
+  {
+    "sample": 3150,
+    "portCount": 25,
+    "testAgency": 0.0003447661635198856,
+    "testError": 7.015435470271556,
+    "testBindingRate": 0,
+    "trainAgency": 0.0014059881688879056,
+    "trainError": 6.770167537859513,
+    "trainBindingRate": 0.0006349206349206349,
+    "testCalibrationGap": 0.0003447661635198856,
+    "trainCalibrationGap": 0.0007710675339672706,
+    "avgConeRadius": 0.24993008778315967
+  },
+  {
+    "sample": 3300,
+    "portCount": 27,
+    "testAgency": 0.00006132905016112118,
+    "testError": 7.696519299629645,
+    "testBindingRate": 0,
+    "trainAgency": 0.0013221943260834012,
+    "trainError": 7.258964631516548,
+    "trainBindingRate": 0.0006060606060606061,
+    "testCalibrationGap": 0.00006132905016112118,
+    "trainCalibrationGap": 0.0007161337200227952,
+    "avgConeRadius": 0.2499845776867348
+  },
+  {
+    "sample": 3450,
+    "portCount": 28,
+    "testAgency": 0.000049281615511422326,
+    "testError": 8.168777338726896,
+    "testBindingRate": 0,
+    "trainAgency": 0.0012989398635976682,
+    "trainError": 7.745472714853359,
+    "trainBindingRate": 0.0005797101449275362,
+    "testCalibrationGap": 0.000049281615511422326,
+    "trainCalibrationGap": 0.000719229718670132,
+    "avgConeRadius": 0.24998792669562256
+  },
+  {
+    "sample": 3600,
+    "portCount": 29,
+    "testAgency": 0.00004540480251895999,
+    "testError": 8.686246252882913,
+    "testBindingRate": 0,
+    "trainAgency": 0.001259514450981763,
+    "trainError": 8.22630249199208,
+    "trainBindingRate": 0.0005555555555555554,
+    "testCalibrationGap": 0.00004540480251895999,
+    "trainCalibrationGap": 0.0007039588954262075,
+    "avgConeRadius": 0.24998859318772731
+  },
+  {
+    "sample": 3750,
+    "portCount": 31,
+    "testAgency": 0.000045397868701919114,
+    "testError": 9.224345188833068,
+    "testBindingRate": 0,
+    "trainAgency": 0.0012253417731755158,
+    "trainError": 8.710307417267726,
+    "trainBindingRate": 0.0005333333333333333,
+    "testCalibrationGap": 0.000045397868701919114,
+    "trainCalibrationGap": 0.0006920084398421826,
+    "avgConeRadius": 0.24998865053282432
+  },
+  {
+    "sample": 3900,
+    "portCount": 32,
+    "testAgency": 0.0007300874204555361,
+    "testError": 9.754209078612009,
+    "testBindingRate": 0,
+    "trainAgency": 0.0011799593153111467,
+    "trainError": 9.202188460455169,
+    "trainBindingRate": 0.0005128205128205128,
+    "testCalibrationGap": 0.0007300874204555361,
+    "trainCalibrationGap": 0.0006671388024906339,
+    "avgConeRadius": 0.24998865053282432
+  },
+  {
+    "sample": 4050,
+    "portCount": 33,
+    "testAgency": 0.000045397868701919114,
+    "testError": 10.49200836393566,
+    "testBindingRate": 0,
+    "trainAgency": 0.0011501147774193084,
+    "trainError": 9.89537159107986,
+    "trainBindingRate": 0.0004938271604938272,
+    "testCalibrationGap": 0.000045397868701919114,
+    "trainCalibrationGap": 0.0006562876169254813,
+    "avgConeRadius": 0.24998865053282432
+  },
+  {
+    "sample": 4200,
+    "portCount": 35,
+    "testAgency": 0.000045397868701919114,
+    "testError": 11.254029608711164,
+    "testBindingRate": 0,
+    "trainAgency": 0.001116865006504543,
+    "trainError": 10.585914779754368,
+    "trainBindingRate": 0.0004761904761904762,
+    "testCalibrationGap": 0.000045397868701919114,
+    "trainCalibrationGap": 0.0006406745303140669,
+    "avgConeRadius": 0.24998865053282432
+  },
+  {
+    "sample": 4350,
+    "portCount": 36,
+    "testAgency": 0.000045397868701919114,
+    "testError": 11.960547501895748,
+    "testBindingRate": 0,
+    "trainAgency": 0.0010955027468757014,
+    "trainError": 11.189618747340447,
+    "trainBindingRate": 0.00045977011494252866,
+    "testCalibrationGap": 0.000045397868701919114,
+    "trainCalibrationGap": 0.0006357326319331727,
+    "avgConeRadius": 0.24998865053282432
+  },
+  {
+    "sample": 4500,
+    "portCount": 37,
+    "testAgency": 0.0005721228365922703,
+    "testError": 12.046053637203732,
+    "testBindingRate": 0,
+    "trainAgency": 0.0010636940670183932,
+    "trainError": 11.977545726701774,
+    "trainBindingRate": 0.00044444444444444447,
+    "testCalibrationGap": 0.0005721228365922703,
+    "trainCalibrationGap": 0.0006192496225739488,
+    "avgConeRadius": 0.24835552067333114
+  },
+  {
+    "sample": 4650,
+    "portCount": 38,
+    "testAgency": 0.0007525658741904398,
+    "testError": 12.824866193169685,
+    "testBindingRate": 0,
+    "trainAgency": 0.0010630762115362712,
+    "trainError": 12.713960831489251,
+    "trainBindingRate": 0.00043010752688172043,
+    "testCalibrationGap": 0.0007525658741904398,
+    "trainCalibrationGap": 0.0006329686846545507,
+    "avgConeRadius": 0.24930247496201643
+  },
+  {
+    "sample": 4800,
+    "portCount": 40,
+    "testAgency": 0.000045397868701919114,
+    "testError": 14.575955690444312,
+    "testBindingRate": 0,
+    "trainAgency": 0.0010312737633226979,
+    "trainError": 13.596643701620101,
+    "trainBindingRate": 0.0004166666666666667,
+    "testCalibrationGap": 0.000045397868701919114,
+    "trainCalibrationGap": 0.0006146070966560311,
+    "avgConeRadius": 0.24998865053282432
+  },
+  {
+    "sample": 4950,
+    "portCount": 41,
+    "testAgency": 0.0009683693849501006,
+    "testError": 15.127391722001027,
+    "testBindingRate": 0,
+    "trainAgency": 0.0010250089336661177,
+    "trainError": 14.449671204936505,
+    "trainBindingRate": 0.00040404040404040404,
+    "testCalibrationGap": 0.0009683693849501006,
+    "trainCalibrationGap": 0.0006209685296257137,
+    "avgConeRadius": 0.24998865053282432
+  }
+];
+
+    // Chart dimensions
+    const margin = { top: 20, right: 60, bottom: 20, left: 60 };
+    const width = 1100 - margin.left - margin.right;
+    const chartHeight = 180;
+    const spacing = 40;
+
+    // Create SVG container (4 charts now)
+    const totalHeight = (chartHeight * 4) + (spacing * 3) + margin.top + margin.bottom;
+    const svg = d3.select('#chart')
+      .append('svg')
+      .attr('width', width + margin.left + margin.right)
+      .attr('height', totalHeight);
+
+    // Shared X scale
+    const xScale = d3.scaleLinear()
+      .domain([0, d3.max(data, d => d.sample)])
+      .range([0, width]);
+
+    // Y scales for each metric
+    const maxError = Math.max(
+      d3.max(data, d => d.testError),
+      d3.max(data, d => d.trainError)
+    );
+    const yScaleError = d3.scaleLinear()
+      .domain([0, maxError * 1.1])
+      .range([chartHeight, 0]);
+
+    const yScaleAgency = d3.scaleLinear()
+      .domain([0, 1])
+      .range([chartHeight, 0]);
+
+    const yScaleBinding = d3.scaleLinear()
+      .domain([0, 1])
+      .range([chartHeight, 0]);
+
+    // Y scale for calibration gap
+    const maxCalGap = Math.max(
+      d3.max(data, d => d.testCalibrationGap || 0),
+      d3.max(data, d => d.trainCalibrationGap || 0),
+      0.1 // minimum scale
+    );
+    const yScaleCalibration = d3.scaleLinear()
+      .domain([0, maxCalGap * 1.1])
+      .range([chartHeight, 0]);
+
+    // Helper function to create a chart with train/test lines
+    function createDualChart(yOffset, yScale, baseColor, baseName, yLabel, getTestValue, getTrainValue) {
+      const g = svg.append('g')
+        .attr('transform', `translate(${margin.left},${yOffset})`);
+
+      // Grid
+      g.append('g')
+        .attr('class', 'grid')
+        .attr('transform', `translate(0,${chartHeight})`)
+        .call(d3.axisBottom(xScale).tickSize(-chartHeight).tickFormat(''));
+
+      g.append('g')
+        .attr('class', 'grid')
+        .call(d3.axisLeft(yScale).tickSize(-width).tickFormat(''));
+
+      // Test line (solid)
+      const testLine = d3.line()
+        .x(d => xScale(d.sample))
+        .y(d => yScale(getTestValue(d)))
+        .curve(d3.curveMonotoneX);
+
+      g.append('path')
+        .datum(data)
+        .attr('class', `line line-${baseName}-test`)
+        .attr('d', testLine);
+
+      // Train line (dashed)
+      const trainLine = d3.line()
+        .x(d => xScale(d.sample))
+        .y(d => yScale(getTrainValue(d)))
+        .curve(d3.curveMonotoneX);
+
+      g.append('path')
+        .datum(data)
+        .attr('class', `line line-${baseName}-train`)
+        .attr('d', trainLine);
+
+      // Y axis
+      g.append('g')
+        .call(d3.axisLeft(yScale).ticks(5))
+        .append('text')
+        .attr('class', 'axis-label')
+        .attr('transform', 'rotate(-90)')
+        .attr('x', -chartHeight / 2)
+        .attr('y', -45)
+        .attr('fill', baseColor)
+        .attr('text-anchor', 'middle')
+        .text(yLabel);
+
+      // Legend
+      const legend = g.append('g')
+        .attr('transform', `translate(${width - 100}, 10)`);
+
+      legend.append('line')
+        .attr('x1', 0).attr('x2', 20)
+        .attr('y1', 0).attr('y2', 0)
+        .attr('stroke', baseColor)
+        .attr('stroke-width', 2);
+      legend.append('text')
+        .attr('x', 25).attr('y', 4)
+        .style('font-size', '11px')
+        .text('Test');
+
+      legend.append('line')
+        .attr('x1', 0).attr('x2', 20)
+        .attr('y1', 15).attr('y2', 15)
+        .attr('stroke', baseColor)
+        .attr('stroke-width', 2)
+        .attr('stroke-dasharray', '5,5')
+        .attr('opacity', 0.7);
+      legend.append('text')
+        .attr('x', 25).attr('y', 19)
+        .style('font-size', '11px')
+        .text('Train');
+
+      return g;
+    }
+
+    // Tooltip
+    const tooltip = d3.select('#tooltip');
+
+    // Chart 1: Error
+    const errorChart = createDualChart(
+      margin.top,
+      yScaleError,
+      '#e74c3c',
+      'error',
+      'Error',
+      d => d.testError,
+      d => d.trainError
+    );
+
+    errorChart.append('rect')
+      .attr('width', width)
+      .attr('height', chartHeight)
+      .attr('fill', 'none')
+      .attr('pointer-events', 'all')
+      .on('mousemove', function(event) {
+        const [mouseX] = d3.pointer(event);
+        const sample = Math.round(xScale.invert(mouseX));
+        const dataPoint = data.find(d => d.sample >= sample);
+        if (dataPoint) {
+          tooltip
+            .style('opacity', 1)
+            .style('left', (event.pageX + 10) + 'px')
+            .style('top', (event.pageY - 10) + 'px')
+            .html(`<strong>Sample ${dataPoint.sample}</strong><br/>Test Error: ${dataPoint.testError.toFixed(4)}<br/>Train Error: ${dataPoint.trainError.toFixed(4)}`);
+        }
+      })
+      .on('mouseout', () => tooltip.style('opacity', 0));
+
+    // Chart 2: Agency
+    const agencyChart = createDualChart(
+      margin.top + chartHeight + spacing,
+      yScaleAgency,
+      '#3498db',
+      'agency',
+      'Agency',
+      d => d.testAgency,
+      d => d.trainAgency
+    );
+
+    agencyChart.append('rect')
+      .attr('width', width)
+      .attr('height', chartHeight)
+      .attr('fill', 'none')
+      .attr('pointer-events', 'all')
+      .on('mousemove', function(event) {
+        const [mouseX] = d3.pointer(event);
+        const sample = Math.round(xScale.invert(mouseX));
+        const dataPoint = data.find(d => d.sample >= sample);
+        if (dataPoint) {
+          tooltip
+            .style('opacity', 1)
+            .style('left', (event.pageX + 10) + 'px')
+            .style('top', (event.pageY - 10) + 'px')
+            .html(`<strong>Sample ${dataPoint.sample}</strong><br/>Test Agency: ${(dataPoint.testAgency * 100).toFixed(1)}%<br/>Train Agency: ${(dataPoint.trainAgency * 100).toFixed(1)}%`);
+        }
+      })
+      .on('mouseout', () => tooltip.style('opacity', 0));
+
+    // Chart 3: Binding Rate
+    const bindingChart = createDualChart(
+      margin.top + (chartHeight + spacing) * 2,
+      yScaleBinding,
+      '#2ecc71',
+      'binding',
+      'Binding Rate',
+      d => d.testBindingRate,
+      d => d.trainBindingRate
+    );
+
+    bindingChart.append('rect')
+      .attr('width', width)
+      .attr('height', chartHeight)
+      .attr('fill', 'none')
+      .attr('pointer-events', 'all')
+      .on('mousemove', function(event) {
+        const [mouseX] = d3.pointer(event);
+        const sample = Math.round(xScale.invert(mouseX));
+        const dataPoint = data.find(d => d.sample >= sample);
+        if (dataPoint) {
+          tooltip
+            .style('opacity', 1)
+            .style('left', (event.pageX + 10) + 'px')
+            .style('top', (event.pageY - 10) + 'px')
+            .html(`<strong>Sample ${dataPoint.sample}</strong><br/>Test Binding: ${(dataPoint.testBindingRate * 100).toFixed(1)}%<br/>Train Binding: ${(dataPoint.trainBindingRate * 100).toFixed(1)}%`);
+        }
+      })
+      .on('mouseout', () => tooltip.style('opacity', 0));
+
+    // Chart 4: Calibration Gap
+    const calibrationChart = createDualChart(
+      margin.top + (chartHeight + spacing) * 3,
+      yScaleCalibration,
+      '#9b59b6',
+      'calibration',
+      'Calibration Gap',
+      d => d.testCalibrationGap || 0,
+      d => d.trainCalibrationGap || 0
+    );
+
+    calibrationChart.append('rect')
+      .attr('width', width)
+      .attr('height', chartHeight)
+      .attr('fill', 'none')
+      .attr('pointer-events', 'all')
+      .on('mousemove', function(event) {
+        const [mouseX] = d3.pointer(event);
+        const sample = Math.round(xScale.invert(mouseX));
+        const dataPoint = data.find(d => d.sample >= sample);
+        if (dataPoint) {
+          tooltip
+            .style('opacity', 1)
+            .style('left', (event.pageX + 10) + 'px')
+            .style('top', (event.pageY - 10) + 'px')
+            .html(`<strong>Sample ${dataPoint.sample}</strong><br/>Test Cal.Gap: ${(dataPoint.testCalibrationGap || 0).toFixed(3)}<br/>Train Cal.Gap: ${(dataPoint.trainCalibrationGap || 0).toFixed(3)}`);
+        }
+      })
+      .on('mouseout', () => tooltip.style('opacity', 0));
+
+    // X axis (only on bottom chart)
+    calibrationChart.append('g')
+      .attr('transform', `translate(0,${chartHeight})`)
+      .call(d3.axisBottom(xScale))
+      .append('text')
+      .attr('class', 'axis-label')
+      .attr('x', width / 2)
+      .attr('y', 40)
+      .attr('fill', 'black')
+      .text('Sample');
+  </script>
+</body>
+</html>

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TAM v2 Training Visualization</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    h1 {
+      margin-top: 0;
+      color: #333;
+    }
+
+    .file-input {
+      margin-bottom: 20px;
+      padding: 10px;
+      background: #f8f8f8;
+      border-radius: 4px;
+    }
+
+    input[type="file"] {
+      padding: 8px;
+    }
+
+    .chart {
+      margin-top: 20px;
+    }
+
+    .line {
+      fill: none;
+      stroke-width: 2.5;
+    }
+
+    .line-error {
+      stroke: #e74c3c;
+    }
+
+    .line-agency {
+      stroke: #3498db;
+    }
+
+    .line-binding {
+      stroke: #2ecc71;
+    }
+
+    .axis-label {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .legend {
+      font-size: 14px;
+    }
+
+    .legend-item {
+      margin-right: 20px;
+    }
+
+    .legend-color {
+      display: inline-block;
+      width: 30px;
+      height: 3px;
+      margin-right: 5px;
+      vertical-align: middle;
+    }
+
+    .grid line {
+      stroke: #e0e0e0;
+      stroke-opacity: 0.7;
+      shape-rendering: crispEdges;
+    }
+
+    .grid path {
+      stroke-width: 0;
+    }
+
+    .tooltip {
+      position: absolute;
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>TAM v2 Training Visualization</h1>
+
+    <div class="file-input">
+      <label for="jsonl-file">Load checkpoints.jsonl:</label>
+      <input type="file" id="jsonl-file" accept=".jsonl">
+    </div>
+
+    <div id="chart" class="chart"></div>
+    <div id="tooltip" class="tooltip"></div>
+  </div>
+
+  <script>
+    // Chart dimensions
+    const margin = { top: 20, right: 60, bottom: 20, left: 60 };
+    const width = 1100 - margin.left - margin.right;
+    const chartHeight = 180;
+    const spacing = 40;
+
+    // Handle file upload
+    document.getElementById('jsonl-file').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        const text = event.target.result;
+        const data = text.trim().split('\n').map(line => JSON.parse(line));
+        visualize(data);
+      };
+      reader.readAsText(file);
+    });
+
+    function visualize(data) {
+      // Clear previous chart
+      d3.select('#chart').html('');
+
+      // Create SVG container
+      const totalHeight = (chartHeight * 3) + (spacing * 2) + margin.top + margin.bottom;
+      const svg = d3.select('#chart')
+        .append('svg')
+        .attr('width', width + margin.left + margin.right)
+        .attr('height', totalHeight);
+
+      // Shared X scale
+      const xScale = d3.scaleLinear()
+        .domain([0, d3.max(data, d => d.sample)])
+        .range([0, width]);
+
+      // Y scales for each metric
+      const yScaleError = d3.scaleLinear()
+        .domain([0, d3.max(data, d => d.avgError) * 1.1])
+        .range([chartHeight, 0]);
+
+      const yScaleAgency = d3.scaleLinear()
+        .domain([0, 1])
+        .range([chartHeight, 0]);
+
+      const yScaleBinding = d3.scaleLinear()
+        .domain([0, 1])
+        .range([chartHeight, 0]);
+
+      // Helper function to create a chart
+      function createChart(yOffset, yScale, lineColor, lineClass, yLabel, formatValue) {
+        const g = svg.append('g')
+          .attr('transform', `translate(${margin.left},${yOffset})`);
+
+        // Grid
+        g.append('g')
+          .attr('class', 'grid')
+          .attr('transform', `translate(0,${chartHeight})`)
+          .call(d3.axisBottom(xScale).tickSize(-chartHeight).tickFormat(''));
+
+        g.append('g')
+          .attr('class', 'grid')
+          .call(d3.axisLeft(yScale).tickSize(-width).tickFormat(''));
+
+        // Line
+        const line = d3.line()
+          .x(d => xScale(d.sample))
+          .y(d => yScale(formatValue(d)))
+          .curve(d3.curveMonotoneX);
+
+        g.append('path')
+          .datum(data)
+          .attr('class', `line ${lineClass}`)
+          .attr('d', line);
+
+        // Y axis
+        g.append('g')
+          .call(d3.axisLeft(yScale).ticks(5))
+          .append('text')
+          .attr('class', 'axis-label')
+          .attr('transform', 'rotate(-90)')
+          .attr('x', -chartHeight / 2)
+          .attr('y', -45)
+          .attr('fill', lineColor)
+          .attr('text-anchor', 'middle')
+          .text(yLabel);
+
+        return g;
+      }
+
+      // Tooltip
+      const tooltip = d3.select('#tooltip');
+
+      // Chart 1: Error
+      const errorChart = createChart(
+        margin.top,
+        yScaleError,
+        '#e74c3c',
+        'line-error',
+        'Error',
+        d => d.avgError
+      );
+
+      errorChart.append('rect')
+        .attr('width', width)
+        .attr('height', chartHeight)
+        .attr('fill', 'none')
+        .attr('pointer-events', 'all')
+        .on('mousemove', function(event) {
+          const [mouseX] = d3.pointer(event);
+          const sample = Math.round(xScale.invert(mouseX));
+          const dataPoint = data.find(d => d.sample >= sample);
+          if (dataPoint) {
+            tooltip
+              .style('opacity', 1)
+              .style('left', (event.pageX + 10) + 'px')
+              .style('top', (event.pageY - 10) + 'px')
+              .html(`<strong>Sample ${dataPoint.sample}</strong><br/>Error: ${dataPoint.avgError.toFixed(4)}`);
+          }
+        })
+        .on('mouseout', () => tooltip.style('opacity', 0));
+
+      // Chart 2: Agency
+      const agencyChart = createChart(
+        margin.top + chartHeight + spacing,
+        yScaleAgency,
+        '#3498db',
+        'line-agency',
+        'Agency',
+        d => d.avgAgency
+      );
+
+      agencyChart.append('rect')
+        .attr('width', width)
+        .attr('height', chartHeight)
+        .attr('fill', 'none')
+        .attr('pointer-events', 'all')
+        .on('mousemove', function(event) {
+          const [mouseX] = d3.pointer(event);
+          const sample = Math.round(xScale.invert(mouseX));
+          const dataPoint = data.find(d => d.sample >= sample);
+          if (dataPoint) {
+            tooltip
+              .style('opacity', 1)
+              .style('left', (event.pageX + 10) + 'px')
+              .style('top', (event.pageY - 10) + 'px')
+              .html(`<strong>Sample ${dataPoint.sample}</strong><br/>Agency: ${(dataPoint.avgAgency * 100).toFixed(1)}%`);
+          }
+        })
+        .on('mouseout', () => tooltip.style('opacity', 0));
+
+      // Chart 3: Binding Rate
+      const bindingChart = createChart(
+        margin.top + (chartHeight + spacing) * 2,
+        yScaleBinding,
+        '#2ecc71',
+        'line-binding',
+        'Binding Rate',
+        d => d.testBindingRate
+      );
+
+      bindingChart.append('rect')
+        .attr('width', width)
+        .attr('height', chartHeight)
+        .attr('fill', 'none')
+        .attr('pointer-events', 'all')
+        .on('mousemove', function(event) {
+          const [mouseX] = d3.pointer(event);
+          const sample = Math.round(xScale.invert(mouseX));
+          const dataPoint = data.find(d => d.sample >= sample);
+          if (dataPoint) {
+            tooltip
+              .style('opacity', 1)
+              .style('left', (event.pageX + 10) + 'px')
+              .style('top', (event.pageY - 10) + 'px')
+              .html(`<strong>Sample ${dataPoint.sample}</strong><br/>Binding Rate: ${(dataPoint.testBindingRate * 100).toFixed(1)}%`);
+          }
+        })
+        .on('mouseout', () => tooltip.style('opacity', 0));
+
+      // X axis (only on bottom chart)
+      bindingChart.append('g')
+        .attr('transform', `translate(0,${chartHeight})`)
+        .call(d3.axisBottom(xScale))
+        .append('text')
+        .attr('class', 'axis-label')
+        .attr('x', width / 2)
+        .attr('y', 40)
+        .attr('fill', 'black')
+        .text('Sample');
+    }
+  </script>
+</body>
+</html>

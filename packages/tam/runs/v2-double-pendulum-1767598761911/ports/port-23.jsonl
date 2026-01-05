@@ -1,0 +1,14 @@
+{"sample":3000,"samples":5,"bindings":0,"bindingRate":0,"avgAgency":0.00015792424106970704,"agencyStdDev":0.00003131597925363973,"avgError":6.831415130889913,"errorStdDev":0.18900409928041614}
+{"sample":3150,"samples":9,"bindings":0,"bindingRate":0,"avgAgency":0.0001592634020990833,"agencyStdDev":0.00003566782381201025,"avgError":6.839119101221303,"errorStdDev":0.22593705705362088}
+{"sample":3300,"samples":9,"bindings":0,"bindingRate":0,"avgAgency":0.0001592634020990833,"agencyStdDev":0.00003566782381201025,"avgError":6.839119101221303,"errorStdDev":0.22593705705362088}
+{"sample":3450,"samples":9,"bindings":0,"bindingRate":0,"avgAgency":0.0001592634020990833,"agencyStdDev":0.00003566782381201025,"avgError":6.839119101221303,"errorStdDev":0.22593705705362088}
+{"sample":3600,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":3750,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":3900,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":4050,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":4200,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":4350,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":4500,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":4650,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":4800,"samples":10,"bindings":0,"bindingRate":0,"avgAgency":0.0001489898944895338,"agencyStdDev":0.00004576984725086365,"avgError":6.943683627299959,"errorStdDev":0.37992954531272194}
+{"sample":4950,"samples":11,"bindings":0,"bindingRate":0,"avgAgency":0.0001431340103092804,"agencyStdDev":0.00004740621451614039,"avgError":6.987904566656277,"errorStdDev":0.38830267675737734}
