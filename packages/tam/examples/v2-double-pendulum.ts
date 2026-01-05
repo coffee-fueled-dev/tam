@@ -25,6 +25,8 @@ import {
   evaluate,
   generateVisualization,
   generateLatentVisualization,
+  analyzeOODDetection,
+  printOODAnalysis,
 } from "../src/v2";
 
 // Double pendulum parameters
@@ -331,6 +333,16 @@ async function main() {
 
   await generateVisualization(logger.getRunDir());
   await generateLatentVisualization(logger.getRunDir());
+
+  // OOD Detection Analysis
+  const oodResult = analyzeOODDetection(
+    actor,
+    testSetInDist,
+    testSetOutDist,
+    embedState,
+    step
+  );
+  printOODAnalysis(oodResult);
 
   actor.dispose();
 

@@ -19,6 +19,7 @@ export interface PortSnapshot {
   commitments: Array<{
     stateIdx: number;
     concentration: number;  // Concentration parameter at this state
+    coneRadius: Vec;        // Anisotropic cone radii (per dimension)
     selected: boolean;      // Was this port selected for this state?
   }>;
 }
@@ -100,6 +101,7 @@ export class LatentLogger<S> {
         commitmentsByPort.get(commit.portIdx)!.push({
           stateIdx,
           concentration: commit.concentration,
+          coneRadius: commit.coneRadius,
           selected: commit.selected,
         });
       }

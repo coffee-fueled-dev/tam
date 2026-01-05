@@ -356,30 +356,50 @@ async function generateLatentVisualization(runDir: string) {
 
       const tooltip = d3.select('#tooltip');
 
-      // Draw ports with varying sizes per state
+      // Draw ports with anisotropic cones (ellipses)
       checkpoint.ports.forEach((port, idx) => {
         const projEmb = projectedEmbeddings[idx];
-        const minConc = d3.min(port.commitments, c => c.concentration);
-        const maxConc = d3.max(port.commitments, c => c.concentration);
 
-        // Draw min concentration circle (widest cone - faint)
-        const maxRadius = 300 / minConc;
-        svg.append('circle')
+        // Compute average cone radius across states
+        const avgConeRadius = [0, 0];
+        for (const commit of port.commitments) {
+          avgConeRadius[0] += commit.coneRadius[0] || 0;
+          avgConeRadius[1] += commit.coneRadius[1] || 0;
+        }
+        avgConeRadius[0] /= port.commitments.length;
+        avgConeRadius[1] /= port.commitments.length;
+
+        // Compute min/max cone radii for visualization range
+        const minRadius = [
+          d3.min(port.commitments, c => c.coneRadius[0] || 0.01),
+          d3.min(port.commitments, c => c.coneRadius[1] || 0.01)
+        ];
+        const maxRadius = [
+          d3.max(port.commitments, c => c.coneRadius[0] || 0.01),
+          d3.max(port.commitments, c => c.coneRadius[1] || 0.01)
+        ];
+
+        // Scale factor for visualization (map cone radius to pixels)
+        const radiusScale = 50;
+
+        // Draw max cone (widest - faint ellipse)
+        svg.append('ellipse')
           .attr('class', 'port-circle')
           .attr('cx', xScale(projEmb[0]))
           .attr('cy', yScale(projEmb[1]))
-          .attr('r', Math.min(maxRadius, 50))
+          .attr('rx', Math.min(maxRadius[0] * radiusScale, 60))
+          .attr('ry', Math.min(maxRadius[1] * radiusScale, 60))
           .attr('fill', colorScale(port.portIdx))
           .attr('opacity', 0.1)
           .attr('stroke', 'none');
 
-        // Draw max concentration circle (narrowest cone - bold)
-        const minRadius = 300 / maxConc;
-        svg.append('circle')
+        // Draw min cone (narrowest - bold ellipse)
+        svg.append('ellipse')
           .attr('class', 'port-circle')
           .attr('cx', xScale(projEmb[0]))
           .attr('cy', yScale(projEmb[1]))
-          .attr('r', Math.min(minRadius, 50))
+          .attr('rx', Math.min(minRadius[0] * radiusScale, 60))
+          .attr('ry', Math.min(minRadius[1] * radiusScale, 60))
           .attr('fill', colorScale(port.portIdx))
           .attr('opacity', 0.6)
           .on('mouseover', function(event) {
@@ -394,9 +414,10 @@ async function generateLatentVisualization(runDir: string) {
               .html(\`
                 <strong>Port \${port.portIdx}</strong><br/>
                 Embedding: [\${origEmbStr}]\${projEmbStr}<br/>
-                Max concentration (narrowest): \${maxConc.toFixed(3)}<br/>
-                Min concentration (widest): \${minConc.toFixed(3)}<br/>
-                Range shows polysemanticity
+                Min cone radius: [\${minRadius.map(r => r.toFixed(3)).join(', ')}]<br/>
+                Max cone radius: [\${maxRadius.map(r => r.toFixed(3)).join(', ')}]<br/>
+                Avg cone radius: [\${avgConeRadius.map(r => r.toFixed(3)).join(', ')}]<br/>
+                <em>Ellipse shows anisotropy</em>
               \`);
           })
           .on('mouseout', () => tooltip.style('opacity', 0));

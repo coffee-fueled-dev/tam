@@ -26,6 +26,8 @@ import {
   generateVisualization,
   generateLatentVisualization,
   ProportionalRefinementPolicy,
+  analyzeOODDetection,
+  printOODAnalysis,
 } from "../src/v2";
 
 // 1D damped spring (same as v1)
@@ -87,7 +89,7 @@ async function main() {
   console.log("  - Dynamics: Linear spring with damping");
   console.log("  - Challenge: Learn smooth, predictable system\n");
 
-  const samples = 10_000;
+  const samples = 5_000;
   const checkpointEvery = 100;
 
   // Set up logging
@@ -276,6 +278,16 @@ async function main() {
 
   await generateVisualization(logger.getRunDir());
   await generateLatentVisualization(logger.getRunDir());
+
+  // OOD Detection Analysis
+  const oodResult = analyzeOODDetection(
+    actor,
+    testSetInDist,
+    testSetOutDist,
+    embedState,
+    step
+  );
+  printOODAnalysis(oodResult);
 
   // Cleanup
   actor.dispose();

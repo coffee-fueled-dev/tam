@@ -24,3 +24,9 @@ export type {
   LatentCheckpoint,
   LatentLoggerConfig,
 } from "./latent-logger";
+
+export { analyzeOODDetection, printOODAnalysis } from "./ood-analysis";
+export type {
+  OODSample,
+  OODAnalysisResult,
+} from "./ood-analysis";

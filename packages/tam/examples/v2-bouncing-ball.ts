@@ -96,7 +96,7 @@ async function main() {
   console.log("  - Smooth: Free fall (linear dynamics)");
   console.log("  - Steep: Ground potential (nonlinear forces)\n");
 
-  const samples = 15_000;
+  const samples = 5_000;
   const checkpointEvery = 100;
 
   // Set up logging
