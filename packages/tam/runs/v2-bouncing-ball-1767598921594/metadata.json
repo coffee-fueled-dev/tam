@@ -1,9 +1,0 @@
-{
-  "runId": "v2-bouncing-ball-1767598921594",
-  "timestamp": "2026-01-05T07:42:01.599Z",
-  "experiment": "V2 Bouncing Ball",
-  "config": {
-    "samples": 15000,
-    "checkpointEvery": 100
-  }
-}

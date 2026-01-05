@@ -1,17 +1,21 @@
 /**
- * V2 Double Grokking Experiment
+ * V2 Damped Spring - Basic Dynamics Test
  *
- * Tests if v2 exhibits the same two-phase learning as v1:
- * 1. First grokking: Dynamics learning (error drops suddenly)
- * 2. Second grokking: Epistemic learning (agency calibrates)
+ * Tests TAM v2 on simple 2D damped spring dynamics:
+ * - State space: (x, v)
+ * - Dynamics: Linear spring with damping
+ * - Challenge: Learn smooth, predictable dynamics
  *
  * Key mechanisms:
  * - Geometric binding: trajectory must fall within affordance cone
- * - Agency maximization: drives cones to narrow (increase concentration)
- * - Binding failures: provide feedback pressure to improve predictions
+ * - Anisotropic cones: per-dimension variance → per-dimension radius
+ * - Homeostatic feedback: soft conditional NLL creates equilibrium
  *
- * Key metric: Calibration gap = |agency - binding_rate|
- * Perfect calibration: agency matches actual binding success
+ * Expected behavior:
+ * - Low error (high accuracy on dynamics)
+ * - High agency (confident predictions)
+ * - Good calibration (agency matches binding rate)
+ * - Single port (no proliferation needed for simple system)
  */
 
 import {
@@ -76,18 +80,19 @@ interface Checkpoint {
 
 async function main() {
   console.log("═══════════════════════════════════════════════════════════");
-  console.log("  V2 Double Grokking Experiment");
+  console.log("  V2 Damped Spring - Basic Dynamics");
   console.log("═══════════════════════════════════════════════════════════\n");
-  console.log("Tracking two phases of learning:");
-  console.log("  1. First grokking:  Learning WHAT happens (error drops)");
-  console.log("  2. Second grokking: Learning CONFIDENCE (agency calibrates)\n");
+  console.log("Testing 2D damped spring dynamics:");
+  console.log("  - State space: (x, v)");
+  console.log("  - Dynamics: Linear spring with damping");
+  console.log("  - Challenge: Learn smooth, predictable system\n");
 
   const samples = 10_000;
   const checkpointEvery = 100;
 
   // Set up logging
   const logger = await StatsLogger.create({
-    experiment: "V2 Double Grokking",
+    experiment: "V2 Damped Spring",
     config: { samples, checkpointEvery },
   });
 
@@ -275,32 +280,32 @@ async function main() {
   // Cleanup
   actor.dispose();
 
-  // Analyze grokking moments
+  // Learning trajectory analysis
   console.log("\n═══════════════════════════════════════════════════════════");
-  console.log("  Grokking Analysis");
+  console.log("  Learning Trajectory Analysis");
   console.log("═══════════════════════════════════════════════════════════\n");
 
-  // First grokking: sudden error drop
-  let firstGrokkingSample: number | null = null;
+  // Dynamics learning: sudden error drop
+  let dynamicsLearnedSample: number | null = null;
   let maxErrorDrop = 0;
 
   for (let i = 1; i < checkpoints.length; i++) {
     const errorDrop = checkpoints[i - 1]!.errorInDist - checkpoints[i]!.errorInDist;
     if (errorDrop > maxErrorDrop) {
       maxErrorDrop = errorDrop;
-      firstGrokkingSample = checkpoints[i]!.sample;
+      dynamicsLearnedSample = checkpoints[i]!.sample;
     }
   }
 
-  // Second grokking: sudden agency improvement
-  let secondGrokkingSample: number | null = null;
+  // Epistemic learning: sudden agency improvement
+  let epistemicLearnedSample: number | null = null;
   let maxAgencyJump = 0;
 
   for (let i = 1; i < checkpoints.length; i++) {
     const agencyJump = checkpoints[i]!.agencyInDist - checkpoints[i - 1]!.agencyInDist;
-    if (agencyJump > maxAgencyJump && checkpoints[i]!.sample > (firstGrokkingSample || 0)) {
+    if (agencyJump > maxAgencyJump && checkpoints[i]!.sample > (dynamicsLearnedSample || 0)) {
       maxAgencyJump = agencyJump;
-      secondGrokkingSample = checkpoints[i]!.sample;
+      epistemicLearnedSample = checkpoints[i]!.sample;
     }
   }
 
@@ -320,21 +325,21 @@ async function main() {
     }
   }
 
-  if (firstGrokkingSample) {
-    console.log(`✓ First Grokking (Dynamics): Sample ~${firstGrokkingSample}`);
+  if (dynamicsLearnedSample) {
+    console.log(`✓ Dynamics Learning: Sample ~${dynamicsLearnedSample}`);
     console.log(`  Error dropped by ${maxErrorDrop.toFixed(4)}`);
     console.log(`  Interpretation: Model learned the spring dynamics\n`);
   } else {
-    console.log(`⚠ First grokking not clearly observed`);
+    console.log(`⚠ Dynamics learning not clearly observed`);
     console.log(`  Max error drop: ${maxErrorDrop.toFixed(4)}\n`);
   }
 
-  if (secondGrokkingSample) {
-    console.log(`✓ Second Grokking (Epistemics): Sample ~${secondGrokkingSample}`);
+  if (epistemicLearnedSample) {
+    console.log(`✓ Epistemic Learning: Sample ~${epistemicLearnedSample}`);
     console.log(`  Agency jumped by ${(maxAgencyJump * 100).toFixed(1)}%`);
     console.log(`  Interpretation: Model learned when to be confident\n`);
   } else {
-    console.log(`⚠ Second grokking not clearly observed`);
+    console.log(`⚠ Epistemic learning not clearly observed`);
     console.log(`  Max agency jump: ${(maxAgencyJump * 100).toFixed(1)}%\n`);
   }
 
@@ -351,7 +356,7 @@ async function main() {
   const initial = checkpoints[0]!;
   const final = checkpoints[checkpoints.length - 1]!;
 
-  console.log("Phase Summary:");
+  console.log("Training Summary:");
   console.log(`  Initial → Final:`);
   console.log(`    Error (in-dist):     ${initial.errorInDist.toFixed(4)} → ${final.errorInDist.toFixed(4)}`);
   console.log(`    Agency (in-dist):    ${(initial.agencyInDist * 100).toFixed(1)}% → ${(final.agencyInDist * 100).toFixed(1)}%`);

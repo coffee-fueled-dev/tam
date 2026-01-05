@@ -153,7 +153,7 @@ async function main() {
   console.log("  - Dynamics: Coupled, nonlinear, sensitive to ICs");
   console.log("  - Challenge: Learn structure in intrinsic chaos\n");
 
-  const samples = 5_000;
+  const samples = 10_000;
   const checkpointEvery = 150;
 
   // Set up logging

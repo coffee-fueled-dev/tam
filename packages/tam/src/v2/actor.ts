@@ -163,8 +163,8 @@ export class Actor<S> {
     // Compute concentration geometrically from prediction uncertainty
     const concentration = this.concentrationFromVariance(variance);
 
-    // Build affordance cone
-    const cone = this.buildCone(delta, concentration, stateEmb);
+    // Build affordance cone (anisotropic: per-dimension variance → per-dimension radius)
+    const cone = this.buildCone(delta, variance, concentration, stateEmb);
 
     // Compute agency (monotonic transform of concentration)
     const agency = concentration / (1 + concentration);
@@ -195,7 +195,7 @@ export class Actor<S> {
     // Compute concentration geometrically from prediction uncertainty
     const concentration = this.concentrationFromVariance(variance);
 
-    const cone = this.buildCone(delta, concentration, beforeEmb);
+    const cone = this.buildCone(delta, variance, concentration, beforeEmb);
 
     // Evaluate binding with soft boundaries
     const bindingResult = this.evaluateSoftBinding(actualDelta, cone);
@@ -495,22 +495,21 @@ export class Actor<S> {
   /**
    * Build affordance cone from prediction.
    *
-   * Concentration parameter defines the tightness of the cone in the fiber:
-   * - High concentration = tight/specific = narrow cone = high agency
-   * - Low concentration = loose/uncertain = wide cone = low agency
+   * Anisotropic cone construction:
+   * - Radius per dimension is proportional to sqrt(variance[i])
+   * - High variance dimension → wide cone (model uncertain)
+   * - Low variance dimension → narrow cone (model confident)
+   * - Context-dependent: same port can have different anisotropy for different states
    *
-   * Cone radius is inversely proportional to concentration (like precision).
-   * Attention modulates radius anisotropically across dimensions.
+   * This allows the cone to naturally reflect which dimensions the model
+   * is uncertain about for this specific prediction, without requiring
+   * global dimensional importance weights on ports.
    */
-  private buildCone(delta: Vec, concentration: number, stateEmb: Vec): Cone {
-    // Softmax attention over dimensions (simple version: uniform for now)
-    const attention = Array(delta.length).fill(1 / delta.length);
-
-    // Anisotropic radius: r_i = aperture × attention_i / (1 + concentration)
-    // Matches v1 formula: radius = aperture × alignment / (1 + distance)
-    // The (1 + concentration) form ensures finite radius when concentration = 0
-    const aperture = 1.0; // Base window size (matches v1 defaultAperture)
-    const radius = attention.map(a => aperture * a / (1 + concentration));
+  private buildCone(delta: Vec, variance: Vec, concentration: number, stateEmb: Vec): Cone {
+    // Anisotropic radius: proportional to standard deviation per dimension
+    // Scale factor ensures reasonable cone sizes (tunable per domain)
+    const scaleFactor = 1.0;
+    const radius = variance.map(v => scaleFactor * Math.sqrt(v));
 
     return {
       center: delta,

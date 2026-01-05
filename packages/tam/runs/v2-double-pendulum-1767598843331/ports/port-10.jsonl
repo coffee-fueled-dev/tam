@@ -1,5 +1,0 @@
-{"sample":1500,"samples":3,"bindings":0,"bindingRate":0,"avgAgency":0.15182788456922333,"agencyStdDev":0.00819763309768571,"avgError":3.0872882970802813,"errorStdDev":0.11049914509130349}
-{"sample":1650,"samples":4,"bindings":0,"bindingRate":0,"avgAgency":0.16018822173986558,"agencyStdDev":0.016127200752879312,"avgError":2.9140270711666876,"errorStdDev":0.3149855600097817}
-{"sample":1800,"samples":4,"bindings":0,"bindingRate":0,"avgAgency":0.16018822173986558,"agencyStdDev":0.016127200752879312,"avgError":2.9140270711666876,"errorStdDev":0.3149855600097817}
-{"sample":1950,"samples":4,"bindings":0,"bindingRate":0,"avgAgency":0.16018822173986558,"agencyStdDev":0.016127200752879312,"avgError":2.9140270711666876,"errorStdDev":0.3149855600097817}
-{"sample":2100,"samples":5,"bindings":0,"bindingRate":0,"avgAgency":0.15224580845229413,"agencyStdDev":0.021456863671592438,"avgError":3.067869492189517,"errorStdDev":0.41718423320686815}

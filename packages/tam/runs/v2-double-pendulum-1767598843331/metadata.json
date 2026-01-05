@@ -1,9 +1,0 @@
-{
-  "runId": "v2-double-pendulum-1767598843331",
-  "timestamp": "2026-01-05T07:40:43.335Z",
-  "experiment": "V2 Double Pendulum",
-  "config": {
-    "samples": 5000,
-    "checkpointEvery": 150
-  }
-}
