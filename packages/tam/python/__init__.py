@@ -1,0 +1,33 @@
+"""
+TAM Python implementation - Action-Binding with Continuous Ports.
+"""
+
+from .experiments import ControlledPendulumEnv, plot_training_results, run_experiment
+from .networks import ActorNet, SharedPolicy, SharedTube
+from .tam_continuous import Actor
+from .utils import (
+    gaussian_nll,
+    interp1d_linear,
+    kl_diag_gaussian_to_standard,
+    sample_truncated_geometric,
+    truncated_geometric_weights,
+)
+
+__all__ = [
+    # Core TAM
+    "Actor",
+    # Networks
+    "ActorNet",
+    "SharedPolicy",
+    "SharedTube",
+    # Utilities
+    "gaussian_nll",
+    "kl_diag_gaussian_to_standard",
+    "truncated_geometric_weights",
+    "sample_truncated_geometric",
+    "interp1d_linear",
+    # Experiments
+    "ControlledPendulumEnv",
+    "run_experiment",
+    "plot_training_results",
+]
