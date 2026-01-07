@@ -1,17 +1,17 @@
 {
   "name": "arc-agi",
   "module": "index.ts",
-  "type": "module",
-  "private": true,
-  "scripts": {
-    "context": "bun run --filter scripts context"
-  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
+  "private": true,
+  "scripts": {
+    "context": "bun run --filter scripts context"
+  },
+  "type": "module",
   "workspaces": [
     "packages/*",
     "apps/*",
