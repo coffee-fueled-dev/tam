@@ -1,229 +1,153 @@
-## Patch A — Add knobs (disable + gating modes)
+center everything around three questions TAM is supposed to answer:
 
-### A1) Add config flags + hyperparams (actor.py `__init__`)
+1. **Did my commitment help?**
+2. **Was my uncertainty honest?**
+3. **What did it cost (compute / horizon / tightness) and was it worth it?**
 
-Add:
-
-- `reasoning_mode: str = "fixed"` # `"off" | "fixed" | "gated" | "dynamic"`
-- `freeze_sigma_refine: bool = True`
-- `c_improve: float = 1.0` # exchange rate: NLL improvement “pays for” Hr
-- `improve_detach: bool = True` # prevent hacking improve via baseline coupling
-- `gate_kind: str = "nll0"` # `"nll0" | "mem_risk" | "volatility" | "combo"`
-- `gate_thresh: float = ...` # scalar threshold
-- `gate_kappa: float = ...` # softness if using sigmoid gating
-- `Hr_default: int = 0`
-- `Hr_max: int = self.max_refine_steps`
-
-Also add history keys:
-
-- `"NLL0"`, `"NLLr"`, `"improve"`, `"ponder_reason_raw"`, `"ponder_reason_eff"`, `"gate_score"`, `"gate_on"`
-
-**Done when:** you can run with `reasoning_mode="off"` and code never calls `infer_tube(...)` refinement (only `_tube_init` / `_tube_traj`).
+Below is a compact “canonical dashboard” that tends to stay interpretable across gridworld, pendulum, adversaries, etc.
 
 ---
 
-## Patch B — Compute NLL0 vs NLLr (progress metric) correctly
+## 1) Outcome vs Commitment Tradeoff (the one plot I’d keep)
 
-### B1) Implement a helper that evaluates expected NLL under a given tube (actor.py)
+**Scatter:** x = _sharpness_ (log cone volume)  
+y = _task outcome_ (domain metric: success%, return, J, regret, etc.)  
+Color = E[T] (or compute)  
+Marker shape = bind success (or calibration pass/fail)
 
-Add a utility method:
+**Why it’s universal:** It directly answers “tighter cones / longer commitments → better or worse outcomes?”  
+**How to read:** you want a frontier: as cones get tighter (left), outcomes improve (up) without blowing up cost color.
 
-- `_expected_nll(mu_knots, logsig_knots, stop_logit, y, T, detach_w: bool=True) -> (exp_nll, w)`
-
-Use your existing:
-
-- `_tube_traj(...)`
-- `gaussian_nll(...)`
-- `truncated_geometric_weights(...)`
-
-Compute:
-
-- `p_stop = sigmoid(stop_logit)`
-- `w, _ = truncated_geometric_weights(p_stop, T)`
-- `nll_t = gaussian_nll(mu, log_var, y).mean(-1)`
-- `exp_nll = (w * nll_t).sum()`
-
-**Done when:** you can call it for both Hr=0 and Hr>0 and get two scalars.
-
-### B2) In `train_on_episode`, compute baseline and refined expected NLL
-
-You already compute something similar for delta_nll; make it canonical:
-
-- Baseline tube: `(mu0_knots, logsig0_knots, stop0_logit) = _tube_init(...)`
-- `NLL0 = expected_nll(baseline)`
-- Refined tube: depending on reasoning_mode, produce `(mur_knots, logsigr_knots, stopr_logit)`
-- `NLLr = expected_nll(refined)`
-
-Then:
-
-- `improve = relu(NLL0_detached - NLLr)` (or raw `(NLL0 - NLLr)`; I’d start with relu)
-- If `improve_detach`: `NLL0_detached = NLL0.detach()`
-
-Log `NLL0, NLLr, improve`.
-
-**Done when:** “improve” is positive exactly when refinement _actually reduces expected NLL_.
+If you only keep one performance plot, keep this.
 
 ---
 
-## Patch C — Fix the compute incentive (pay-for-progress ponder)
+## 2) Honesty: Reliability Diagram (coverage curve) + single-number summary
 
-### C1) Replace reasoning ponder cost term
+You already have calibration curves, but they’re abstract unless you tie them to _one number_:
 
-Right now you do:
+- Plot: empirical coverage vs nominal coverage over k (your existing curve)
+- Add: **ECE-like scalar** (area or mean absolute error across ks)
 
-- `ponder_reason = lambda_r * E_Hr_train`
+**Why:** It tells you if the tube is lying. If tubes are uncalibrated, everything else is suspect.  
+**Universal:** works for any prediction target (states, observations, value, opponent, etc.)
 
-Replace with:
+**Interpretation shortcut:**
 
-- `ponder_reason_raw = self.lambda_r * E_Hr_train`
-- `ponder_reason_eff = self.lambda_r * relu(E_Hr_train - self.c_improve * improve.detach_if_config)`
-
-Notes:
-
-- Detach `improve` here (always) so the model can’t increase improve by making baseline worse or by weird gradients.
-- Keep logging both `ponder_reason_raw` and `ponder_reason_eff`.
-
-Then set:
-
-- `ponder = ponder_commit + ponder_reason_eff`
-
-**Done when:** if refinement doesn’t improve NLL, extra Hr is strictly penalized; if it improves enough, penalty goes to ~0.
-
-### C2) Update λ_r dual update to match new objective
-
-You can keep the same controller update (`E_Hr_train - target_Hr`) **or** switch to an “unpaid compute” target:
-
-- Option 1 (minimal change): keep as-is.
-- Option 2 (better): drive λ_r using **effective unpaid compute**:
-  - `unpaid = relu(E_Hr_train - c_improve * improve.detach())`
-  - `lambda_r += lr * (unpaid - target_unpaid)` where `target_unpaid ~ small` (like 0.5)
-
-Start with Option 1 for stability.
-
-**Done when:** λ_r doesn’t blow up just because the agent uses Hr in episodes where it’s actually improving fit.
+- curve below nominal → overconfident (σ too small)
+- curve above nominal → underconfident (σ too big)
 
 ---
 
-## Patch D — Prevent σ-gaming during refinement
+## 3) “Did Commitment Help?” Counterfactual Gain Plot
 
-### D1) Freeze σ during refinement (recommended diagnostic)
+This is the missing bridge between “graphs” and “meaning”.
 
-Modify `infer_tube(...)` loop:
+For each eval episode, compute:
 
-- still compute `delta_mu, delta_logsig, delta_stop = refiner(...)`
-- but if `freeze_sigma_refine`:
-  - `delta_logsig = 0` (or skip applying it)
+- outcome with commitment-conditioned behavior (your normal TAM)
+- outcome with commitment removed / randomized / baseline policy
 
-So:
+Then plot:
+**Histogram or violin of ΔOutcome = Outcome(TAM) − Outcome(baseline)**  
+Optionally split by bins of volatility / OOD.
 
-- `logsig_knots` stays from `_tube_init` (or still clamped once)
+**Why it’s universal:** It’s the cleanest evidence the commitment layer matters.  
+**How to read:** if ΔOutcome is centered near 0, TAM isn’t helping; if positive with heavy tail in hard/OOD bins, it is.
 
-**Done when:** performance difference between Hr=0 and Hr>0 can’t be explained by “σ got smaller”.
-
-### D2) (Optional later) softer alternative: penalize Δlogσ without improvement
-
-If you later want σ refinement back, add:
-
-- `sigma_shrink = relu(-(logsig_r - logsig_0)).mean()` # only counts shrink
-- `sigma_game_pen = w_sigma_game * relu(sigma_shrink - k * improve.detach())`
-
-But don’t do this until you’ve run the freeze experiment.
+This will make the rest of the dashboard make sense.
 
 ---
 
-## Patch E — Add a gating policy for when to think
+## 4) Compute Payback Curve (reasoning / pondering ROI)
 
-### E1) Implement `gate_score(...)` in Actor
+Right now “Hr” and “ΔNLL” are hard to interpret because there’s no ROI framing.
 
-Inputs you already have per-episode:
+Make one plot:
+**Scatter:** x = reasoning compute (Hr or E[Hr])  
+y = improvement (ΔNLL or ΔOutcome)  
+Color = episode difficulty proxy (volatility, memory risk, predicted NLL0)
 
-- `volatility` from env info (you compute it in eval; add to train loop info too)
-- `mem_risk(z)` (already exists)
-- `NLL0` (computed in Patch B)
+**Goal:** a positive trend: more compute → more improvement, mostly on hard episodes.
 
-Implement something like:
-
-- `score =`
-  - `"nll0"`: `NLL0.detach()`
-  - `"mem_risk"`: `mem_risk(z).detach()`
-  - `"volatility"`: `torch.tensor(volatility)`
-  - `"combo"`: weighted sum of normalized versions
-
-Then decide gate:
-
-- hard gate: `gate_on = score > gate_thresh`
-- soft gate: `gate_on_prob = sigmoid((score - gate_thresh)/gate_kappa)`
-
-Log `gate_score` and `gate_on`.
-
-**Done when:** you can see a histogram of gate_score and verify it correlates with “hard episodes”.
-
-### E2) Choose Hr using the gate
-
-In `train_on_episode` (or earlier where you sample Hr):
-
-If `reasoning_mode == "off"`:
-
-- `Hr = 0`
-
-If `"fixed"`:
-
-- keep your existing sampling (or fixed Hr)
-
-If `"gated"`:
-
-- `Hr = Hr_default` when gate off
-- `Hr = sample_reasoning_steps(...)` or `Hr_max` when gate on
-  - simplest: `Hr = Hr_max` when on (you can anneal later)
-
-If `"dynamic"`:
-
-- your existing `infer_tube_dynamic(...)` path
-
-**Done when:** average Hr drops a lot, but you still see high Hr on high gate_score episodes.
+If you don’t see that, incentives are wrong or your refiner isn’t doing useful work.
 
 ---
 
-## Patch F — Update experiments + eval to compare modes
+## 5) Time-Consistency Check: Early vs Late Tube Error
 
-### F1) Add sweep in experiments.py
+This is domain-agnostic and explains a _lot_ of failure modes.
 
-Run at least:
+Compute per episode:
 
-- `reasoning_mode="off"`
-- `reasoning_mode="fixed"` (current baseline)
-- `reasoning_mode="gated"` with `Hr_default=0`, `Hr_max=max_refine_steps`
+- weighted mean abs error in first third of horizon
+- weighted mean abs error in last third
+  (or use NLL)
 
-Keep evaluation exactly as you already do (Hr=1 vs Hr=max is still useful), but add “mode” label in run_dir.
+Plot:
+**y = late error**, **x = early error**  
+Color = E[T]  
+Diagonal is “consistent”; points above diagonal mean “good early, bad late” (classic tube exploit).
 
-**Done when:** you can line up dashboards across runs and answer:
-
-- Does gated reasoning improve J_mean on fault-heavy episodes?
-- Does it improve calibration (z-score hist moves closer to N(0,1)) _without_ just shrinking σ?
-
-### F2) Add 2 tiny new plots to the dashboard
-
-1. `improve` vs `E_Hr_train` scatter (or binned):
-   - proves “compute is being spent where it buys fit”
-2. `gate_score` over training (and fraction gated-on)
-
-**Done when:** you can visually confirm the incentive fix is working (high Hr coincides with high improve).
+This replaces a bunch of confusing plots with one that diagnoses the common pathology.
 
 ---
 
-## Minimal implementation order (fastest path)
+## 6) Commitment Atlas: “Which commitments actually work?”
 
-1. **A (knob)** + **B (NLL0/NLLr/improve)**
-2. **C (pay-for-progress ponder)**
-3. **D (freeze σ)**
-4. **E (gating)**
-5. **F (mode comparisons + 2 extra plots)**
+Since z-space is interpretable to you already, make it decision-grade:
+
+In z-PCA space, plot points with:
+
+- color = success or task outcome
+- outline = bind success
+- size = E[T] (or confidence)
+- optionally: nearest-prototype id (if you build atlas)
+
+This turns “latent map” into “these are the reusable commitments worth keeping”.
 
 ---
 
-## Quick “success criteria” checklist
+# Minimal “Across-Domain” Dashboard (6 plots → 3 plots)
 
-- With `reasoning_mode="off"`, you get a stable baseline and no regressions.
-- With `freeze_sigma_refine=True`, any Hr benefit must show up as **lower |err| and better J**, not just lower σ.
-- `improve` is near 0 on easy episodes; positive on fault/switch episodes.
-- In gated mode: average Hr stays low, but “hard episode” performance improves.
+If you want _only three_ that stay meaningful everywhere:
+
+1. **Outcome vs Sharpness** (color = compute/horizon; shape = bind)
+2. **Calibration curve + scalar error**
+3. **Compute ROI** (Hr vs improvement, colored by difficulty)
+
+Everything else is “nice to have”.
+
+---
+
+# Make them legible: add baselines and annotations
+
+Two rules make plots stop feeling like “graphs without basis”:
+
+### A) Always include a baseline line
+
+- outcome: baseline policy mean
+- calibration: y=x nominal
+- ROI: y=0 “no improvement”
+- early/late: diagonal
+
+### B) Always annotate with 2–3 numbers on the figure
+
+- mean outcome ± std
+- bind success rate
+- calibration error scalar
+- mean E[T], mean E[Hr]
+
+Even if you ignore the chart, the numbers give orientation.
+
+---
+
+# Implementation trick: define a domain adapter
+
+To make this portable across environments, define in each env:
+
+- `episode_outcome(info, states, actions) -> float`
+- `episode_difficulty(info) -> float` (volatility, entropy, rule switches, etc.)
+- `baseline_policy(obs) -> action` or a “no commitment” variant
+
+Then your dashboard doesn’t care if it’s pendulum, gridworld, or adversary.

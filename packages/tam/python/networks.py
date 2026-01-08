@@ -38,13 +38,17 @@ class SharedPolicy(nn.Module):
     """
     Policy network: action = pi(state, z)
     Conditioned on latent commitment z.
+    
+    For continuous actions (action_dim=1): outputs tanh-scaled value
+    For discrete actions (action_dim>1): outputs logits
     """
 
-    def __init__(self, state_dim: int, z_dim: int, hidden_dim: int = 64):
+    def __init__(self, obs_dim: int, z_dim: int, action_dim: int = 1, hidden_dim: int = 64):
         super().__init__()
-        self.fc1 = nn.Linear(state_dim + z_dim, hidden_dim)
+        self.action_dim = action_dim
+        self.fc1 = nn.Linear(obs_dim + z_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.act_head = nn.Linear(hidden_dim, 1)
+        self.act_head = nn.Linear(hidden_dim, action_dim)
         self.relu = nn.ReLU()
 
 
@@ -75,20 +79,22 @@ class TubeRefiner(nn.Module):
     """
 
     def __init__(
-        self, state_dim: int, z_dim: int, M: int, hidden_dim: int = 64
+        self, state_dim: int, z_dim: int, M: int, hidden_dim: int = 64, pred_dim: int = None
     ):
         super().__init__()
-        self.state_dim = state_dim
+        self.state_dim = state_dim  # input conditioning dimension
+        self.pred_dim = pred_dim if pred_dim is not None else state_dim  # output prediction dimension
         self.M = M
 
         # Input: [s0, z, mu_knots_flat, logsig_knots_flat, stop_logit]
-        input_dim = state_dim + z_dim + (2 * state_dim * M) + 1
+        # Note: mu_knots and logsig_knots are pred_dim * M each
+        input_dim = state_dim + z_dim + (2 * self.pred_dim * M) + 1
 
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
 
         # Output: deltas for [mu_knots, logsig_knots, stop_logit]
-        output_dim = (2 * state_dim * M) + 1
+        output_dim = (2 * self.pred_dim * M) + 1
         self.delta_head = nn.Linear(hidden_dim, output_dim)
         self.relu = nn.ReLU()
 
@@ -137,7 +143,7 @@ class TubeRefiner(nn.Module):
         deltas = self.delta_head(h)  # [B, output_dim]
 
         # Split deltas back into components
-        D, M = self.state_dim, self.M
+        D, M = self.pred_dim, self.M  # Use pred_dim for output dimension
         delta_mu_flat = deltas[:, : D * M]
         delta_logsig_flat = deltas[:, D * M : 2 * D * M]
         delta_stop = deltas[:, -1]

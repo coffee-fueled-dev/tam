@@ -56,7 +56,9 @@ class Actor(nn.Module):
 
     def __init__(
         self,
-        state_dim: int = 2,
+        obs_dim: int = 2,  # observation/conditioning dimension
+        pred_dim: Optional[int] = None,  # prediction dimension (defaults to obs_dim)
+        action_dim: int = 1,  # action dimension (1 for continuous, >1 for discrete logits)
         z_dim: int = 8,  # latent commitment dimension
         hidden_dim: int = 64,
         lr: float = 7e-4,
@@ -93,7 +95,11 @@ class Actor(nn.Module):
     ):
         super().__init__()
         self.device = torch.device("cpu")
-        self.state_dim = state_dim
+        
+        # Set dimensions
+        self.obs_dim = obs_dim  # observation/conditioning dimension
+        self.pred_dim = pred_dim if pred_dim is not None else obs_dim  # prediction dimension
+        self.action_dim = action_dim  # action dimension
         self.z_dim = z_dim
         self.hidden_dim = hidden_dim
 
@@ -165,14 +171,15 @@ class Actor(nn.Module):
 
         self.mem = deque(maxlen=self.mem_size)  # store dicts per episode
 
-        # Networks
-        self.actor = ActorNet(state_dim, z_dim, hidden_dim).to(self.device)
-        self.pol = SharedPolicy(state_dim, z_dim, hidden_dim).to(self.device)
+        # Networks: use obs_dim for conditioning
+        self.actor = ActorNet(obs_dim, z_dim, hidden_dim).to(self.device)
+        self.pol = SharedPolicy(obs_dim, z_dim, action_dim, hidden_dim).to(self.device)
 
+        # Tube: conditions on obs_dim, outputs pred_dim dimensions
         out_dim = (
-            (state_dim * self.M) + (state_dim * self.M) + 1
+            (self.pred_dim * self.M) + (self.pred_dim * self.M) + 1
         )  # mu knots + logsig knots + stop_logit
-        self.tube = SharedTube(state_dim, z_dim, hidden_dim, out_dim=out_dim).to(
+        self.tube = SharedTube(obs_dim, z_dim, hidden_dim, out_dim=out_dim).to(
             self.device
         )
 
@@ -184,10 +191,10 @@ class Actor(nn.Module):
         self.u_wide = nn.Parameter(torch.randn(self.z_dim) * 0.05)
         self.u_ext = nn.Parameter(torch.randn(self.z_dim) * 0.05)
 
-        # Reasoning networks
-        self.refiner = TubeRefiner(state_dim, z_dim, self.M, hidden_dim).to(self.device)
-        self.ponder_head = PonderHead(state_dim, z_dim, hidden_dim).to(self.device)
-        self.dynamic_ponder_head = DynamicPonderHead(state_dim, z_dim, hidden_dim).to(self.device)
+        # Reasoning networks: use obs_dim for input conditioning, pred_dim for output
+        self.refiner = TubeRefiner(obs_dim, z_dim, self.M, hidden_dim, pred_dim=self.pred_dim).to(self.device)
+        self.ponder_head = PonderHead(obs_dim, z_dim, hidden_dim).to(self.device)
+        self.dynamic_ponder_head = DynamicPonderHead(obs_dim, z_dim, hidden_dim).to(self.device)
 
         self.optimizer = optim.Adam(self.parameters(), lr=lr)
 
@@ -240,7 +247,7 @@ class Actor(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Reparameterized z ~ q(z|s0). Returns z, z_mu, z_logstd.
-        s0_t: [1, state_dim]
+        s0_t: [1, obs_dim]
         """
         z_mu, z_logstd = self.actor(s0_t)  # [1,z_dim], [1,z_dim]
         eps = torch.randn_like(z_mu)
@@ -249,8 +256,15 @@ class Actor(nn.Module):
 
     def _policy_action(self, z: torch.Tensor, state_t: torch.Tensor) -> torch.Tensor:
         """
-        z: [B, z_dim] or [1,z_dim]
-        state_t: [B, state_dim]
+        Get policy action output.
+        
+        Args:
+            z: [B, z_dim] or [1,z_dim]
+            state_t: [B, obs_dim]
+        
+        Returns:
+            For continuous (action_dim=1): [B, 1] tanh-scaled action
+            For discrete (action_dim>1): [B, action_dim] logits
         """
         if z.size(0) != state_t.size(0):
             z = z.expand(state_t.size(0), -1)
@@ -258,8 +272,15 @@ class Actor(nn.Module):
 
         h1 = self.pol.relu(self.pol.fc1(x))
         h2 = self.pol.relu(self.pol.fc2(h1))
-        a = torch.tanh(self.pol.act_head(h2)) * self.amax
-        return a  # [B,1]
+        logits = self.pol.act_head(h2)  # [B, action_dim]
+        
+        if self.action_dim == 1:
+            # Continuous action: tanh and scale
+            a = torch.tanh(logits) * self.amax
+            return a  # [B, 1]
+        else:
+            # Discrete action: return logits
+            return logits  # [B, action_dim]
 
     def _tube_init(
         self, z: torch.Tensor, s0_t: torch.Tensor
@@ -269,11 +290,11 @@ class Actor(nn.Module):
 
         Args:
             z: [1,z_dim] or [B,z_dim]
-            s0_t: [1,state_dim]
+            s0_t: [1,obs_dim]
 
         Returns:
-            mu_knots: [M, D]
-            logsig_knots: [M, D]
+            mu_knots: [M, pred_dim]
+            logsig_knots: [M, pred_dim]
             stop_logit: scalar (pre-sigmoid)
         """
         if z.size(0) != s0_t.size(0):
@@ -284,7 +305,7 @@ class Actor(nn.Module):
         h2 = self.tube.relu(self.tube.fc2(h1))
         out = self.tube.out_head(h2).squeeze(0)  # [out_dim]
 
-        D, M = self.state_dim, self.M
+        D, M = self.pred_dim, self.M  # Use pred_dim for output dimension
         mu_flat = out[: D * M]
         sig_flat = out[D * M : 2 * D * M]
         stop_logit = out[-1]
@@ -303,11 +324,11 @@ class Actor(nn.Module):
 
         Args:
             z: [1,z_dim] or [B,z_dim]
-            s0_t: [1,state_dim]
+            s0_t: [1,obs_dim]
 
-        Returns:
-            mu_knots: [M, D]
-            logsig_knots: [M, D]
+            Returns:
+            mu_knots: [M, pred_dim]
+            logsig_knots: [M, pred_dim]
             p_stop: scalar in (0,1)
         """
         mu_knots, logsig_knots, stop_logit = self._tube_init(z, s0_t)
@@ -321,13 +342,13 @@ class Actor(nn.Module):
         Iteratively refine tube prediction with Hr reasoning steps.
 
         Args:
-            s0_t: [1, state_dim]
+            s0_t: [1, obs_dim]
             z: [1, z_dim]
             Hr: number of refinement steps
 
         Returns:
-            mu_knots: [M, D] - refined
-            logsig_knots: [M, D] - refined
+            mu_knots: [M, pred_dim] - refined
+            logsig_knots: [M, pred_dim] - refined
             stop_logit: scalar - refined
         """
         # Get initial tube state
@@ -361,13 +382,13 @@ class Actor(nn.Module):
         The agent measures the "rate of clarification" and stops when improvement slows.
 
         Args:
-            s0_t: [1, state_dim]
+            s0_t: [1, obs_dim]
             z: [1, z_dim]
             max_steps: optional max refinement steps (defaults to self.max_refine_steps)
 
         Returns:
-            mu_knots: [M, D] - refined
-            logsig_knots: [M, D] - refined
+            mu_knots: [M, pred_dim] - refined
+            logsig_knots: [M, pred_dim] - refined
             stop_logit: scalar - refined
             refined_steps: number of refinement steps taken
             halting_probs: list of p_stop at each step
@@ -437,10 +458,10 @@ class Actor(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Evaluate tube at discrete t=1..T via linear interpolation of knots.
-        mu_knots/logsig_knots: [M, D]
+        mu_knots/logsig_knots: [M, pred_dim]
         Returns:
-          mu: [T, D]
-          log_var: [T, D]
+          mu: [T, pred_dim]
+          log_var: [T, pred_dim]
         """
         t = torch.linspace(
             1.0 / T, 1.0, steps=T, device=mu_knots.device, dtype=mu_knots.dtype
@@ -464,10 +485,10 @@ class Actor(nn.Module):
         Compute expected NLL under a given tube.
         
         Args:
-            mu_knots: [M, D] knot means
-            logsig_knots: [M, D] knot log-stds
+            mu_knots: [M, pred_dim] knot means
+            logsig_knots: [M, pred_dim] knot log-stds
             stop_logit: scalar stop logit
-            y: [T, D] target states
+            y: [T, pred_dim] target states
             T: horizon
             detach_w: whether to detach weights (default True)
         
@@ -481,6 +502,11 @@ class Actor(nn.Module):
             w = w.detach()
         
         mu, log_var = self._tube_traj(mu_knots, logsig_knots, T)
+        
+        # Assert dimension match
+        assert mu.shape[-1] == y.shape[-1], \
+            f"pred_dim mismatch: mu has D={mu.shape[-1]} but y has D={y.shape[-1]}"
+        
         nll_t = gaussian_nll(mu, log_var, y).mean(dim=-1)  # [T]
         exp_nll = (w * nll_t).sum()
         
@@ -540,7 +566,7 @@ class Actor(nn.Module):
         This ensures acting and training use the same (refined) halting distribution.
 
         Args:
-            s0_t: [1, state_dim]
+            s0_t: [1, obs_dim]
             z: [1, z_dim]
             Hr: number of refinement steps (optional if using dynamic pondering)
             maxH: optional max horizon (defaults to self.maxH)
@@ -844,6 +870,10 @@ class Actor(nn.Module):
         # evaluate refined tube for this observed T
         mu, log_var = self._tube_traj(mu_knots, logsig_knots, T)
 
+        # Assert dimension match
+        assert mu.shape[-1] == y.shape[-1], \
+            f"pred_dim mismatch: mu has D={mu.shape[-1]} but y has D={y.shape[-1]}"
+
         # per-step NLL (using refined tube)
         nll_t = gaussian_nll(mu, log_var, y).mean(dim=-1)  # [T]
 
@@ -1045,7 +1075,7 @@ class Actor(nn.Module):
 
         # Store commitment outcome in memory
         with torch.no_grad():
-            self.mem.append({
+            mem_entry = {
                 "z": z.detach().cpu().squeeze(0),  # [z_dim]
                 "soft_bind": float(soft_bind_rate.item()),
                 "cone_vol": float(cone_vol_w.item()),
@@ -1053,4 +1083,7 @@ class Actor(nn.Module):
                 "lambda_bind": float(self.lambda_bind),
                 "lambda_T": float(self.lambda_T),
                 "Hr": int(Hr),
-            })
+                "rule": int(regime),  # regime is rule for gridworld
+                "step": int(step),  # training step for time-based splitting
+            }
+            self.mem.append(mem_entry)
