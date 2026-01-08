@@ -353,7 +353,7 @@ def tube_predictions_for_episode(
         z: Latent commitment
         T: Horizon
         Hr_eval:
-          - None => use agent.max_refine_steps (upper bound eval)
+          - None => use agent.max_refine_steps (or dynamic pondering if enabled)
           - int  => fixed refinement steps
 
     NOTE: This assumes your tube is trained on latent state targets (theta, omega).
@@ -362,9 +362,16 @@ def tube_predictions_for_episode(
     device = agent.device
     s0_t = torch.tensor(obs0, dtype=torch.float32, device=device).unsqueeze(0)
 
-    Hr = agent.max_refine_steps if Hr_eval is None else int(Hr_eval)
+    if agent.use_dynamic_pondering and Hr_eval is None:
+        # Use dynamic pondering: agent decides when to stop refining
+        muK, sigK, stop_logit, actual_Hr, _ = agent.infer_tube_dynamic(
+            s0_t, z, max_steps=agent.max_refine_steps
+        )
+    else:
+        # Use fixed Hr
+        Hr = agent.max_refine_steps if Hr_eval is None else int(Hr_eval)
+        muK, sigK, stop_logit = agent.infer_tube(s0_t, z, Hr)
 
-    muK, sigK, stop_logit = agent.infer_tube(s0_t, z, Hr)
     p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
 
     mu, log_var = agent._tube_traj(muK, sigK, T)
@@ -438,7 +445,7 @@ def train_with_eval(
     eval_every: int = 1000,
     eval_episodes: int = 200,
     maxH: int = 64,
-) -> Tuple[Actor, List[EvalSnapshot]]:
+) -> Tuple[Actor, List[EvalSnapshot], List[EvalSnapshot]]:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
@@ -468,6 +475,7 @@ def train_with_eval(
         lambda_h=0.002,
         beta_kl=3e-4,
         halt_bias=-1.0,
+        use_dynamic_pondering=True,
     )
 
     ks = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]

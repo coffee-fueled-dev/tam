@@ -20,7 +20,7 @@ Key prevention of exploits:
 """
 
 from collections import deque
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -29,7 +29,7 @@ import torch.optim as optim
 
 # Handle both package import and direct execution
 try:
-    from .networks import ActorNet, SharedPolicy, SharedTube, TubeRefiner, PonderHead
+    from .networks import ActorNet, SharedPolicy, SharedTube, TubeRefiner, PonderHead, DynamicPonderHead
     from .utils import (
         gaussian_nll,
         interp1d_linear,
@@ -38,7 +38,7 @@ try:
         truncated_geometric_weights,
     )
 except ImportError:
-    from networks import ActorNet, SharedPolicy, SharedTube, TubeRefiner, PonderHead
+    from networks import ActorNet, SharedPolicy, SharedTube, TubeRefiner, PonderHead, DynamicPonderHead
     from utils import (
         gaussian_nll,
         interp1d_linear,
@@ -80,6 +80,7 @@ class Actor(nn.Module):
         lambda_r: float = 0.001,  # ponder cost per reasoning step
         target_Hr: float = 4.0,  # target reasoning steps for dual controller
         lambda_r_lr: float = 0.02,  # dual controller learning rate for reasoning
+        use_dynamic_pondering: bool = False,  # use dynamic pondering instead of fixed Hr
     ):
         super().__init__()
         self.device = torch.device("cpu")
@@ -133,6 +134,7 @@ class Actor(nn.Module):
         self.lambda_r = lambda_r  # dual variable for reasoning compute
         self.lambda_r_lr = lambda_r_lr
         self.lambda_r_clip = (0.0, 50.0)
+        self.use_dynamic_pondering = use_dynamic_pondering
 
         # --- commitment memory (replay in z-space) ---
         self.mem_size = 50_000
@@ -166,6 +168,7 @@ class Actor(nn.Module):
         # Reasoning networks
         self.refiner = TubeRefiner(state_dim, z_dim, self.M, hidden_dim).to(self.device)
         self.ponder_head = PonderHead(state_dim, z_dim, hidden_dim).to(self.device)
+        self.dynamic_ponder_head = DynamicPonderHead(state_dim, z_dim, hidden_dim).to(self.device)
 
         self.optimizer = optim.Adam(self.parameters(), lr=lr)
 
@@ -198,6 +201,11 @@ class Actor(nn.Module):
             "mem_loss": [],  # memory regularizer loss
             "mem_risk": [],  # estimated risk from memory
             "mem_n": [],  # number of items in memory
+            # Volume tracking for dynamic pondering
+            "vol_init": [],  # initial cone volume (before refinement)
+            "vol_final": [],  # final cone volume (after refinement)
+            "vol_reduction": [],  # total volume reduction during refinement
+            "vol_improvement_rate": [],  # average improvement per step
         }
 
     def sample_z(
@@ -315,6 +323,81 @@ class Actor(nn.Module):
 
         return mu_knots, logsig_knots, stop_logit
 
+    def infer_tube_dynamic(
+        self, s0_t: torch.Tensor, z: torch.Tensor, max_steps: int = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, list]:
+        """
+        Iteratively refine tube with dynamic halting based on cone volume derivative.
+        The agent measures the "rate of clarification" and stops when improvement slows.
+
+        Args:
+            s0_t: [1, state_dim]
+            z: [1, z_dim]
+            max_steps: optional max refinement steps (defaults to self.max_refine_steps)
+
+        Returns:
+            mu_knots: [M, D] - refined
+            logsig_knots: [M, D] - refined
+            stop_logit: scalar - refined
+            refined_steps: number of refinement steps taken
+            halting_probs: list of p_stop at each step
+        """
+        max_steps_eff = int(self.max_refine_steps if max_steps is None else max_steps)
+
+        # 1. Initial Guess
+        mu_knots, logsig_knots, stop_logit = self._tube_init(z, s0_t)
+
+        # Volume proxy: sum of exp(logsig) across all knots and dimensions
+        # This is a simplified proxy for cone volume
+        def get_vol(ls):
+            return torch.exp(ls).sum()
+
+        prev_vol = get_vol(logsig_knots)
+        current_vol = prev_vol
+
+        refined_steps = 0
+        halting_probs = []
+
+        for k in range(max_steps_eff):
+            # Calculate derivative (improvement rate)
+            delta_vol = prev_vol - current_vol
+
+            # 2. DECIDE: Should we stop?
+            # Detach gradients to avoid "sabotaging" the tube to make PonderHead happy
+            p_stop = self.dynamic_ponder_head(
+                s0_t, z, current_vol.detach(), delta_vol.detach()
+            )
+            halting_probs.append(p_stop)
+
+            # Soft halting logic
+            if self.training:
+                # During training, we might run fixed steps and weight losses
+                # For now, continue refinement
+                pass
+            else:
+                # During inference, sample whether to stop
+                if torch.rand(1, device=s0_t.device) < p_stop:
+                    break
+
+            # 3. ACT: Refine
+            delta_mu, delta_logsig, delta_stop = self.refiner(
+                s0_t, z, mu_knots, logsig_knots, stop_logit
+            )
+
+            mu_knots = mu_knots + self.refine_step_scale * delta_mu
+            logsig_knots = logsig_knots + self.refine_step_scale * delta_logsig
+            stop_logit = stop_logit + self.refine_step_scale * delta_stop
+
+            # Clamp logsig to reasonable range
+            logsig_knots = torch.clamp(logsig_knots, self.logstd_min, self.logstd_max)
+
+            # Update stats
+            prev_vol = current_vol
+            current_vol = get_vol(logsig_knots)
+            refined_steps += 1
+
+        return mu_knots, logsig_knots, stop_logit, refined_steps, halting_probs
+
     def _tube_traj(
         self, mu_knots: torch.Tensor, logsig_knots: torch.Tensor, T: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -380,7 +463,7 @@ class Actor(nn.Module):
         self,
         s0_t: torch.Tensor,
         z: torch.Tensor,
-        Hr: int,
+        Hr: int = None,
         maxH: int = None,
     ) -> Tuple[int, float, float]:
         """
@@ -390,7 +473,7 @@ class Actor(nn.Module):
         Args:
             s0_t: [1, state_dim]
             z: [1, z_dim]
-            Hr: number of refinement steps
+            Hr: number of refinement steps (optional if using dynamic pondering)
             maxH: optional max horizon (defaults to self.maxH)
 
         Returns:
@@ -400,7 +483,17 @@ class Actor(nn.Module):
         """
         maxH_eff = int(self.maxH if maxH is None else maxH)
 
-        muK, sigK, stop_logit = self.infer_tube(s0_t, z, Hr)
+        if self.use_dynamic_pondering:
+            # Use dynamic pondering: adaptively determine when to stop refining
+            muK, sigK, stop_logit, actual_Hr, _ = self.infer_tube_dynamic(
+                s0_t, z, max_steps=self.max_refine_steps
+            )
+        else:
+            # Use fixed pondering with Hr steps
+            if Hr is None:
+                raise ValueError("Hr must be provided when not using dynamic pondering")
+            muK, sigK, stop_logit = self.infer_tube(s0_t, z, Hr)
+
         p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
         p_stop_val = float(p_stop.item())
 
@@ -534,9 +627,6 @@ class Actor(nn.Module):
 
         s0_t = torch.tensor(s0, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-        # Sample reasoning steps
-        Hr, E_Hr_imagine, p_refine_stop_val = self.sample_reasoning_steps(z, s0)
-
         # Compute initial tube (no reasoning) for delta_nll measurement
         with torch.no_grad():
             mu_knots_0, logsig_knots_0, stop_logit_0 = self._tube_init(z, s0_t)
@@ -547,9 +637,36 @@ class Actor(nn.Module):
             w_0, _ = truncated_geometric_weights(p_stop_0, T)
             exp_nll_0 = (w_0 * nll_t_0).sum()
 
-        # Infer refined tube with Hr reasoning steps
-        mu_knots, logsig_knots, stop_logit = self.infer_tube(s0_t, z, Hr)
+        # Choose reasoning approach
+        if self.use_dynamic_pondering:
+            # Dynamic pondering: adaptively decide when to stop thinking
+            mu_knots, logsig_knots, stop_logit, Hr, halting_probs = self.infer_tube_dynamic(
+                s0_t, z, max_steps=self.max_refine_steps
+            )
+            # For logging, compute expected Hr from the halting probs
+            if len(halting_probs) > 0:
+                # Stack and compute geometric expectation
+                p_stops = torch.stack(halting_probs)
+                E_Hr_imagine = float(Hr)  # actual steps taken
+                p_refine_stop_val = float(p_stops[-1].item()) if len(p_stops) > 0 else 0.0
+            else:
+                E_Hr_imagine = 0.0
+                p_refine_stop_val = 0.0
+        else:
+            # Fixed pondering: sample Hr from geometric distribution
+            Hr, E_Hr_imagine, p_refine_stop_val = self.sample_reasoning_steps(z, s0)
+            # Infer refined tube with Hr reasoning steps
+            mu_knots, logsig_knots, stop_logit = self.infer_tube(s0_t, z, Hr)
+
         p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
+
+        # Volume tracking: measure cone tightening during refinement
+        with torch.no_grad():
+            # Simple volume proxy: sum of exp(logsig) across all knots
+            vol_init = torch.exp(logsig_knots_0).sum()
+            vol_final = torch.exp(logsig_knots).sum()
+            vol_reduction = vol_init - vol_final
+            vol_improvement_rate = (vol_reduction / Hr) if Hr > 0 else torch.tensor(0.0)
 
         # evaluate refined tube for this observed T
         mu, log_var = self._tube_traj(mu_knots, logsig_knots, T)
@@ -736,6 +853,10 @@ class Actor(nn.Module):
         self.history["mem_loss"].append(float(mem_loss.detach().item()))
         self.history["mem_risk"].append(float(mem_risk.detach().item()))
         self.history["mem_n"].append(int(len(self.mem)))
+        self.history["vol_init"].append(float(vol_init.item()))
+        self.history["vol_final"].append(float(vol_final.item()))
+        self.history["vol_reduction"].append(float(vol_reduction.item()))
+        self.history["vol_improvement_rate"].append(float(vol_improvement_rate.item()))
 
         # Store commitment outcome in memory
         with torch.no_grad():

@@ -182,3 +182,61 @@ class PonderHead(nn.Module):
         stop_logit = self.stop_head(h).squeeze(-1)
         p_refine_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
         return p_refine_stop
+
+
+class DynamicPonderHead(nn.Module):
+    """
+    Dynamic pondering: decides whether to stop based on current cone volume
+    and its derivative (improvement rate).
+
+    Intuition:
+    - High delta_vol: cone is tightening rapidly, keep thinking
+    - Low delta_vol: cone has stabilized, stop to save compute
+    """
+
+    def __init__(self, state_dim: int, z_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        # Input: state, z, current_volume, volume_derivative
+        self.fc1 = nn.Linear(state_dim + z_dim + 2, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.stop_head = nn.Linear(hidden_dim, 1)
+        self.relu = nn.ReLU()
+
+    def forward(
+        self,
+        s0: torch.Tensor,
+        z: torch.Tensor,
+        current_vol: torch.Tensor,
+        delta_vol: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            s0: [B, state_dim]
+            z: [B, z_dim]
+            current_vol: [B] or scalar - current cone volume
+            delta_vol: [B] or scalar - improvement rate (prev_vol - current_vol)
+
+        Returns:
+            p_stop: [B] or scalar - probability of stopping
+        """
+        # Ensure volume features are properly shaped
+        if current_vol.dim() == 0:
+            current_vol = current_vol.unsqueeze(0)
+        if delta_vol.dim() == 0:
+            delta_vol = delta_vol.unsqueeze(0)
+
+        # Expand to batch size if needed
+        if s0.size(0) > 1 and current_vol.size(0) == 1:
+            current_vol = current_vol.expand(s0.size(0))
+            delta_vol = delta_vol.expand(s0.size(0))
+
+        vol_feats = torch.stack([current_vol, delta_vol], dim=-1)
+
+        x = torch.cat([s0, z, vol_feats], dim=-1)
+        h = self.relu(self.fc1(x))
+        h = self.relu(self.fc2(h))
+
+        # Output probability of STOPPING
+        stop_logit = self.stop_head(h).squeeze(-1)
+        p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
+        return p_stop
