@@ -532,6 +532,7 @@ def train_with_eval(
     eval_every: int = 1000,
     eval_episodes: int = 200,
     maxH: int = 64,
+    reasoning_mode: str = "fixed",
 ) -> Tuple[Actor, HiddenRegimeFaultEnv, List[EvalSnapshot], List[EvalSnapshot]]:
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -563,6 +564,7 @@ def train_with_eval(
         beta_kl=3e-4,
         halt_bias=-1.0,
         use_dynamic_pondering=False,
+        reasoning_mode=reasoning_mode,
     )
 
     ks = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
@@ -591,6 +593,9 @@ def train_with_eval(
             return float(np.clip(a, -env.amax, env.amax))
 
         obs_seq, state_seq, actions, info = env.rollout(policy_fn=policy_fn, horizon=T)
+        
+        # Note: volatility is in info but train_on_episode doesn't take it yet
+        # Gate score will use NLL0 by default (gate_kind="nll0")
 
         # Train: NOTE targets are latent states (theta, omega) just like your original
         agent.train_on_episode(
@@ -1104,6 +1109,67 @@ def plot_performance_dashboard(
         save_fig(fig_c, run_dir / "fig" / f"{prefix}_zscore_hists.png")
 
 
+def plot_reasoning_analysis(
+    agent: Actor,
+    run_dir: Path,
+    prefix: str = "reasoning",
+):
+    """
+    Plot two additional analysis plots:
+    1. improve vs E_Hr_train scatter (proves compute is spent where it buys fit)
+    2. gate_score over training (and fraction gated-on)
+    """
+    h = agent.history
+    steps = np.asarray(h["step"], dtype=np.int32)
+    
+    # Plot 1: improve vs E_Hr_train scatter
+    if "improve" in h and "E_Hr_train" in h:
+        improve = np.asarray(h["improve"], dtype=np.float64)
+        E_Hr_train = np.asarray(h["E_Hr_train"], dtype=np.float64)
+        
+        fig1 = plt.figure(figsize=(10, 6))
+        plt.scatter(E_Hr_train, improve, alpha=0.3, s=10)
+        plt.xlabel("E[Hr]_train (expected reasoning steps)")
+        plt.ylabel("Improve (NLL0 - NLLr)")
+        plt.title("Reasoning effectiveness: compute spent where it buys fit")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        save_fig(fig1, run_dir / "fig" / f"{prefix}_improve_vs_Hr.png")
+    
+    # Plot 2: gate_score over training and fraction gated-on
+    if "gate_score" in h and "gate_on" in h:
+        gate_score = np.asarray(h["gate_score"], dtype=np.float64)
+        gate_on = np.asarray(h["gate_on"], dtype=np.float64)
+        
+        fig2, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        
+        # Gate score over time
+        ax1.plot(steps, gate_score, alpha=0.7, label="gate_score")
+        if "gate_thresh" in agent.__dict__:
+            ax1.axhline(agent.gate_thresh, linestyle="--", alpha=0.5, color='red', label="threshold")
+        ax1.set_ylabel("Gate score")
+        ax1.set_title("Gate score over training")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Fraction gated-on (moving average)
+        window = min(100, len(gate_on) // 10 + 1)
+        if len(gate_on) > window:
+            gate_on_smooth = np.convolve(gate_on, np.ones(window)/window, mode='valid')
+            steps_smooth = steps[window-1:]
+            ax2.plot(steps_smooth, gate_on_smooth, alpha=0.7, label=f"fraction gated-on (MA{window})")
+        else:
+            ax2.plot(steps, gate_on, alpha=0.7, label="fraction gated-on")
+        ax2.set_ylabel("Fraction gated-on")
+        ax2.set_xlabel("Training step")
+        ax2.set_ylim(-0.05, 1.05)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        save_fig(fig2, run_dir / "fig" / f"{prefix}_gate_analysis.png")
+
+
 def plot_z_memory_map(
     agent: Actor,
     max_points=5000,
@@ -1180,6 +1246,7 @@ def main():
     eval_every = 1000
     eval_episodes = 200
     maxH = 64
+    reasoning_mode = "fixed"  # "off" | "fixed" | "gated" | "dynamic"
 
     # Train
     agent, env, snapshots_lo, snapshots_hi = train_with_eval(
@@ -1188,6 +1255,7 @@ def main():
         eval_every=eval_every,
         eval_episodes=eval_episodes,
         maxH=maxH,
+        reasoning_mode=reasoning_mode,
     )
 
     # Save config.json
@@ -1222,6 +1290,11 @@ def main():
             "target_Hr": agent.target_Hr,
             "target_bind": agent.target_bind,
             "use_dynamic_pondering": agent.use_dynamic_pondering,
+            "reasoning_mode": agent.reasoning_mode,
+            "freeze_sigma_refine": agent.freeze_sigma_refine,
+            "c_improve": agent.c_improve,
+            "gate_kind": agent.gate_kind,
+            "gate_thresh": agent.gate_thresh,
         },
     }
     with open(run_dir / "data" / "config.json", "w") as f:
@@ -1239,6 +1312,7 @@ def main():
     )
     plot_z_memory_map(agent, max_points=5000, save_path=run_dir / "fig" / "z_memory_map.png", show=False)
     plot_performance_dashboard(snapshots_lo, snapshots_hi, run_dir, prefix="perf_dashboard")
+    plot_reasoning_analysis(agent, run_dir, prefix="reasoning")
 
     # Save evaluation snapshots
     def snapshot_to_dict(snap: EvalSnapshot) -> Dict:

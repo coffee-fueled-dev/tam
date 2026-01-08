@@ -81,6 +81,15 @@ class Actor(nn.Module):
         target_Hr: float = 4.0,  # target reasoning steps for dual controller
         lambda_r_lr: float = 0.02,  # dual controller learning rate for reasoning
         use_dynamic_pondering: bool = False,  # use dynamic pondering instead of fixed Hr
+        # Patch A: Reasoning mode and gating
+        reasoning_mode: str = "fixed",  # "off" | "fixed" | "gated" | "dynamic"
+        freeze_sigma_refine: bool = True,  # prevent sigma gaming during refinement
+        c_improve: float = 1.0,  # exchange rate: NLL improvement "pays for" Hr
+        improve_detach: bool = True,  # prevent hacking improve via baseline coupling
+        gate_kind: str = "nll0",  # "nll0" | "mem_risk" | "volatility" | "combo"
+        gate_thresh: float = 0.5,  # scalar threshold for gating
+        gate_kappa: float = 0.1,  # softness if using sigmoid gating
+        Hr_default: int = 0,  # default Hr when gate is off
     ):
         super().__init__()
         self.device = torch.device("cpu")
@@ -135,6 +144,16 @@ class Actor(nn.Module):
         self.lambda_r_lr = lambda_r_lr
         self.lambda_r_clip = (0.0, 50.0)
         self.use_dynamic_pondering = use_dynamic_pondering
+        # Patch A: Reasoning mode and gating
+        self.reasoning_mode = reasoning_mode
+        self.freeze_sigma_refine = freeze_sigma_refine
+        self.c_improve = c_improve
+        self.improve_detach = improve_detach
+        self.gate_kind = gate_kind
+        self.gate_thresh = gate_thresh
+        self.gate_kappa = gate_kappa
+        self.Hr_default = Hr_default
+        self.Hr_max = self.max_refine_steps
 
         # --- commitment memory (replay in z-space) ---
         self.mem_size = 50_000
@@ -206,6 +225,14 @@ class Actor(nn.Module):
             "vol_final": [],  # final cone volume (after refinement)
             "vol_reduction": [],  # total volume reduction during refinement
             "vol_improvement_rate": [],  # average improvement per step
+            # Patch A: NLL0/NLLr/improve tracking
+            "NLL0": [],  # baseline expected NLL
+            "NLLr": [],  # refined expected NLL
+            "improve": [],  # improvement from reasoning
+            "ponder_reason_raw": [],  # raw reasoning ponder cost
+            "ponder_reason_eff": [],  # effective reasoning ponder cost (after improve discount)
+            "gate_score": [],  # gating score
+            "gate_on": [],  # whether gate is on (0 or 1)
         }
 
     def sample_z(
@@ -307,6 +334,7 @@ class Actor(nn.Module):
         mu_knots, logsig_knots, stop_logit = self._tube_init(z, s0_t)
 
         # Iterative refinement loop
+        logsig_knots_init = logsig_knots.clone()  # save initial for freeze_sigma_refine
         for _ in range(Hr):
             # Compute deltas
             delta_mu, delta_logsig, delta_stop = self.refiner(
@@ -315,7 +343,9 @@ class Actor(nn.Module):
 
             # Apply deltas with step scale
             mu_knots = mu_knots + self.refine_step_scale * delta_mu
-            logsig_knots = logsig_knots + self.refine_step_scale * delta_logsig
+            if not self.freeze_sigma_refine:
+                logsig_knots = logsig_knots + self.refine_step_scale * delta_logsig
+            # else: keep logsig_knots from initial (already set above)
             stop_logit = stop_logit + self.refine_step_scale * delta_stop
 
             # Clamp logsig to reasonable range
@@ -346,6 +376,7 @@ class Actor(nn.Module):
 
         # 1. Initial Guess
         mu_knots, logsig_knots, stop_logit = self._tube_init(z, s0_t)
+        logsig_knots_init = logsig_knots.clone()  # save initial for freeze_sigma_refine
 
         # Volume proxy: sum of exp(logsig) across all knots and dimensions
         # This is a simplified proxy for cone volume
@@ -385,7 +416,10 @@ class Actor(nn.Module):
             )
 
             mu_knots = mu_knots + self.refine_step_scale * delta_mu
-            logsig_knots = logsig_knots + self.refine_step_scale * delta_logsig
+            if not self.freeze_sigma_refine:
+                logsig_knots = logsig_knots + self.refine_step_scale * delta_logsig
+            else:
+                logsig_knots = logsig_knots_init.clone()  # keep initial
             stop_logit = stop_logit + self.refine_step_scale * delta_stop
 
             # Clamp logsig to reasonable range
@@ -416,6 +450,41 @@ class Actor(nn.Module):
         log_sigma = torch.clamp(log_sigma, self.logstd_min, self.logstd_max)
         log_var = 2.0 * log_sigma
         return mu, log_var
+
+    def _expected_nll(
+        self,
+        mu_knots: torch.Tensor,
+        logsig_knots: torch.Tensor,
+        stop_logit: torch.Tensor,
+        y: torch.Tensor,
+        T: int,
+        detach_w: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute expected NLL under a given tube.
+        
+        Args:
+            mu_knots: [M, D] knot means
+            logsig_knots: [M, D] knot log-stds
+            stop_logit: scalar stop logit
+            y: [T, D] target states
+            T: horizon
+            detach_w: whether to detach weights (default True)
+        
+        Returns:
+            exp_nll: scalar expected NLL
+            w: [T] weights
+        """
+        p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
+        w, _ = truncated_geometric_weights(p_stop, T)
+        if detach_w:
+            w = w.detach()
+        
+        mu, log_var = self._tube_traj(mu_knots, logsig_knots, T)
+        nll_t = gaussian_nll(mu, log_var, y).mean(dim=-1)  # [T]
+        exp_nll = (w * nll_t).sum()
+        
+        return exp_nll, w
 
     @torch.no_grad()
     def sample_horizon(
@@ -552,6 +621,74 @@ class Actor(nn.Module):
         a, b, c = 1.0, 0.2, 0.05  # weights for each term
         return a * (1.0 - soft) + b * torch.log(cone + eps) + c * lam
 
+    def gate_score(
+        self,
+        NLL0: Optional[torch.Tensor] = None,
+        volatility: Optional[float] = None,
+        z: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Compute gating score to decide when to use reasoning.
+        
+        Args:
+            NLL0: baseline expected NLL (scalar tensor)
+            volatility: episode volatility (float)
+            z: commitment vector [1, z_dim] for mem_risk
+        
+        Returns:
+            gate_score: scalar tensor
+        """
+        """
+        Compute gating score to decide when to use reasoning.
+        
+        Args:
+            NLL0: baseline expected NLL (scalar tensor)
+            volatility: episode volatility (float)
+            z: commitment vector [1, z_dim] for mem_risk
+        
+        Returns:
+            gate_score: scalar tensor
+        """
+        scores = []
+        
+        if self.gate_kind == "nll0":
+            if NLL0 is None:
+                raise ValueError("NLL0 required for gate_kind='nll0'")
+            score = NLL0.detach() if NLL0.requires_grad else NLL0
+            scores.append(score)
+        elif self.gate_kind == "mem_risk":
+            if z is None:
+                raise ValueError("z required for gate_kind='mem_risk'")
+            score = self.memory_risk(z).detach()
+            scores.append(score)
+        elif self.gate_kind == "volatility":
+            if volatility is None:
+                raise ValueError("volatility required for gate_kind='volatility'")
+            score = torch.tensor(volatility, device=self.device, dtype=torch.float32)
+            scores.append(score)
+        elif self.gate_kind == "combo":
+            # Weighted sum of normalized versions
+            if NLL0 is not None:
+                nll_norm = (NLL0.detach() - 0.0) / (1.0 + 1e-6)  # rough normalization
+                scores.append(nll_norm)
+            if z is not None:
+                mem = self.memory_risk(z).detach()
+                mem_norm = (mem - 0.0) / (1.0 + 1e-6)
+                scores.append(mem_norm)
+            if volatility is not None:
+                vol_norm = torch.tensor(volatility, device=self.device, dtype=torch.float32)
+                scores.append(vol_norm)
+        else:
+            raise ValueError(f"Unknown gate_kind: {self.gate_kind}")
+        
+        if len(scores) == 0:
+            return torch.tensor(0.0, device=self.device)
+        elif len(scores) == 1:
+            return scores[0]
+        else:
+            # Average of normalized scores
+            return torch.stack(scores).mean()
+
     def memory_risk(self, z: torch.Tensor) -> torch.Tensor:
         """
         Estimate risk in the neighborhood of z using kNN + Gaussian kernel.
@@ -626,26 +763,60 @@ class Actor(nn.Module):
         T = int(actions.shape[0])
 
         s0_t = torch.tensor(s0, dtype=torch.float32, device=self.device).unsqueeze(0)
+        y = torch.tensor(states[1:], dtype=torch.float32, device=self.device)  # [T,D]
 
-        # Compute initial tube (no reasoning) for delta_nll measurement
-        with torch.no_grad():
-            mu_knots_0, logsig_knots_0, stop_logit_0 = self._tube_init(z, s0_t)
-            mu_0, log_var_0 = self._tube_traj(mu_knots_0, logsig_knots_0, T)
-            y = torch.tensor(states[1:], dtype=torch.float32, device=self.device)  # [T,D]
-            nll_t_0 = gaussian_nll(mu_0, log_var_0, y).mean(dim=-1)  # [T]
-            p_stop_0 = torch.sigmoid(stop_logit_0).clamp(1e-4, 1.0 - 1e-4)
-            w_0, _ = truncated_geometric_weights(p_stop_0, T)
-            exp_nll_0 = (w_0 * nll_t_0).sum()
+        # Patch B: Compute baseline tube and NLL0
+        mu_knots_0, logsig_knots_0, stop_logit_0 = self._tube_init(z, s0_t)
+        NLL0, w_0 = self._expected_nll(mu_knots_0, logsig_knots_0, stop_logit_0, y, T, detach_w=True)
+        if self.improve_detach:
+            NLL0_detached = NLL0.detach()
+        else:
+            NLL0_detached = NLL0
 
-        # Choose reasoning approach
-        if self.use_dynamic_pondering:
+        # Patch E: Compute gate score (need volatility from env - will add later)
+        # For now, compute gate_score with available info
+        gate_score_val = self.gate_score(NLL0=NLL0, z=z, volatility=None)
+        gate_on_prob = torch.sigmoid((gate_score_val - self.gate_thresh) / (self.gate_kappa + 1e-8))
+        gate_on = (gate_on_prob > 0.5).float()
+
+        # Patch A + E: Choose reasoning approach based on reasoning_mode
+        Hr = 0
+        E_Hr_imagine = 0.0
+        p_refine_stop_val = 0.0
+        
+        if self.reasoning_mode == "off":
+            Hr = 0
+            mu_knots = mu_knots_0
+            logsig_knots = logsig_knots_0
+            stop_logit = stop_logit_0
+            # NLLr will equal NLL0 (no refinement)
+        elif self.reasoning_mode == "fixed":
+            # Fixed pondering: sample Hr from geometric distribution
+            Hr, E_Hr_imagine, p_refine_stop_val = self.sample_reasoning_steps(z, s0)
+            mu_knots, logsig_knots, stop_logit = self.infer_tube(s0_t, z, Hr)
+        elif self.reasoning_mode == "gated":
+            if gate_on > 0.5:
+                # Gate is on: use reasoning
+                Hr, E_Hr_imagine, p_refine_stop_val = self.sample_reasoning_steps(z, s0)
+                # Use Hr_max when gate is on (simplest approach)
+                Hr = self.Hr_max
+                mu_knots, logsig_knots, stop_logit = self.infer_tube(s0_t, z, Hr)
+            else:
+                # Gate is off: use default
+                Hr = self.Hr_default
+                if Hr == 0:
+                    mu_knots = mu_knots_0
+                    logsig_knots = logsig_knots_0
+                    stop_logit = stop_logit_0
+                else:
+                    mu_knots, logsig_knots, stop_logit = self.infer_tube(s0_t, z, Hr)
+        elif self.reasoning_mode == "dynamic":
             # Dynamic pondering: adaptively decide when to stop thinking
             mu_knots, logsig_knots, stop_logit, Hr, halting_probs = self.infer_tube_dynamic(
                 s0_t, z, max_steps=self.max_refine_steps
             )
             # For logging, compute expected Hr from the halting probs
             if len(halting_probs) > 0:
-                # Stack and compute geometric expectation
                 p_stops = torch.stack(halting_probs)
                 E_Hr_imagine = float(Hr)  # actual steps taken
                 p_refine_stop_val = float(p_stops[-1].item()) if len(p_stops) > 0 else 0.0
@@ -653,16 +824,18 @@ class Actor(nn.Module):
                 E_Hr_imagine = 0.0
                 p_refine_stop_val = 0.0
         else:
-            # Fixed pondering: sample Hr from geometric distribution
-            Hr, E_Hr_imagine, p_refine_stop_val = self.sample_reasoning_steps(z, s0)
-            # Infer refined tube with Hr reasoning steps
-            mu_knots, logsig_knots, stop_logit = self.infer_tube(s0_t, z, Hr)
+            raise ValueError(f"Unknown reasoning_mode: {self.reasoning_mode}")
 
         p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
 
+        # Patch B: Compute refined NLLr
+        NLLr, w_r = self._expected_nll(mu_knots, logsig_knots, stop_logit, y, T, detach_w=False)
+        
+        # Patch B: Compute improve
+        improve = torch.relu(NLL0_detached - NLLr)
+
         # Volume tracking: measure cone tightening during refinement
         with torch.no_grad():
-            # Simple volume proxy: sum of exp(logsig) across all knots
             vol_init = torch.exp(logsig_knots_0).sum()
             vol_final = torch.exp(logsig_knots).sum()
             vol_reduction = vol_init - vol_final
@@ -673,9 +846,6 @@ class Actor(nn.Module):
 
         # per-step NLL (using refined tube)
         nll_t = gaussian_nll(mu, log_var, y).mean(dim=-1)  # [T]
-
-        # Delta NLL: improvement from reasoning
-        delta_nll = exp_nll_0 - (w_0.detach() * nll_t).sum()
 
         # option-3 expected loss under (learned) geometric halting, forced at T
         w, E_T_train = truncated_geometric_weights(p_stop, T)
@@ -707,13 +877,16 @@ class Actor(nn.Module):
         # ponder cost: shorter horizons preferred (commitment compute)
         ponder_commit = (self.lambda_h + self.lambda_T) * E_T_train
 
-        # reasoning ponder cost: penalize internal computation
+        # Patch C: Pay-for-progress ponder cost
         p_refine_stop_t = self.ponder_head(s0_t, z)
         _, E_Hr_train = truncated_geometric_weights(p_refine_stop_t, self.max_refine_steps)
-        ponder_reason = self.lambda_r * E_Hr_train
+        ponder_reason_raw = self.lambda_r * E_Hr_train
+        # Effective ponder cost: discount by improvement
+        improve_detached = improve.detach()  # always detach improve here
+        ponder_reason_eff = self.lambda_r * torch.relu(E_Hr_train - self.c_improve * improve_detached)
 
         # Total ponder cost
-        ponder = ponder_commit + ponder_reason
+        ponder = ponder_commit + ponder_reason_eff
 
         # KL regularization: encourages meaningful but not collapsed latent space
         kl = kl_diag_gaussian_to_standard(z_mu, z_logstd).mean()
@@ -848,7 +1021,19 @@ class Actor(nn.Module):
         self.history["E_Hr"].append(float(E_Hr_imagine))
         self.history["E_Hr_train"].append(float(E_Hr_train.detach().item()))
         self.history["p_refine_stop"].append(float(p_refine_stop_val))
-        self.history["delta_nll"].append(float(delta_nll.detach().item()))
+        # Patch B: Log NLL0, NLLr, improve
+        self.history["NLL0"].append(float(NLL0.detach().item()))
+        self.history["NLLr"].append(float(NLLr.detach().item()))
+        self.history["improve"].append(float(improve.detach().item()))
+        # Patch C: Log ponder costs
+        self.history["ponder_reason_raw"].append(float(ponder_reason_raw.detach().item()))
+        self.history["ponder_reason_eff"].append(float(ponder_reason_eff.detach().item()))
+        # Patch E: Log gate info
+        self.history["gate_score"].append(float(gate_score_val.detach().item()))
+        self.history["gate_on"].append(float(gate_on.item()))
+        # Keep delta_nll for backward compatibility (use improve)
+        delta_nll_compat = NLL0_detached - NLLr
+        self.history["delta_nll"].append(float(delta_nll_compat.detach().item()))
         self.history["lambda_r"].append(float(self.lambda_r))
         self.history["mem_loss"].append(float(mem_loss.detach().item()))
         self.history["mem_risk"].append(float(mem_risk.detach().item()))

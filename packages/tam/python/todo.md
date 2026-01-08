@@ -1,225 +1,229 @@
-## Patch 0 — Add run directory + saving utilities (experiments.py)
+## Patch A — Add knobs (disable + gating modes)
 
-### 0.1 Imports
-Add at top:
-- `import os, json, time`
-- `from pathlib import Path`
-- (optional) `import hashlib` if you want deterministic run IDs
-
-### 0.2 Run directory helper
-Add:
-
-- `def make_run_dir(base="runs", tag="tam") -> Path:`
-  - timestamp like `YYYYMMDD_HHMMSS`
-  - create `runs/{tag}_{timestamp}/`
-  - inside create subfolders:
-    - `fig/` (pngs)
-    - `data/` (npz/json)
-
-### 0.3 Figure saving helper
-Add:
-
-- `def save_fig(fig, path: Path, dpi=150):`
-  - `fig.savefig(path, dpi=dpi, bbox_inches="tight")`
-  - `plt.close(fig)` to prevent leaks
-
-### 0.4 Config dump
-At run start, write:
-- `config.json` containing:
-  - seed/train_steps/eval_every/eval_episodes/maxH
-  - env params
-  - actor params you passed (you can manually build this dict in `main()`)
-
----
-
-## Patch 1 — Define a performance metric: episode control cost J (experiments.py)
-
-You need a control objective for evaluation that is **independent of tube self-prediction**.
-
-### 1.1 Add cost function
-Add:
-
-- `def episode_control_cost(states, actions, dt=0.05, w_theta=1.0, w_omega=0.1, w_act=0.01):`
-  - states shape `[T+1,2]`, actions `[T,1]`
-  - `theta = states[1:,0]`, `omega = states[1:,1]`, `a = actions[:,0]`
-  - cost per step: `w_theta*theta**2 + w_omega*omega**2 + w_act*a**2`
-  - return:
-    - `J_sum = cost.sum()` (or `.mean()`; pick one and stick to it)
-    - `J_mean = cost.mean()`
-    - optionally return `cost_t` for debugging
-
-**Decision:** prefer `J_mean` so horizon variation doesn’t trivially dominate.
-
-### 1.2 Extend EvalSnapshot to store J
-Modify `EvalSnapshot` to include:
-- `mean_J: float`
-- optionally `J_points: np.ndarray` (per-episode) if you want scatter later
-
-### 1.3 Compute J in evaluate_agent
-Inside evaluation loop (after rollout):
-- compute `J_mean = episode_control_cost(state_seq, actions, dt=env.dt)["J_mean"]`
-- accumulate `J_sum += J_mean`
-- store per-episode J into pareto row if you want (optional)
-
-Add to snapshot:
-- `mean_J = J_sum / n_episodes`
-
----
-
-## Patch 2 — Add dashboard data extraction (evaluate_agent)
-
-The dashboard needs two more evaluation-time aggregates:
-
-### 2.1 Add “σ vs |err|” aggregates
-During evaluation for each episode, after you compute `mu, log_var`:
-
-Compute weighted summaries (using `w`):
-- `sigma = exp(0.5*log_var)` → `[T,2]`
-- `err = abs(y - mu)` → `[T,2]`
-- weighted mean per dim:
-  - `sigma_w = (w[:,None]*sigma).sum(0)`
-  - `err_w   = (w[:,None]*err).sum(0)`
-- accumulate sums across episodes:
-  - `sigma_w_sum += sigma_w.cpu().numpy()`
-  - `err_w_sum += err_w.cpu().numpy()`
-
-At end:
-- `mean_sigma_w = sigma_w_sum / n_episodes` (2-vector)
-- `mean_err_w = err_w_sum / n_episodes`
-
-Store into snapshot as:
-- `mean_sigma_w: np.ndarray` (shape (2,))
-- `mean_err_w: np.ndarray`
-
-### 2.2 Collect z-scores for histogram
-Also compute standardized residuals:
-- `r = (y - mu) / (sigma + 1e-8)` → `[T,2]`
-- flatten and append to list (cap size so memory doesn’t explode):
-  - e.g. keep up to `max_r = 20000` samples per snapshot
-  - randomly subsample `r.flatten()` if too large
-
-Store into snapshot:
-- `z_scores: np.ndarray` (1D array, bounded size)
-
----
-
-## Patch 3 — Implement the 3-plot dashboard function (experiments.py)
+### A1) Add config flags + hyperparams (actor.py `__init__`)
 
 Add:
 
-`def plot_performance_dashboard(snapshots_lo, snapshots_hi, run_dir: Path, prefix="perf_dashboard")`
+- `reasoning_mode: str = "fixed"` # `"off" | "fixed" | "gated" | "dynamic"`
+- `freeze_sigma_refine: bool = True`
+- `c_improve: float = 1.0` # exchange rate: NLL improvement “pays for” Hr
+- `improve_detach: bool = True` # prevent hacking improve via baseline coupling
+- `gate_kind: str = "nll0"` # `"nll0" | "mem_risk" | "volatility" | "combo"`
+- `gate_thresh: float = ...` # scalar threshold
+- `gate_kappa: float = ...` # softness if using sigmoid gating
+- `Hr_default: int = 0`
+- `Hr_max: int = self.max_refine_steps`
 
-It will generate **three figures**, each comparing Hr=1 vs Hr=max across snapshots.
+Also add history keys:
 
-### 3.1 Plot A: J vs training step (performance curve)
-- x: `snap.step`
-- y_lo: `snap.mean_J` from `snapshots_lo`
-- y_hi: `snap.mean_J` from `snapshots_hi`
-- include legend: “Hr=1”, “Hr=max”
-- title: `Control performance (lower is better): J_mean`
+- `"NLL0"`, `"NLLr"`, `"improve"`, `"ponder_reason_raw"`, `"ponder_reason_eff"`, `"gate_score"`, `"gate_on"`
 
-Save:
-- `fig/perf_J_curve.png`
-
-### 3.2 Plot B: weighted σ vs weighted |err| per dimension
-For the **last snapshot** of each setting (or plot trajectories over snapshots if you prefer):
-
-Option 1 (simple + informative):
-- bar or line plot with two panels:
-  - panel 1: theta: `mean_sigma_w[0]` vs `mean_err_w[0]`
-  - panel 2: omega: `mean_sigma_w[1]` vs `mean_err_w[1]`
-- do this for Hr=1 and Hr=max (two colors or two line styles)
-
-Save:
-- `fig/perf_sigma_vs_error_last.png`
-
-Option 2 (over snapshots):
-- plot `mean_sigma_w_dim` and `mean_err_w_dim` vs step, two lines each (σ and |err|), for theta and omega in separate figs.
-
-(Plan recommendation: implement Option 1 first.)
-
-### 3.3 Plot C: z-score histogram at 3 checkpoints
-Pick checkpoints:
-- first snapshot, middle snapshot, last snapshot
-Do for Hr=1 and Hr=max separately (either two subplots or overlay).
-
-Recommended:
-- 2 rows × 3 cols:
-  - row 1: Hr=1 histograms at [early, mid, late]
-  - row 2: Hr=max histograms at [early, mid, late]
-- fixed xlim like `[-5, 5]`
-
-Save:
-- `fig/perf_zscore_hists.png`
+**Done when:** you can run with `reasoning_mode="off"` and code never calls `infer_tube(...)` refinement (only `_tube_init` / `_tube_traj`).
 
 ---
 
-## Patch 4 — Save ALL figures + data to run directory (main)
+## Patch B — Compute NLL0 vs NLLr (progress metric) correctly
 
-### 4.1 Change plot functions to return fig objects
-Right now your plot functions call `plt.show()` and discard figs.
+### B1) Implement a helper that evaluates expected NLL under a given tube (actor.py)
 
-Update each plotting function signature to accept:
-- `save_path: Optional[Path] = None`
-- `show: bool = True`
+Add a utility method:
 
-Inside:
-- create `fig = plt.figure(...)` or `fig, ax = plt.subplots(...)`
-- if `save_path`: `save_fig(fig, save_path)`
-- if `show`: `plt.show()` else `plt.close(fig)`
+- `_expected_nll(mu_knots, logsig_knots, stop_logit, y, T, detach_w: bool=True) -> (exp_nll, w)`
 
-Apply to:
-- `plot_training_overview`
-- `plot_dual_phase_portrait`
-- `plot_eval_snapshots`
-- `plot_z_memory_map`
-- new `plot_performance_dashboard`
+Use your existing:
 
-### 4.2 Save evaluation + history data
-At end of `main()`:
-- save `agent.history` → `data/history.npz` or `history.json`
-  - npz is easiest: convert lists to numpy arrays
-- save eval snapshots:
-  - `data/eval_hr1.npz`
-  - `data/eval_hrmax.npz`
-  - include: step, mean_J, mean_sharp_log_vol, mean_volatility, etc.
-- save memory (if present):
-  - `data/memory.npz` with `zs, soft, cone, lam, risk`
+- `_tube_traj(...)`
+- `gaussian_nll(...)`
+- `truncated_geometric_weights(...)`
 
-### 4.3 Main flow
-In `main()`:
-1) `run_dir = make_run_dir(tag="tam_hidden_fault")`
-2) train
-3) generate + save:
-   - `training_overview.png`
-   - `dual_phase.png`
-   - `eval_snapshots.png`
-   - `z_memory.png`
-   - **new**: `perf_J_curve.png`, `perf_sigma_vs_error_last.png`, `perf_zscore_hists.png`
-4) dump `config.json`, `history.npz`, `eval_hr*.npz`
+Compute:
+
+- `p_stop = sigmoid(stop_logit)`
+- `w, _ = truncated_geometric_weights(p_stop, T)`
+- `nll_t = gaussian_nll(mu, log_var, y).mean(-1)`
+- `exp_nll = (w * nll_t).sum()`
+
+**Done when:** you can call it for both Hr=0 and Hr>0 and get two scalars.
+
+### B2) In `train_on_episode`, compute baseline and refined expected NLL
+
+You already compute something similar for delta_nll; make it canonical:
+
+- Baseline tube: `(mu0_knots, logsig0_knots, stop0_logit) = _tube_init(...)`
+- `NLL0 = expected_nll(baseline)`
+- Refined tube: depending on reasoning_mode, produce `(mur_knots, logsigr_knots, stopr_logit)`
+- `NLLr = expected_nll(refined)`
+
+Then:
+
+- `improve = relu(NLL0_detached - NLLr)` (or raw `(NLL0 - NLLr)`; I’d start with relu)
+- If `improve_detach`: `NLL0_detached = NLL0.detach()`
+
+Log `NLL0, NLLr, improve`.
+
+**Done when:** “improve” is positive exactly when refinement _actually reduces expected NLL_.
 
 ---
 
-## Patch 5 — Small consistency fix: always evaluate using refinement for vis
-You already updated `tube_predictions_for_episode` to use refinement. Make sure:
-- `evaluate_agent()` calls `episode_metrics(..., Hr_eval=...)`
-- `episode_metrics()` calls `tube_predictions_for_episode(..., Hr_eval=...)`
-That ensures the σ/err and z-score plots reflect the same semantics as your Pareto + calibration plots.
+## Patch C — Fix the compute incentive (pay-for-progress ponder)
+
+### C1) Replace reasoning ponder cost term
+
+Right now you do:
+
+- `ponder_reason = lambda_r * E_Hr_train`
+
+Replace with:
+
+- `ponder_reason_raw = self.lambda_r * E_Hr_train`
+- `ponder_reason_eff = self.lambda_r * relu(E_Hr_train - self.c_improve * improve.detach_if_config)`
+
+Notes:
+
+- Detach `improve` here (always) so the model can’t increase improve by making baseline worse or by weird gradients.
+- Keep logging both `ponder_reason_raw` and `ponder_reason_eff`.
+
+Then set:
+
+- `ponder = ponder_commit + ponder_reason_eff`
+
+**Done when:** if refinement doesn’t improve NLL, extra Hr is strictly penalized; if it improves enough, penalty goes to ~0.
+
+### C2) Update λ_r dual update to match new objective
+
+You can keep the same controller update (`E_Hr_train - target_Hr`) **or** switch to an “unpaid compute” target:
+
+- Option 1 (minimal change): keep as-is.
+- Option 2 (better): drive λ_r using **effective unpaid compute**:
+  - `unpaid = relu(E_Hr_train - c_improve * improve.detach())`
+  - `lambda_r += lr * (unpaid - target_unpaid)` where `target_unpaid ~ small` (like 0.5)
+
+Start with Option 1 for stability.
+
+**Done when:** λ_r doesn’t blow up just because the agent uses Hr in episodes where it’s actually improving fit.
 
 ---
 
-## Suggested file outputs (runs/<run>/fig)
-- `training_overview.png`
-- `dual_phase_portrait.png`
-- `eval_calibration_pareto_horizon.png` (your current eval plots)
-- `z_memory_map.png`
-- `perf_J_curve.png`
-- `perf_sigma_vs_error_last.png`
-- `perf_zscore_hists.png`
+## Patch D — Prevent σ-gaming during refinement
 
-And (runs/<run>/data)
-- `history.npz`
-- `eval_hr1.npz`
-- `eval_hrmax.npz`
-- `memory.npz` (if present)
-- `config.json`
+### D1) Freeze σ during refinement (recommended diagnostic)
+
+Modify `infer_tube(...)` loop:
+
+- still compute `delta_mu, delta_logsig, delta_stop = refiner(...)`
+- but if `freeze_sigma_refine`:
+  - `delta_logsig = 0` (or skip applying it)
+
+So:
+
+- `logsig_knots` stays from `_tube_init` (or still clamped once)
+
+**Done when:** performance difference between Hr=0 and Hr>0 can’t be explained by “σ got smaller”.
+
+### D2) (Optional later) softer alternative: penalize Δlogσ without improvement
+
+If you later want σ refinement back, add:
+
+- `sigma_shrink = relu(-(logsig_r - logsig_0)).mean()` # only counts shrink
+- `sigma_game_pen = w_sigma_game * relu(sigma_shrink - k * improve.detach())`
+
+But don’t do this until you’ve run the freeze experiment.
+
+---
+
+## Patch E — Add a gating policy for when to think
+
+### E1) Implement `gate_score(...)` in Actor
+
+Inputs you already have per-episode:
+
+- `volatility` from env info (you compute it in eval; add to train loop info too)
+- `mem_risk(z)` (already exists)
+- `NLL0` (computed in Patch B)
+
+Implement something like:
+
+- `score =`
+  - `"nll0"`: `NLL0.detach()`
+  - `"mem_risk"`: `mem_risk(z).detach()`
+  - `"volatility"`: `torch.tensor(volatility)`
+  - `"combo"`: weighted sum of normalized versions
+
+Then decide gate:
+
+- hard gate: `gate_on = score > gate_thresh`
+- soft gate: `gate_on_prob = sigmoid((score - gate_thresh)/gate_kappa)`
+
+Log `gate_score` and `gate_on`.
+
+**Done when:** you can see a histogram of gate_score and verify it correlates with “hard episodes”.
+
+### E2) Choose Hr using the gate
+
+In `train_on_episode` (or earlier where you sample Hr):
+
+If `reasoning_mode == "off"`:
+
+- `Hr = 0`
+
+If `"fixed"`:
+
+- keep your existing sampling (or fixed Hr)
+
+If `"gated"`:
+
+- `Hr = Hr_default` when gate off
+- `Hr = sample_reasoning_steps(...)` or `Hr_max` when gate on
+  - simplest: `Hr = Hr_max` when on (you can anneal later)
+
+If `"dynamic"`:
+
+- your existing `infer_tube_dynamic(...)` path
+
+**Done when:** average Hr drops a lot, but you still see high Hr on high gate_score episodes.
+
+---
+
+## Patch F — Update experiments + eval to compare modes
+
+### F1) Add sweep in experiments.py
+
+Run at least:
+
+- `reasoning_mode="off"`
+- `reasoning_mode="fixed"` (current baseline)
+- `reasoning_mode="gated"` with `Hr_default=0`, `Hr_max=max_refine_steps`
+
+Keep evaluation exactly as you already do (Hr=1 vs Hr=max is still useful), but add “mode” label in run_dir.
+
+**Done when:** you can line up dashboards across runs and answer:
+
+- Does gated reasoning improve J_mean on fault-heavy episodes?
+- Does it improve calibration (z-score hist moves closer to N(0,1)) _without_ just shrinking σ?
+
+### F2) Add 2 tiny new plots to the dashboard
+
+1. `improve` vs `E_Hr_train` scatter (or binned):
+   - proves “compute is being spent where it buys fit”
+2. `gate_score` over training (and fraction gated-on)
+
+**Done when:** you can visually confirm the incentive fix is working (high Hr coincides with high improve).
+
+---
+
+## Minimal implementation order (fastest path)
+
+1. **A (knob)** + **B (NLL0/NLLr/improve)**
+2. **C (pay-for-progress ponder)**
+3. **D (freeze σ)**
+4. **E (gating)**
+5. **F (mode comparisons + 2 extra plots)**
+
+---
+
+## Quick “success criteria” checklist
+
+- With `reasoning_mode="off"`, you get a stable baseline and no regressions.
+- With `freeze_sigma_refine=True`, any Hr benefit must show up as **lower |err| and better J**, not just lower σ.
+- `improve` is near 0 on easy episodes; positive on fault/switch episodes.
+- In gated mode: average Hr stays low, but “hard episode” performance improves.
