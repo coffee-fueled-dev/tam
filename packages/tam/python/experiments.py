@@ -793,6 +793,93 @@ def plot_training_overview(agent: Actor):
     plt.show()
 
 
+def extract_memory(agent: Actor):
+    """
+    Extract memory buffer data as numpy arrays.
+
+    Returns:
+        zs: [N, z_dim] commitment vectors
+        soft: [N] soft bind rates
+        cone: [N] cone volumes
+        lam: [N] lambda_bind values
+    """
+    if len(agent.mem) == 0:
+        return None, None, None, None
+
+    zs = np.stack([m["z"].numpy() for m in agent.mem], axis=0)  # [N,z_dim]
+    soft = np.array([m["soft_bind"] for m in agent.mem])
+    cone = np.array([m["cone_vol"] for m in agent.mem])
+    lam = np.array([m["lambda_bind"] for m in agent.mem])
+    return zs, soft, cone, lam
+
+
+def pca2(X):
+    """
+    Project data to 2D using PCA.
+
+    Args:
+        X: [N, D] data matrix
+
+    Returns:
+        [N, 2] projected data
+    """
+    Xc = X - X.mean(axis=0, keepdims=True)
+    U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
+    return Xc @ Vt[:2].T  # [N,2]
+
+
+def plot_z_memory_map(agent: Actor, max_points=5000):
+    """
+    Visualize z-space memory with 2D PCA projection.
+    Shows regions colored by:
+      - soft_bind (reliability)
+      - log(cone_vol) (sharpness)
+      - lambda_bind (reliability cost)
+      - risk (regularizer target)
+    """
+    zs, soft, cone, lam = extract_memory(agent)
+
+    if zs is None or zs.shape[0] == 0:
+        print("No memory to plot.")
+        return
+
+    # subsample for speed
+    N = zs.shape[0]
+    if N > max_points:
+        idx = np.random.choice(N, size=max_points, replace=False)
+        zs, soft, cone, lam = zs[idx], soft[idx], cone[idx], lam[idx]
+
+    Z2 = pca2(zs)
+
+    # Compute risk using same formula as actor
+    risk = (1.0 - soft) + 0.2 * np.log(cone + 1e-8) + 0.05 * lam
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    sc0 = axes[0, 0].scatter(Z2[:, 0], Z2[:, 1], c=soft, s=10, alpha=0.5, cmap='viridis')
+    axes[0, 0].set_title("z-memory: soft_bind (high=reliable)")
+    plt.colorbar(sc0, ax=axes[0, 0])
+
+    sc1 = axes[0, 1].scatter(Z2[:, 0], Z2[:, 1], c=np.log(cone + 1e-8), s=10, alpha=0.5, cmap='viridis')
+    axes[0, 1].set_title("z-memory: log cone_vol (low=tight)")
+    plt.colorbar(sc1, ax=axes[0, 1])
+
+    sc2 = axes[1, 0].scatter(Z2[:, 0], Z2[:, 1], c=lam, s=10, alpha=0.5, cmap='viridis')
+    axes[1, 0].set_title("z-memory: lambda_bind (low=cheap reliability)")
+    plt.colorbar(sc2, ax=axes[1, 0])
+
+    sc3 = axes[1, 1].scatter(Z2[:, 0], Z2[:, 1], c=risk, s=10, alpha=0.5, cmap='hot')
+    axes[1, 1].set_title("z-memory: risk (regularizer target)")
+    plt.colorbar(sc3, ax=axes[1, 1])
+
+    for ax in axes.ravel():
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+
+    plt.tight_layout()
+    plt.show()
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -808,6 +895,7 @@ def main():
     plot_training_overview(agent)
     plot_dual_phase_portrait(agent, smooth=200)
     plot_eval_snapshots(snapshots_lo, snapshots_hi, k_star=2.0)
+    plot_z_memory_map(agent, max_points=5000)
 
 
 if __name__ == "__main__":

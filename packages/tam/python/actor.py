@@ -19,6 +19,7 @@ Key prevention of exploits:
 - Result: oscillatory homeostasis at the Pareto boundary of tightest cone + shortest horizon
 """
 
+from collections import deque
 from typing import Tuple
 
 import numpy as np
@@ -133,6 +134,16 @@ class Actor(nn.Module):
         self.lambda_r_lr = lambda_r_lr
         self.lambda_r_clip = (0.0, 50.0)
 
+        # --- commitment memory (replay in z-space) ---
+        self.mem_size = 50_000
+        self.mem_min = 500          # don't apply regularizer until enough data
+        self.mem_k = 64             # neighbors
+        self.mem_sigma = 1.0        # kernel width in z-space
+        self.w_mem = 0.02           # strength of memory regularizer (start small)
+        self.mem_detach_targets = True
+
+        self.mem = deque(maxlen=self.mem_size)  # store dicts per episode
+
         # Networks
         self.actor = ActorNet(state_dim, z_dim, hidden_dim).to(self.device)
         self.pol = SharedPolicy(state_dim, z_dim, hidden_dim).to(self.device)
@@ -184,6 +195,9 @@ class Actor(nn.Module):
             "p_refine_stop": [],
             "delta_nll": [],  # improvement from reasoning
             "lambda_r": [],  # reasoning compute dual
+            "mem_loss": [],  # memory regularizer loss
+            "mem_risk": [],  # estimated risk from memory
+            "mem_n": [],  # number of items in memory
         }
 
     def sample_z(
@@ -408,6 +422,77 @@ class Actor(nn.Module):
         frac = float(inside.float().mean().item())
         return frac >= self.bind_success_frac
 
+    def _mem_tensors(self, device):
+        """
+        Extract tensors from memory buffer.
+
+        Returns:
+            Z: [N, z_dim] - commitment vectors
+            soft: [N] - soft bind rates
+            cone: [N] - cone volumes
+            lam: [N] - lambda_bind values
+        """
+        zs = torch.stack([m["z"] for m in self.mem], dim=0).to(device)  # [N,z_dim]
+        soft = torch.tensor([m["soft_bind"] for m in self.mem], device=device)
+        cone = torch.tensor([m["cone_vol"] for m in self.mem], device=device)
+        lam = torch.tensor([m["lambda_bind"] for m in self.mem], device=device)
+        return zs, soft, cone, lam
+
+    def _mem_risk_targets(self, soft, cone, lam):
+        """
+        Compute scalar risk target per memory item.
+
+        Risk = high when:
+          - low bind rate (unreliable)
+          - high cone volume (vague)
+          - high lambda_bind (had to pay for reliability)
+
+        Args:
+            soft: [N] soft bind rates
+            cone: [N] cone volumes
+            lam: [N] lambda_bind values
+
+        Returns:
+            risk: [N] scalar risk targets
+        """
+        eps = 1e-8
+        a, b, c = 1.0, 0.2, 0.05  # weights for each term
+        return a * (1.0 - soft) + b * torch.log(cone + eps) + c * lam
+
+    def memory_risk(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Estimate risk in the neighborhood of z using kNN + Gaussian kernel.
+
+        Args:
+            z: [1, z_dim] current commitment
+
+        Returns:
+            scalar estimated risk in neighborhood of z
+        """
+        if len(self.mem) < self.mem_min:
+            return torch.tensor(0.0, device=z.device)
+
+        Z, soft, cone, lam = self._mem_tensors(z.device)  # [N,z_dim], [N]
+        r = self._mem_risk_targets(soft, cone, lam)       # [N]
+
+        zq = z.squeeze(0)                                  # [z_dim]
+        d2 = torch.sum((Z - zq) ** 2, dim=-1)             # [N]
+
+        # pick k nearest
+        k = min(self.mem_k, d2.numel())
+        vals, idx = torch.topk(d2, k=k, largest=False)
+
+        d2_k = vals
+        r_k = r[idx]
+
+        # gaussian kernel weights
+        sigma2 = float(self.mem_sigma) ** 2
+        w = torch.exp(-d2_k / (2.0 * sigma2))
+        w = w / (w.sum() + 1e-8)
+
+        # local expected risk
+        return torch.sum(w * r_k)
+
     def _cone_summaries(
         self, s0_t: torch.Tensor, z: torch.Tensor, Teval: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -547,6 +632,11 @@ class Actor(nn.Module):
             + horizon_bonus
         )
 
+        # Memory regularizer: penalize sampling z in high-risk neighborhoods
+        mem_risk = self.memory_risk(z)
+        mem_loss = self.w_mem * mem_risk
+        loss = loss + mem_loss
+
         # Monotone algebra regularizer
         Teval = self.algebra_Teval
         delta = self.algebra_delta
@@ -643,3 +733,18 @@ class Actor(nn.Module):
         self.history["p_refine_stop"].append(float(p_refine_stop_val))
         self.history["delta_nll"].append(float(delta_nll.detach().item()))
         self.history["lambda_r"].append(float(self.lambda_r))
+        self.history["mem_loss"].append(float(mem_loss.detach().item()))
+        self.history["mem_risk"].append(float(mem_risk.detach().item()))
+        self.history["mem_n"].append(int(len(self.mem)))
+
+        # Store commitment outcome in memory
+        with torch.no_grad():
+            self.mem.append({
+                "z": z.detach().cpu().squeeze(0),  # [z_dim]
+                "soft_bind": float(soft_bind_rate.item()),
+                "cone_vol": float(cone_vol_w.item()),
+                "E_T": float(E_T_train.item()),
+                "lambda_bind": float(self.lambda_bind),
+                "lambda_T": float(self.lambda_T),
+                "Hr": int(Hr),
+            })

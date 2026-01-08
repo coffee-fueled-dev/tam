@@ -25,8 +25,4 @@ __all__ = [
     "truncated_geometric_weights",
     "sample_truncated_geometric",
     "interp1d_linear",
-    # Experiments
-    "ControlledPendulumEnv",
-    "run_experiment",
-    "plot_training_results",
 ]
