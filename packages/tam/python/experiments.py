@@ -17,8 +17,12 @@ Run:
     python experiments.py
 """
 
+import json
 import math
+import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -50,6 +54,37 @@ except ImportError:
             w = w / (w.sum() + 1e-8)
             E_T = (w * t_idx).sum()
             return w, E_T
+
+
+# -----------------------------
+# Run directory + saving utilities (Patch 0)
+# -----------------------------
+def make_run_dir(base: str = "runs", tag: str = "tam") -> Path:
+    """
+    Create a timestamped run directory with subfolders for figures and data.
+    
+    Returns:
+        Path to the created run directory
+    """
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(base) / f"{tag}_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "fig").mkdir(exist_ok=True)
+    (run_dir / "data").mkdir(exist_ok=True)
+    return run_dir
+
+
+def save_fig(fig, path: Path, dpi: int = 150):
+    """
+    Save a matplotlib figure and close it to prevent memory leaks.
+    
+    Args:
+        fig: matplotlib figure object
+        path: Path to save the figure
+        dpi: Resolution for saving
+    """
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
 
 
 # -----------------------------
@@ -324,6 +359,40 @@ class HiddenRegimeFaultEnv:
 # -----------------------------
 # Evaluation helpers
 # -----------------------------
+def episode_control_cost(
+    states: np.ndarray,
+    actions: np.ndarray,
+    dt: float = 0.05,
+    w_theta: float = 1.0,
+    w_omega: float = 0.1,
+    w_act: float = 0.01,
+) -> Dict[str, float]:
+    """
+    Compute episode control cost J (independent of tube self-prediction).
+    
+    Args:
+        states: [T+1, 2] array of (theta, omega) states
+        actions: [T, 1] array of actions
+        dt: Time step
+        w_theta: Weight for theta^2 cost
+        w_omega: Weight for omega^2 cost
+        w_act: Weight for action^2 cost
+    
+    Returns:
+        Dict with 'J_sum', 'J_mean', and 'cost_t' (per-step costs)
+    """
+    theta = states[1:, 0]  # [T]
+    omega = states[1:, 1]  # [T]
+    a = actions[:, 0]  # [T]
+    
+    cost = w_theta * theta**2 + w_omega * omega**2 + w_act * a**2
+    return {
+        "J_sum": float(cost.sum()),
+        "J_mean": float(cost.mean()),
+        "cost_t": cost,
+    }
+
+
 def nominal_gaussian_coverage(k: float, D: int) -> float:
     """
     Nominal coverage that all D independent dims lie within +/- k sigma.
@@ -394,6 +463,7 @@ def episode_metrics(
       - empirical coverage for each k in k_list (fraction of steps inside k-sigma, all dims)
       - sharpness summary: weighted log cone volume
       - E[T] proxy: from halting weights over horizon T
+      - sigma and error aggregates for dashboard
 
     Args:
         Hr_eval: Number of reasoning steps to use for evaluation (None = max)
@@ -417,10 +487,22 @@ def episode_metrics(
         cov = float(inside.float().mean().item())
         coverages[k] = cov
 
+    # Dashboard aggregates: weighted sigma and error
+    sigma = std  # [T,2]
+    err = torch.abs(y - mu)  # [T,2]
+    sigma_w = (w[:, None] * sigma).sum(0)  # [2]
+    err_w = (w[:, None] * err).sum(0)  # [2]
+
+    # Z-scores for histogram
+    r = (y - mu) / (sigma + 1e-8)  # [T,2]
+
     return {
         "coverage": coverages,
         "sharp_log_vol": sharp,
         "E_T": E_T,
+        "sigma_w": sigma_w.cpu().numpy(),  # [2]
+        "err_w": err_w.cpu().numpy(),  # [2]
+        "z_scores": r.cpu().numpy(),  # [T,2]
     }
 
 
@@ -437,6 +519,11 @@ class EvalSnapshot:
     mean_E_T: float
     mean_volatility: float
     pareto_points: np.ndarray  # rows: [sharp_log_vol, cov_error_at_k*, E_T, volatility]
+    mean_J: float = 0.0  # mean control cost
+    J_points: Optional[np.ndarray] = None  # per-episode J values (optional)
+    mean_sigma_w: Optional[np.ndarray] = None  # weighted mean sigma per dim [2]
+    mean_err_w: Optional[np.ndarray] = None  # weighted mean |err| per dim [2]
+    z_scores: Optional[np.ndarray] = None  # standardized residuals (1D, bounded size)
 
 
 def train_with_eval(
@@ -445,7 +532,7 @@ def train_with_eval(
     eval_every: int = 1000,
     eval_episodes: int = 200,
     maxH: int = 64,
-) -> Tuple[Actor, List[EvalSnapshot], List[EvalSnapshot]]:
+) -> Tuple[Actor, HiddenRegimeFaultEnv, List[EvalSnapshot], List[EvalSnapshot]]:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
@@ -475,7 +562,7 @@ def train_with_eval(
         lambda_h=0.002,
         beta_kl=3e-4,
         halt_bias=-1.0,
-        use_dynamic_pondering=True,
+        use_dynamic_pondering=False,
     )
 
     ks = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
@@ -538,7 +625,7 @@ def train_with_eval(
                 f"Hr=max: cov(k=2)={snap_hi.empirical_coverage[2.0]:.3f}, logvol={snap_hi.mean_sharp_log_vol:.3f}"
             )
 
-    return agent, snapshots_lo, snapshots_hi
+    return agent, env, snapshots_lo, snapshots_hi
 
 
 @torch.no_grad()
@@ -561,6 +648,8 @@ def evaluate_agent(
       - empirical coverage curve over ks
       - nominal coverage curve over ks (independent Gaussian, all-dims-inside)
       - pareto points per-episode: [sharp_log_vol, |cov(k*)-nom(k*)|, E_T, volatility]
+      - control cost J
+      - dashboard aggregates (sigma_w, err_w, z_scores)
     """
     D = 2  # latent state dims (theta, omega)
 
@@ -568,8 +657,14 @@ def evaluate_agent(
     sharp_sum = 0.0
     Et_sum = 0.0
     vol_sum = 0.0
+    J_sum = 0.0
+    sigma_w_sum = np.zeros(2, dtype=np.float64)
+    err_w_sum = np.zeros(2, dtype=np.float64)
+    z_scores_list = []
+    max_r = 20000  # cap z-scores size
 
     pareto_rows = []
+    J_points_list = []
 
     for _ in range(n_episodes):
         env.reset()
@@ -591,6 +686,12 @@ def evaluate_agent(
 
         obs_seq, state_seq, actions, info = env.rollout(policy_fn=policy_fn, horizon=T)
 
+        # Compute control cost J
+        cost_result = episode_control_cost(state_seq, actions, dt=env.dt)
+        J_mean = cost_result["J_mean"]
+        J_sum += J_mean
+        J_points_list.append(J_mean)
+
         m = episode_metrics(agent, obs0, state_seq, z, T, ks, Hr_eval=Hr_eval)
         for k in ks:
             cov_sum[k] += m["coverage"][k]
@@ -598,11 +699,25 @@ def evaluate_agent(
         Et_sum += m["E_T"]
         vol_sum += info["volatility"]
 
+        # Dashboard aggregates
+        sigma_w_sum += m["sigma_w"]
+        err_w_sum += m["err_w"]
+        
+        # Collect z-scores (with size cap)
+        z_ep = m["z_scores"].flatten()  # [T*2]
+        z_scores_list.append(z_ep)
+
         cov_star = m["coverage"][k_star]
         nom_star = nominal_gaussian_coverage(k_star, D)
         cov_err = abs(cov_star - nom_star)
 
         pareto_rows.append([m["sharp_log_vol"], cov_err, m["E_T"], info["volatility"]])
+
+    # Aggregate z-scores and subsample if needed
+    z_all = np.concatenate(z_scores_list, axis=0)
+    if len(z_all) > max_r:
+        idx = np.random.choice(len(z_all), size=max_r, replace=False)
+        z_all = z_all[idx]
 
     empirical = {k: cov_sum[k] / n_episodes for k in ks}
     nominal = {k: nominal_gaussian_coverage(k, D) for k in ks}
@@ -617,6 +732,11 @@ def evaluate_agent(
         mean_E_T=Et_sum / n_episodes,
         mean_volatility=vol_sum / n_episodes,
         pareto_points=pareto,
+        mean_J=J_sum / n_episodes,
+        J_points=np.asarray(J_points_list, dtype=np.float64),
+        mean_sigma_w=sigma_w_sum / n_episodes,
+        mean_err_w=err_w_sum / n_episodes,
+        z_scores=z_all,
     )
 
 
@@ -626,13 +746,16 @@ def evaluate_agent(
 def plot_eval_snapshots(
     snapshots_lo: List[EvalSnapshot],
     snapshots_hi: List[EvalSnapshot],
-    k_star: float = 2.0
+    k_star: float = 2.0,
+    save_path: Optional[Path] = None,
+    show: bool = True,
 ):
     """
     Plots evaluation metrics comparing Hr=1 (minimal reasoning) vs Hr=max (full reasoning).
+    Generates 3 separate figures.
     """
     # 1) calibration curves at each snapshot (empirical vs nominal as function of k)
-    plt.figure(figsize=(12, 6))
+    fig1 = plt.figure(figsize=(12, 6))
     for snap in snapshots_lo:
         xs = snap.ks
         ys = [snap.empirical_coverage[k] for k in xs]
@@ -642,19 +765,25 @@ def plot_eval_snapshots(
         ys = [snap.empirical_coverage[k] for k in xs]
         plt.plot(xs, ys, alpha=0.9, linestyle='--', label=f"Hr=max step {snap.step}")
     # nominal line (same for all)
-    xs = snapshots_hi[-1].ks
-    nom = [snapshots_hi[-1].nominal_coverage[k] for k in xs]
-    plt.plot(xs, nom, linestyle=":", linewidth=2, alpha=0.8, label="nominal Gaussian (all-dims)")
+    if len(snapshots_hi) > 0:
+        xs = snapshots_hi[-1].ks
+        nom = [snapshots_hi[-1].nominal_coverage[k] for k in xs]
+        plt.plot(xs, nom, linestyle=":", linewidth=2, alpha=0.8, label="nominal Gaussian (all-dims)")
     plt.xlabel("k (tube radius in σ)")
     plt.ylabel("Empirical coverage (fraction inside)")
     plt.ylim(-0.05, 1.05)
     plt.title("Calibration curve: Hr=1 (solid) vs Hr=max (dashed)")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.show()
+    if save_path:
+        save_fig(fig1, save_path)
+    elif show:
+        plt.show()
+    else:
+        plt.close(fig1)
 
     # 2) pareto front: sharpness vs coverage error at k*
-    plt.figure(figsize=(12, 6))
+    fig2 = plt.figure(figsize=(12, 6))
     for snap in snapshots_lo:
         P = snap.pareto_points
         x = P[:, 0]  # sharp_log_vol
@@ -670,39 +799,59 @@ def plot_eval_snapshots(
     plt.title("Sharpness–Calibration Pareto: circles=Hr=1, squares=Hr=max")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.show()
+    if save_path:
+        # Save with _pareto suffix
+        pareto_path = save_path.parent / f"{save_path.stem}_pareto{save_path.suffix}"
+        save_fig(fig2, pareto_path)
+    elif show:
+        plt.show()
+    else:
+        plt.close(fig2)
 
     # 3) horizon vs cone volume scatter for both Hr levels (use last snapshot)
-    snap_lo = snapshots_lo[-1]
-    snap_hi = snapshots_hi[-1]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    if len(snapshots_lo) > 0 and len(snapshots_hi) > 0:
+        snap_lo = snapshots_lo[-1]
+        snap_hi = snapshots_hi[-1]
+        fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # Hr=1
-    P_lo = snap_lo.pareto_points
-    sc1 = ax1.scatter(P_lo[:, 0], P_lo[:, 2], c=P_lo[:, 3], alpha=0.5, s=22)
-    ax1.set_xlabel("Sharpness = weighted log cone volume")
-    ax1.set_ylabel("E[T]")
-    ax1.set_title(f"Hr=1 (step {snap_lo.step})")
-    plt.colorbar(sc1, ax=ax1, label="Volatility")
+        # Hr=1
+        P_lo = snap_lo.pareto_points
+        sc1 = ax1.scatter(P_lo[:, 0], P_lo[:, 2], c=P_lo[:, 3], alpha=0.5, s=22)
+        ax1.set_xlabel("Sharpness = weighted log cone volume")
+        ax1.set_ylabel("E[T]")
+        ax1.set_title(f"Hr=1 (step {snap_lo.step})")
+        plt.colorbar(sc1, ax=ax1, label="Volatility")
 
-    # Hr=max
-    P_hi = snap_hi.pareto_points
-    sc2 = ax2.scatter(P_hi[:, 0], P_hi[:, 2], c=P_hi[:, 3], alpha=0.5, s=22)
-    ax2.set_xlabel("Sharpness = weighted log cone volume")
-    ax2.set_ylabel("E[T]")
-    ax2.set_title(f"Hr=max (step {snap_hi.step})")
-    plt.colorbar(sc2, ax=ax2, label="Volatility")
+        # Hr=max
+        P_hi = snap_hi.pareto_points
+        sc2 = ax2.scatter(P_hi[:, 0], P_hi[:, 2], c=P_hi[:, 3], alpha=0.5, s=22)
+        ax2.set_xlabel("Sharpness = weighted log cone volume")
+        ax2.set_ylabel("E[T]")
+        ax2.set_title(f"Hr=max (step {snap_hi.step})")
+        plt.colorbar(sc2, ax=ax2, label="Volatility")
 
-    plt.tight_layout()
-    plt.show()
+        plt.tight_layout()
+        if save_path:
+            # Save with _horizon suffix
+            horizon_path = save_path.parent / f"{save_path.stem}_horizon{save_path.suffix}"
+            save_fig(fig3, horizon_path)
+        elif show:
+            plt.show()
+        else:
+            plt.close(fig3)
 
 
-def plot_dual_phase_portrait(agent: Actor, smooth: int = 200):
+def plot_dual_phase_portrait(
+    agent: Actor,
+    smooth: int = 200,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+):
     """
-    Plots the “bargaining dynamics” in constraint space:
+    Plots the "bargaining dynamics" in constraint space:
       x = soft_bind - target_bind
       y = E_T_train - target_ET
-    If your history doesn’t contain these keys yet, it will raise KeyError.
+    If your history doesn't contain these keys yet, it will raise KeyError.
     """
     h = agent.history
     x = np.asarray(h["soft_bind"], dtype=np.float64) - float(agent.target_bind)
@@ -715,7 +864,7 @@ def plot_dual_phase_portrait(agent: Actor, smooth: int = 200):
     else:
         x_s, y_s = x, y
 
-    plt.figure(figsize=(7, 7))
+    fig = plt.figure(figsize=(7, 7))
     plt.plot(x_s, y_s, alpha=0.9)
     plt.scatter([0.0], [0.0], s=80, marker="x")
     plt.axvline(0.0, linestyle="--", alpha=0.4)
@@ -724,10 +873,19 @@ def plot_dual_phase_portrait(agent: Actor, smooth: int = 200):
     plt.ylabel("E[T]_train - target_ET")
     plt.title("Dual constraint phase portrait (oscillatory homeostasis)")
     plt.tight_layout()
-    plt.show()
+    if save_path:
+        save_fig(fig, save_path)
+    elif show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
-def plot_training_overview(agent: Actor):
+def plot_training_overview(
+    agent: Actor,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+):
     """
     Quick recap of training metrics including reasoning compute:
       - agency proxy
@@ -798,7 +956,12 @@ def plot_training_overview(agent: Actor):
     axes[6].legend()
 
     plt.tight_layout()
-    plt.show()
+    if save_path:
+        save_fig(fig, save_path)
+    elif show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def extract_memory(agent: Actor):
@@ -836,7 +999,117 @@ def pca2(X):
     return Xc @ Vt[:2].T  # [N,2]
 
 
-def plot_z_memory_map(agent: Actor, max_points=5000):
+def plot_performance_dashboard(
+    snapshots_lo: List[EvalSnapshot],
+    snapshots_hi: List[EvalSnapshot],
+    run_dir: Path,
+    prefix: str = "perf_dashboard",
+):
+    """
+    Generate three dashboard figures comparing Hr=1 vs Hr=max:
+    A) J vs training step (performance curve)
+    B) weighted σ vs weighted |err| per dimension (last snapshot)
+    C) z-score histogram at 3 checkpoints
+    """
+    # Plot A: J vs training step
+    steps_lo = [snap.step for snap in snapshots_lo]
+    steps_hi = [snap.step for snap in snapshots_hi]
+    J_lo = [snap.mean_J for snap in snapshots_lo]
+    J_hi = [snap.mean_J for snap in snapshots_hi]
+
+    fig_a = plt.figure(figsize=(10, 6))
+    plt.plot(steps_lo, J_lo, marker='o', label="Hr=1", alpha=0.7)
+    plt.plot(steps_hi, J_hi, marker='s', label="Hr=max", alpha=0.7)
+    plt.xlabel("Training step")
+    plt.ylabel("Mean control cost J_mean")
+    plt.title("Control performance (lower is better): J_mean")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    save_fig(fig_a, run_dir / "fig" / f"{prefix}_J_curve.png")
+
+    # Plot B: weighted σ vs weighted |err| per dimension (last snapshot)
+    if len(snapshots_lo) > 0 and len(snapshots_hi) > 0:
+        snap_lo = snapshots_lo[-1]
+        snap_hi = snapshots_hi[-1]
+        
+        if snap_lo.mean_sigma_w is not None and snap_lo.mean_err_w is not None:
+            fig_b, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+            
+            # Theta dimension
+            ax1.bar([0, 1], [snap_lo.mean_sigma_w[0], snap_hi.mean_sigma_w[0]], 
+                   width=0.6, label="σ", alpha=0.7, color='blue')
+            ax1.bar([0.3, 1.3], [snap_lo.mean_err_w[0], snap_hi.mean_err_w[0]], 
+                   width=0.6, label="|err|", alpha=0.7, color='red')
+            ax1.set_xticks([0.15, 1.15])
+            ax1.set_xticklabels(["Hr=1", "Hr=max"])
+            ax1.set_ylabel("Weighted mean")
+            ax1.set_title("Theta dimension")
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # Omega dimension
+            ax2.bar([0, 1], [snap_lo.mean_sigma_w[1], snap_hi.mean_sigma_w[1]], 
+                   width=0.6, label="σ", alpha=0.7, color='blue')
+            ax2.bar([0.3, 1.3], [snap_lo.mean_err_w[1], snap_hi.mean_err_w[1]], 
+                   width=0.6, label="|err|", alpha=0.7, color='red')
+            ax2.set_xticks([0.15, 1.15])
+            ax2.set_xticklabels(["Hr=1", "Hr=max"])
+            ax2.set_ylabel("Weighted mean")
+            ax2.set_title("Omega dimension")
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            save_fig(fig_b, run_dir / "fig" / f"{prefix}_sigma_vs_error_last.png")
+
+    # Plot C: z-score histogram at 3 checkpoints
+    n_snapshots = min(len(snapshots_lo), len(snapshots_hi))
+    if n_snapshots > 0:
+        # Pick checkpoints: first, middle, last
+        idx_early = 0
+        idx_mid = n_snapshots // 2
+        idx_late = n_snapshots - 1
+        
+        fig_c, axes = plt.subplots(2, 3, figsize=(15, 10))
+        
+        checkpoints = [
+            (idx_early, "Early"),
+            (idx_mid, "Mid"),
+            (idx_late, "Late"),
+        ]
+        
+        for col, (idx, label) in enumerate(checkpoints):
+            # Hr=1
+            if idx < len(snapshots_lo) and snapshots_lo[idx].z_scores is not None:
+                z_lo = snapshots_lo[idx].z_scores
+                axes[0, col].hist(z_lo, bins=50, alpha=0.7, density=True, color='blue')
+                axes[0, col].set_xlim(-5, 5)
+                axes[0, col].set_title(f"Hr=1: {label} (step {snapshots_lo[idx].step})")
+                axes[0, col].set_xlabel("Z-score")
+                axes[0, col].set_ylabel("Density")
+                axes[0, col].grid(True, alpha=0.3)
+            
+            # Hr=max
+            if idx < len(snapshots_hi) and snapshots_hi[idx].z_scores is not None:
+                z_hi = snapshots_hi[idx].z_scores
+                axes[1, col].hist(z_hi, bins=50, alpha=0.7, density=True, color='red')
+                axes[1, col].set_xlim(-5, 5)
+                axes[1, col].set_title(f"Hr=max: {label} (step {snapshots_hi[idx].step})")
+                axes[1, col].set_xlabel("Z-score")
+                axes[1, col].set_ylabel("Density")
+                axes[1, col].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        save_fig(fig_c, run_dir / "fig" / f"{prefix}_zscore_hists.png")
+
+
+def plot_z_memory_map(
+    agent: Actor,
+    max_points=5000,
+    save_path: Optional[Path] = None,
+    show: bool = True,
+):
     """
     Visualize z-space memory with 2D PCA projection.
     Shows regions colored by:
@@ -885,25 +1158,145 @@ def plot_z_memory_map(agent: Actor, max_points=5000):
         ax.set_ylabel("PC2")
 
     plt.tight_layout()
-    plt.show()
+    if save_path:
+        save_fig(fig, save_path)
+    elif show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 # -----------------------------
 # Main
 # -----------------------------
 def main():
-    agent, snapshots_lo, snapshots_hi = train_with_eval(
-        seed=0,
-        train_steps=6000,
-        eval_every=1000,
-        eval_episodes=200,
-        maxH=64,
+    # Create run directory
+    run_dir = make_run_dir(base="runs", tag="tam_hidden_fault")
+    print(f"Run directory: {run_dir}")
+
+    # Training parameters
+    seed = 0
+    train_steps = 6000
+    eval_every = 1000
+    eval_episodes = 200
+    maxH = 64
+
+    # Train
+    agent, env, snapshots_lo, snapshots_hi = train_with_eval(
+        seed=seed,
+        train_steps=train_steps,
+        eval_every=eval_every,
+        eval_episodes=eval_episodes,
+        maxH=maxH,
     )
 
-    plot_training_overview(agent)
-    plot_dual_phase_portrait(agent, smooth=200)
-    plot_eval_snapshots(snapshots_lo, snapshots_hi, k_star=2.0)
-    plot_z_memory_map(agent, max_points=5000)
+    # Save config.json
+    config = {
+        "seed": seed,
+        "train_steps": train_steps,
+        "eval_every": eval_every,
+        "eval_episodes": eval_episodes,
+        "maxH": maxH,
+        "env": {
+            "noise_std": env.noise_std,
+            "obs_noise_std": env.obs_noise_std,
+            "dt": env.dt,
+            "amax": env.amax,
+            "obs_mode": env.obs_mode,
+            "switch_prob_per_step": env.switch_prob_per_step,
+            "burst_prob_per_step": env.burst_prob_per_step,
+            "fault_prob_per_step": env.fault_prob_per_step,
+        },
+        "actor": {
+            "state_dim": agent.state_dim,
+            "z_dim": agent.z_dim,
+            "maxH": agent.maxH,
+            "minT": agent.minT,
+            "M": agent.M,
+            "k_sigma": agent.k_sigma,
+            "bind_success_frac": agent.bind_success_frac,
+            "lambda_h": agent.lambda_h,
+            "beta_kl": agent.beta_kl,
+            "max_refine_steps": agent.max_refine_steps,
+            "target_ET": agent.target_ET,
+            "target_Hr": agent.target_Hr,
+            "target_bind": agent.target_bind,
+            "use_dynamic_pondering": agent.use_dynamic_pondering,
+        },
+    }
+    with open(run_dir / "data" / "config.json", "w") as f:
+        json.dump(config, f, indent=2)
+
+    # Generate and save plots
+    plot_training_overview(agent, save_path=run_dir / "fig" / "training_overview.png", show=False)
+    plot_dual_phase_portrait(agent, smooth=200, save_path=run_dir / "fig" / "dual_phase_portrait.png", show=False)
+    plot_eval_snapshots(
+        snapshots_lo,
+        snapshots_hi,
+        k_star=2.0,
+        save_path=run_dir / "fig" / "eval_calibration_pareto_horizon.png",
+        show=False,
+    )
+    plot_z_memory_map(agent, max_points=5000, save_path=run_dir / "fig" / "z_memory_map.png", show=False)
+    plot_performance_dashboard(snapshots_lo, snapshots_hi, run_dir, prefix="perf_dashboard")
+
+    # Save evaluation snapshots
+    def snapshot_to_dict(snap: EvalSnapshot) -> Dict:
+        return {
+            "step": snap.step,
+            "ks": snap.ks,
+            "empirical_coverage": snap.empirical_coverage,
+            "nominal_coverage": snap.nominal_coverage,
+            "mean_sharp_log_vol": snap.mean_sharp_log_vol,
+            "mean_E_T": snap.mean_E_T,
+            "mean_volatility": snap.mean_volatility,
+            "mean_J": snap.mean_J,
+            "mean_sigma_w": snap.mean_sigma_w.tolist() if snap.mean_sigma_w is not None else None,
+            "mean_err_w": snap.mean_err_w.tolist() if snap.mean_err_w is not None else None,
+            "pareto_points": snap.pareto_points.tolist(),
+            "J_points": snap.J_points.tolist() if snap.J_points is not None else None,
+            "z_scores": snap.z_scores.tolist() if snap.z_scores is not None else None,
+        }
+
+    # Save snapshots as npz (more efficient for arrays)
+    def save_snapshots_npz(snapshots: List[EvalSnapshot], path: Path):
+        if len(snapshots) == 0:
+            return
+        data = {
+            "step": np.array([s.step for s in snapshots]),
+            "mean_sharp_log_vol": np.array([s.mean_sharp_log_vol for s in snapshots]),
+            "mean_E_T": np.array([s.mean_E_T for s in snapshots]),
+            "mean_volatility": np.array([s.mean_volatility for s in snapshots]),
+            "mean_J": np.array([s.mean_J for s in snapshots]),
+        }
+        if snapshots[0].mean_sigma_w is not None:
+            data["mean_sigma_w"] = np.stack([s.mean_sigma_w for s in snapshots])
+            data["mean_err_w"] = np.stack([s.mean_err_w for s in snapshots])
+        np.savez(path, **data)
+
+    save_snapshots_npz(snapshots_lo, run_dir / "data" / "eval_hr1.npz")
+    save_snapshots_npz(snapshots_hi, run_dir / "data" / "eval_hrmax.npz")
+
+    # Save history
+    history_dict = {k: np.asarray(v) for k, v in agent.history.items()}
+    np.savez(run_dir / "data" / "history.npz", **history_dict)
+
+    # Save memory if present
+    zs, soft, cone, lam = extract_memory(agent)
+    if zs is not None:
+        risk = (1.0 - soft) + 0.2 * np.log(cone + 1e-8) + 0.05 * lam
+        np.savez(
+            run_dir / "data" / "memory.npz",
+            zs=zs,
+            soft=soft,
+            cone=cone,
+            lam=lam,
+            risk=risk,
+        )
+
+    print(f"\nAll outputs saved to: {run_dir}")
+    print(f"  Figures: {run_dir / 'fig'}")
+    print(f"  Data: {run_dir / 'data'}")
 
 
 if __name__ == "__main__":
