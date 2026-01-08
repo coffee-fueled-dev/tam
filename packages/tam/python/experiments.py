@@ -11,9 +11,9 @@ import torch
 
 # Handle both package import and direct execution
 try:
-    from .tam_continuous import Actor
+    from .actor import Actor
 except ImportError:
-    from tam_continuous import Actor
+    from actor import Actor
 
 
 class ControlledPendulumEnv:
