@@ -63,3 +63,122 @@ class SharedTube(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.out_head = nn.Linear(hidden_dim, out_dim)
         self.relu = nn.ReLU()
+
+
+class TubeRefiner(nn.Module):
+    """
+    Iterative refinement module for tube predictions.
+    Takes current tube state (knots + stop_logit) and situation/commitment,
+    outputs delta updates for refinement.
+
+    This implements internal "reasoning" computation.
+    """
+
+    def __init__(
+        self, state_dim: int, z_dim: int, M: int, hidden_dim: int = 64
+    ):
+        super().__init__()
+        self.state_dim = state_dim
+        self.M = M
+
+        # Input: [s0, z, mu_knots_flat, logsig_knots_flat, stop_logit]
+        input_dim = state_dim + z_dim + (2 * state_dim * M) + 1
+
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+
+        # Output: deltas for [mu_knots, logsig_knots, stop_logit]
+        output_dim = (2 * state_dim * M) + 1
+        self.delta_head = nn.Linear(hidden_dim, output_dim)
+        self.relu = nn.ReLU()
+
+    def forward(
+        self,
+        s0: torch.Tensor,
+        z: torch.Tensor,
+        mu_knots: torch.Tensor,
+        logsig_knots: torch.Tensor,
+        stop_logit: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute refinement deltas.
+
+        Args:
+            s0: [B, state_dim]
+            z: [B, z_dim]
+            mu_knots: [M, D] or [B, M, D]
+            logsig_knots: [M, D] or [B, M, D]
+            stop_logit: scalar or [B]
+
+        Returns:
+            delta_mu: [M, D] or [B, M, D]
+            delta_logsig: [M, D] or [B, M, D]
+            delta_stop: scalar or [B]
+        """
+        # Handle batch dimensions
+        if mu_knots.dim() == 2:  # [M, D]
+            mu_flat = mu_knots.flatten().unsqueeze(0)  # [1, M*D]
+            logsig_flat = logsig_knots.flatten().unsqueeze(0)  # [1, M*D]
+            stop_logit_input = stop_logit.unsqueeze(0).unsqueeze(0)  # [1, 1]
+            unbatched = True
+        else:  # [B, M, D]
+            B = mu_knots.size(0)
+            mu_flat = mu_knots.view(B, -1)  # [B, M*D]
+            logsig_flat = logsig_knots.view(B, -1)  # [B, M*D]
+            stop_logit_input = stop_logit.unsqueeze(-1)  # [B, 1]
+            unbatched = False
+
+        # Concatenate all inputs
+        x = torch.cat([s0, z, mu_flat, logsig_flat, stop_logit_input], dim=-1)
+
+        # Forward pass
+        h = self.relu(self.fc1(x))
+        h = self.relu(self.fc2(h))
+        deltas = self.delta_head(h)  # [B, output_dim]
+
+        # Split deltas back into components
+        D, M = self.state_dim, self.M
+        delta_mu_flat = deltas[:, : D * M]
+        delta_logsig_flat = deltas[:, D * M : 2 * D * M]
+        delta_stop = deltas[:, -1]
+
+        # Reshape
+        if unbatched:
+            delta_mu = delta_mu_flat.squeeze(0).view(M, D)
+            delta_logsig = delta_logsig_flat.squeeze(0).view(M, D)
+            delta_stop = delta_stop.squeeze(0)
+        else:
+            delta_mu = delta_mu_flat.view(B, M, D)
+            delta_logsig = delta_logsig_flat.view(B, M, D)
+
+        return delta_mu, delta_logsig, delta_stop
+
+
+class PonderHead(nn.Module):
+    """
+    Predicts reasoning stop probability p_refine_stop given (s0, z).
+    Used to sample number of refinement steps via geometric distribution.
+    """
+
+    def __init__(self, state_dim: int, z_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.fc1 = nn.Linear(state_dim + z_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.stop_head = nn.Linear(hidden_dim, 1)
+        self.relu = nn.ReLU()
+
+    def forward(self, s0: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            s0: [B, state_dim]
+            z: [B, z_dim]
+
+        Returns:
+            p_refine_stop: [B] or scalar, in (0, 1)
+        """
+        x = torch.cat([s0, z], dim=-1)
+        h = self.relu(self.fc1(x))
+        h = self.relu(self.fc2(h))
+        stop_logit = self.stop_head(h).squeeze(-1)
+        p_refine_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
+        return p_refine_stop

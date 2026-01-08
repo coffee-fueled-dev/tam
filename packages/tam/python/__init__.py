@@ -2,9 +2,8 @@
 TAM Python implementation - Action-Binding with Continuous Ports.
 """
 
-from .experiments import ControlledPendulumEnv, plot_training_results, run_experiment
+from .actor import Actor
 from .networks import ActorNet, SharedPolicy, SharedTube
-from .tam_continuous import Actor
 from .utils import (
     gaussian_nll,
     interp1d_linear,

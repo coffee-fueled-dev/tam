@@ -23,11 +23,12 @@ from typing import Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.optim as optim
 
 # Handle both package import and direct execution
 try:
-    from .networks import ActorNet, SharedPolicy, SharedTube
+    from .networks import ActorNet, SharedPolicy, SharedTube, TubeRefiner, PonderHead
     from .utils import (
         gaussian_nll,
         interp1d_linear,
@@ -36,7 +37,7 @@ try:
         truncated_geometric_weights,
     )
 except ImportError:
-    from networks import ActorNet, SharedPolicy, SharedTube
+    from networks import ActorNet, SharedPolicy, SharedTube, TubeRefiner, PonderHead
     from utils import (
         gaussian_nll,
         interp1d_linear,
@@ -46,7 +47,7 @@ except ImportError:
     )
 
 
-class Actor:
+class Actor(nn.Module):
     """
     TAM Actor with continuous ports in latent space and dual controller
     for tightest feasible cones with bounded compute.
@@ -71,7 +72,15 @@ class Actor:
         lambda_h: float = 0.002,  # ponder cost (encourage shorter horizons)
         beta_kl: float = 3e-4,  # KL regularization weight (start small)
         halt_bias: float = -1.0,  # init bias for p_stop
+        w_horizon_bonus: float = 0.01,  # reward for longer valid commitments
+        # Reasoning parameters
+        max_refine_steps: int = 8,  # max reasoning steps
+        refine_step_scale: float = 0.1,  # refinement delta scale
+        lambda_r: float = 0.001,  # ponder cost per reasoning step
+        target_Hr: float = 4.0,  # target reasoning steps for dual controller
+        lambda_r_lr: float = 0.02,  # dual controller learning rate for reasoning
     ):
+        super().__init__()
         self.device = torch.device("cpu")
         self.state_dim = state_dim
         self.z_dim = z_dim
@@ -104,6 +113,25 @@ class Actor:
         self.lambda_clip = (0.0, 50.0)  # keep stable
         self.margin_temp = 0.25  # softness for differentiable "inside" indicator
         self.w_cone = 0.05  # weight on cone volume minimization
+        self.w_horizon_bonus = w_horizon_bonus  # reward longer horizons when binding succeeds
+
+        # --- cone algebra (latent operators) ---
+        self.algebra_Teval = min(32, self.maxH)
+        self.algebra_delta = 0.25
+        self.algebra_margin_C = 0.0
+        self.algebra_margin_H = 0.0
+        self.w_algebra = 0.02  # start small
+
+        self.w_algebra_ortho = 0.01  # optional disentanglement
+        self.w_algebra_comm = 0.00  # optional (mostly 0 for now)
+
+        # --- reasoning / iterative refinement ---
+        self.max_refine_steps = int(max_refine_steps)
+        self.refine_step_scale = refine_step_scale
+        self.target_Hr = target_Hr
+        self.lambda_r = lambda_r  # dual variable for reasoning compute
+        self.lambda_r_lr = lambda_r_lr
+        self.lambda_r_clip = (0.0, 50.0)
 
         # Networks
         self.actor = ActorNet(state_dim, z_dim, hidden_dim).to(self.device)
@@ -120,12 +148,15 @@ class Actor:
         with torch.no_grad():
             self.tube.out_head.bias[-1].fill_(halt_bias)
 
-        self.optimizer = optim.Adam(
-            list(self.actor.parameters())
-            + list(self.pol.parameters())
-            + list(self.tube.parameters()),
-            lr=lr,
-        )
+        # Learnable operator directions (algebra generators)
+        self.u_wide = nn.Parameter(torch.randn(self.z_dim) * 0.05)
+        self.u_ext = nn.Parameter(torch.randn(self.z_dim) * 0.05)
+
+        # Reasoning networks
+        self.refiner = TubeRefiner(state_dim, z_dim, self.M, hidden_dim).to(self.device)
+        self.ponder_head = PonderHead(state_dim, z_dim, hidden_dim).to(self.device)
+
+        self.optimizer = optim.Adam(self.parameters(), lr=lr)
 
         self.history = {
             "step": [],
@@ -143,6 +174,16 @@ class Actor:
             "lambda_bind": [],
             "lambda_T": [],  # compute dual variable
             "cone_vol": [],
+            "algebra_loss": [],
+            "dC_wide": [],
+            "dH_ext": [],
+            "horizon_bonus": [],
+            "Hr": [],  # sampled reasoning steps
+            "E_Hr": [],  # expected reasoning steps (imagined)
+            "E_Hr_train": [],  # expected reasoning steps (trained)
+            "p_refine_stop": [],
+            "delta_nll": [],  # improvement from reasoning
+            "lambda_r": [],  # reasoning compute dual
         }
 
     def sample_z(
@@ -171,16 +212,20 @@ class Actor:
         a = torch.tanh(self.pol.act_head(h2)) * self.amax
         return a  # [B,1]
 
-    def _tube_params(
+    def _tube_init(
         self, z: torch.Tensor, s0_t: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        z: [1,z_dim] or [B,z_dim]
-        s0_t: [1,state_dim]
+        Get initial tube state (before refinement).
+
+        Args:
+            z: [1,z_dim] or [B,z_dim]
+            s0_t: [1,state_dim]
+
         Returns:
-          mu_knots: [M, D]
-          logsig_knots: [M, D]
-          p_stop: scalar in (0,1)
+            mu_knots: [M, D]
+            logsig_knots: [M, D]
+            stop_logit: scalar (pre-sigmoid)
         """
         if z.size(0) != s0_t.size(0):
             z = z.expand(s0_t.size(0), -1)
@@ -198,8 +243,63 @@ class Actor:
         mu_knots = mu_flat.view(M, D)  # [M, D]
         logsig_knots = sig_flat.view(M, D)  # [M, D]
 
+        return mu_knots, logsig_knots, stop_logit
+
+    def _tube_params(
+        self, z: torch.Tensor, s0_t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Backwards compatibility wrapper. Returns tube with p_stop.
+        NOTE: This doesn't use refinement! Use infer_tube for reasoning.
+
+        Args:
+            z: [1,z_dim] or [B,z_dim]
+            s0_t: [1,state_dim]
+
+        Returns:
+            mu_knots: [M, D]
+            logsig_knots: [M, D]
+            p_stop: scalar in (0,1)
+        """
+        mu_knots, logsig_knots, stop_logit = self._tube_init(z, s0_t)
         p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
         return mu_knots, logsig_knots, p_stop
+
+    def infer_tube(
+        self, s0_t: torch.Tensor, z: torch.Tensor, Hr: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Iteratively refine tube prediction with Hr reasoning steps.
+
+        Args:
+            s0_t: [1, state_dim]
+            z: [1, z_dim]
+            Hr: number of refinement steps
+
+        Returns:
+            mu_knots: [M, D] - refined
+            logsig_knots: [M, D] - refined
+            stop_logit: scalar - refined
+        """
+        # Get initial tube state
+        mu_knots, logsig_knots, stop_logit = self._tube_init(z, s0_t)
+
+        # Iterative refinement loop
+        for _ in range(Hr):
+            # Compute deltas
+            delta_mu, delta_logsig, delta_stop = self.refiner(
+                s0_t, z, mu_knots, logsig_knots, stop_logit
+            )
+
+            # Apply deltas with step scale
+            mu_knots = mu_knots + self.refine_step_scale * delta_mu
+            logsig_knots = logsig_knots + self.refine_step_scale * delta_logsig
+            stop_logit = stop_logit + self.refine_step_scale * delta_stop
+
+            # Clamp logsig to reasonable range
+            logsig_knots = torch.clamp(logsig_knots, self.logstd_min, self.logstd_max)
+
+        return mu_knots, logsig_knots, stop_logit
 
     def _tube_traj(
         self, mu_knots: torch.Tensor, logsig_knots: torch.Tensor, T: int
@@ -237,6 +337,65 @@ class Actor:
         T = sample_truncated_geometric(p_stop_val, self.maxH, minT=self.minT)
         return T, E_T_val, p_stop_val
 
+    @torch.no_grad()
+    def sample_reasoning_steps(
+        self, z: torch.Tensor, s0: np.ndarray
+    ) -> Tuple[int, float, float]:
+        """
+        Sample number of reasoning refinement steps via geometric distribution.
+
+        Returns:
+            Hr: sampled number of refinement steps
+            E_Hr: expected number of steps
+            p_refine_stop: stopping probability
+        """
+        s0_t = torch.tensor(s0, dtype=torch.float32, device=self.device).unsqueeze(0)
+        p_refine_stop = self.ponder_head(s0_t, z)
+        p_refine_stop_val = float(p_refine_stop.item())
+
+        w, E_Hr = truncated_geometric_weights(p_refine_stop, self.max_refine_steps)
+        E_Hr_val = float(E_Hr.item())
+
+        Hr = sample_truncated_geometric(
+            p_refine_stop_val, self.max_refine_steps, minT=1
+        )
+        return Hr, E_Hr_val, p_refine_stop_val
+
+    @torch.no_grad()
+    def sample_horizon_refined(
+        self,
+        s0_t: torch.Tensor,
+        z: torch.Tensor,
+        Hr: int,
+        maxH: int = None,
+    ) -> Tuple[int, float, float]:
+        """
+        Sample T from the *refined* p_stop after Hr refinement steps.
+        This ensures acting and training use the same (refined) halting distribution.
+
+        Args:
+            s0_t: [1, state_dim]
+            z: [1, z_dim]
+            Hr: number of refinement steps
+            maxH: optional max horizon (defaults to self.maxH)
+
+        Returns:
+            T: sampled horizon
+            E_T: expected horizon
+            p_stop_val: stopping probability
+        """
+        maxH_eff = int(self.maxH if maxH is None else maxH)
+
+        muK, sigK, stop_logit = self.infer_tube(s0_t, z, Hr)
+        p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
+        p_stop_val = float(p_stop.item())
+
+        w, E_T = truncated_geometric_weights(p_stop, maxH_eff)
+        E_T_val = float(E_T.item())
+
+        T = sample_truncated_geometric(p_stop_val, maxH_eff, minT=self.minT)
+        return T, E_T_val, p_stop_val
+
     def binding_predicate(
         self, mu: torch.Tensor, log_var: torch.Tensor, real: torch.Tensor
     ) -> bool:
@@ -248,6 +407,30 @@ class Actor:
         inside = (torch.abs(real - mu) <= (self.k_sigma * std + 1e-8)).all(dim=-1)
         frac = float(inside.float().mean().item())
         return frac >= self.bind_success_frac
+
+    def _cone_summaries(
+        self, s0_t: torch.Tensor, z: torch.Tensor, Teval: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute cone summaries for algebra regularization.
+        Uses refined tube with max_refine_steps for stable semantics.
+
+        Returns:
+          C: weighted log cone volume (scalar)
+          H: expected horizon proxy E[T] (scalar)
+        """
+        # Use fully refined tube for stable algebra evaluation
+        muK, sigK, stop_logit = self.infer_tube(s0_t, z, self.max_refine_steps)
+        p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
+
+        _, log_var = self._tube_traj(muK, sigK, Teval)
+        std = torch.exp(0.5 * log_var)  # [Teval, D]
+        cv_t = torch.prod(std, dim=-1)  # [Teval] - product across all dimensions
+
+        w, E_T = truncated_geometric_weights(p_stop, Teval)  # w:[Teval]
+        C = (w * torch.log(cv_t + 1e-8)).sum()  # scalar
+        H = E_T  # scalar
+        return C, H
 
     def train_on_episode(
         self,
@@ -261,20 +444,36 @@ class Actor:
         z_logstd: torch.Tensor,
         E_T_imagine: float,
     ):
-        """Train on a single episode with the dual controller."""
+        """Train on a single episode with the dual controller and reasoning."""
         T = int(actions.shape[0])
 
         s0_t = torch.tensor(s0, dtype=torch.float32, device=self.device).unsqueeze(0)
-        mu_knots, logsig_knots, p_stop = self._tube_params(z, s0_t)
 
-        # evaluate tube for this observed T
+        # Sample reasoning steps
+        Hr, E_Hr_imagine, p_refine_stop_val = self.sample_reasoning_steps(z, s0)
+
+        # Compute initial tube (no reasoning) for delta_nll measurement
+        with torch.no_grad():
+            mu_knots_0, logsig_knots_0, stop_logit_0 = self._tube_init(z, s0_t)
+            mu_0, log_var_0 = self._tube_traj(mu_knots_0, logsig_knots_0, T)
+            y = torch.tensor(states[1:], dtype=torch.float32, device=self.device)  # [T,D]
+            nll_t_0 = gaussian_nll(mu_0, log_var_0, y).mean(dim=-1)  # [T]
+            p_stop_0 = torch.sigmoid(stop_logit_0).clamp(1e-4, 1.0 - 1e-4)
+            w_0, _ = truncated_geometric_weights(p_stop_0, T)
+            exp_nll_0 = (w_0 * nll_t_0).sum()
+
+        # Infer refined tube with Hr reasoning steps
+        mu_knots, logsig_knots, stop_logit = self.infer_tube(s0_t, z, Hr)
+        p_stop = torch.sigmoid(stop_logit).clamp(1e-4, 1.0 - 1e-4)
+
+        # evaluate refined tube for this observed T
         mu, log_var = self._tube_traj(mu_knots, logsig_knots, T)
 
-        # realized trajectory x1..xT
-        y = torch.tensor(states[1:], dtype=torch.float32, device=self.device)  # [T,D]
-
-        # per-step NLL
+        # per-step NLL (using refined tube)
         nll_t = gaussian_nll(mu, log_var, y).mean(dim=-1)  # [T]
+
+        # Delta NLL: improvement from reasoning
+        delta_nll = exp_nll_0 - (w_0.detach() * nll_t).sum()
 
         # option-3 expected loss under (learned) geometric halting, forced at T
         w, E_T_train = truncated_geometric_weights(p_stop, T)
@@ -303,8 +502,16 @@ class Actor:
         a = torch.tensor(actions, dtype=torch.float32, device=self.device)
         act_cost = torch.mean(a**2)
 
-        # ponder cost: shorter horizons preferred
-        ponder = (self.lambda_h + self.lambda_T) * E_T_train
+        # ponder cost: shorter horizons preferred (commitment compute)
+        ponder_commit = (self.lambda_h + self.lambda_T) * E_T_train
+
+        # reasoning ponder cost: penalize internal computation
+        p_refine_stop_t = self.ponder_head(s0_t, z)
+        _, E_Hr_train = truncated_geometric_weights(p_refine_stop_t, self.max_refine_steps)
+        ponder_reason = self.lambda_r * E_Hr_train
+
+        # Total ponder cost
+        ponder = ponder_commit + ponder_reason
 
         # KL regularization: encourages meaningful but not collapsed latent space
         kl = kl_diag_gaussian_to_standard(z_mu, z_logstd).mean()
@@ -313,7 +520,7 @@ class Actor:
         # Cone volume term (push tighter), weighted by geometric halting distribution
         # This prevents "early tight, late wide" exploits by aligning cone cost
         # with the port's own notion of where the episode ends
-        cv_t = std[:, 0] * std[:, 1]  # [T]
+        cv_t = torch.prod(std, dim=-1)  # [T] - product across all dimensions
         cone_vol_w = (
             w.detach() * cv_t
         ).sum()  # scalar (detach w to avoid weird coupling)
@@ -322,6 +529,11 @@ class Actor:
         # constraint penalty: λ * (target - achieved)
         constraint_violation = self.target_bind - soft_bind_rate
         loss_constraint = self.lambda_bind * constraint_violation
+
+        # Efficiency-based horizon bonus: reward long commitments ONLY when cones are tight
+        # This prevents gaming by widening cones to get longer horizons
+        tight = torch.exp(-torch.log(cone_vol_w + 1e-8))  # ~ 1/vol
+        horizon_bonus = -self.w_horizon_bonus * E_T_train * soft_bind_rate * tight.detach()
 
         loss = (
             exp_nll
@@ -332,7 +544,43 @@ class Actor:
             + self.beta_kl * kl
             + loss_cone
             + loss_constraint
+            + horizon_bonus
         )
+
+        # Monotone algebra regularizer
+        Teval = self.algebra_Teval
+        delta = self.algebra_delta
+
+        uw = self.u_wide / (self.u_wide.norm() + 1e-8)
+        ue = self.u_ext / (self.u_ext.norm() + 1e-8)
+
+        C0, H0 = self._cone_summaries(s0_t, z, Teval)
+
+        Cw, _ = self._cone_summaries(s0_t, z + delta * uw, Teval)
+        _, He = self._cone_summaries(s0_t, z + delta * ue, Teval)
+
+        dC_wide = Cw - C0
+        dH_ext = He - H0
+
+        L_wide = torch.relu(self.algebra_margin_C - dC_wide)
+        L_ext = torch.relu(self.algebra_margin_H - dH_ext)
+
+        # optional inverse checks
+        Cn, _ = self._cone_summaries(s0_t, z - delta * uw, Teval)
+        _, Hc = self._cone_summaries(s0_t, z - delta * ue, Teval)
+        L_narrow = torch.relu(self.algebra_margin_C - (C0 - Cn))
+        L_contr = torch.relu(self.algebra_margin_H - (H0 - Hc))
+
+        mono_loss = L_wide + L_ext + 0.5 * (L_narrow + L_contr)
+
+        # optional orthogonality (disentangle widen vs extend)
+        ortho_loss = torch.tensor(0.0, device=s0_t.device)
+        if self.w_algebra_ortho > 0.0:
+            cos = torch.dot(uw, ue)
+            ortho_loss = cos * cos
+
+        algebra_loss = mono_loss + self.w_algebra_ortho * ortho_loss
+        loss = loss + self.w_algebra * algebra_loss
 
         # binding predicate based on the tube itself
         with torch.no_grad():
@@ -340,12 +588,7 @@ class Actor:
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            list(self.actor.parameters())
-            + list(self.pol.parameters())
-            + list(self.tube.parameters()),
-            1.0,
-        )
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         self.optimizer.step()
 
         # Tit-for-tat dual updates: adjust λ based on bind rate and horizon performance
@@ -363,6 +606,13 @@ class Actor:
             )
             lo_T, hi_T = self.lambda_T_clip
             self.lambda_T = float(np.clip(self.lambda_T, lo_T, hi_T))
+
+            # Reasoning compute controller: increase λ_r if reasoning steps exceed target
+            self.lambda_r += self.lambda_r_lr * float(
+                (E_Hr_train - self.target_Hr).item()
+            )
+            lo_r, hi_r = self.lambda_r_clip
+            self.lambda_r = float(np.clip(self.lambda_r, lo_r, hi_r))
 
         # logging
         with torch.no_grad():
@@ -383,3 +633,13 @@ class Actor:
         self.history["lambda_bind"].append(float(self.lambda_bind))
         self.history["lambda_T"].append(float(self.lambda_T))
         self.history["cone_vol"].append(float(cone_vol_w.detach().item()))
+        self.history["algebra_loss"].append(float(algebra_loss.detach().item()))
+        self.history["dC_wide"].append(float(dC_wide.detach().item()))
+        self.history["dH_ext"].append(float(dH_ext.detach().item()))
+        self.history["horizon_bonus"].append(float(horizon_bonus.detach().item()))
+        self.history["Hr"].append(int(Hr))
+        self.history["E_Hr"].append(float(E_Hr_imagine))
+        self.history["E_Hr_train"].append(float(E_Hr_train.detach().item()))
+        self.history["p_refine_stop"].append(float(p_refine_stop_val))
+        self.history["delta_nll"].append(float(delta_nll.detach().item()))
+        self.history["lambda_r"].append(float(self.lambda_r))
