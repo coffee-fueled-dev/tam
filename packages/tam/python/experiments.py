@@ -431,7 +431,11 @@ def tube_predictions_for_episode(
     device = agent.device
     s0_t = torch.tensor(obs0, dtype=torch.float32, device=device).unsqueeze(0)
 
-    if agent.use_dynamic_pondering and Hr_eval is None:
+    # Respect reasoning_mode: if "off", force Hr=0
+    if agent.reasoning_mode == "off":
+        Hr = 0
+        muK, sigK, stop_logit = agent._tube_init(z, s0_t)
+    elif agent.use_dynamic_pondering and Hr_eval is None:
         # Use dynamic pondering: agent decides when to stop refining
         muK, sigK, stop_logit, actual_Hr, _ = agent.infer_tube_dynamic(
             s0_t, z, max_steps=agent.max_refine_steps
@@ -612,22 +616,32 @@ def train_with_eval(
 
         # periodic evaluation
         if (step + 1) % eval_every == 0 or step == 0:
+            # Respect reasoning_mode: if "off", both evaluations use Hr=0
+            if agent.reasoning_mode == "off":
+                Hr_eval_lo = 0
+                Hr_eval_hi = 0
+            else:
+                Hr_eval_lo = 1
+                Hr_eval_hi = agent.max_refine_steps
+            
             # Evaluate with minimal reasoning
             snap_lo = evaluate_agent(
-                agent, env, step=step + 1, ks=ks, n_episodes=eval_episodes, k_star=2.0, Hr_eval=1
+                agent, env, step=step + 1, ks=ks, n_episodes=eval_episodes, k_star=2.0, Hr_eval=Hr_eval_lo
             )
             snapshots_lo.append(snap_lo)
 
             # Evaluate with full reasoning
             snap_hi = evaluate_agent(
-                agent, env, step=step + 1, ks=ks, n_episodes=eval_episodes, k_star=2.0, Hr_eval=agent.max_refine_steps
+                agent, env, step=step + 1, ks=ks, n_episodes=eval_episodes, k_star=2.0, Hr_eval=Hr_eval_hi
             )
             snapshots_hi.append(snap_hi)
 
+            label_lo = f"Hr={Hr_eval_lo}" if agent.reasoning_mode != "off" else "Hr=0 (no reasoning)"
+            label_hi = f"Hr={Hr_eval_hi}" if agent.reasoning_mode != "off" else "Hr=0 (no reasoning)"
             print(
                 f"[eval @ {step + 1:5d}] "
-                f"Hr=1: cov(k=2)={snap_lo.empirical_coverage[2.0]:.3f}, logvol={snap_lo.mean_sharp_log_vol:.3f} | "
-                f"Hr=max: cov(k=2)={snap_hi.empirical_coverage[2.0]:.3f}, logvol={snap_hi.mean_sharp_log_vol:.3f}"
+                f"{label_lo}: cov(k=2)={snap_lo.empirical_coverage[2.0]:.3f}, logvol={snap_lo.mean_sharp_log_vol:.3f} | "
+                f"{label_hi}: cov(k=2)={snap_hi.empirical_coverage[2.0]:.3f}, logvol={snap_hi.mean_sharp_log_vol:.3f}"
             )
 
     return agent, env, snapshots_lo, snapshots_hi
@@ -1246,7 +1260,7 @@ def main():
     eval_every = 1000
     eval_episodes = 200
     maxH = 64
-    reasoning_mode = "fixed"  # "off" | "fixed" | "gated" | "dynamic"
+    reasoning_mode = "off"  # "off" | "fixed" | "gated" | "dynamic"
 
     # Train
     agent, env, snapshots_lo, snapshots_hi = train_with_eval(
