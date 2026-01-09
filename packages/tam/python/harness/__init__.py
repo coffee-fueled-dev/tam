@@ -6,6 +6,7 @@ The harness provides a unified interface for:
 - Periodic evaluation
 - Saving results and visualizations
 - Managing experiment configurations
+- Cross-environment transfer testing
 """
 
 from .experiment_harness import ExperimentHarness, ExperimentConfig
@@ -17,6 +18,18 @@ from .plots import (
     plot_commitment_atlas,
     plot_standard_dashboard,
 )
+from .cross_env_runner import (
+    CrossEnvTransferHarness,
+    TransferConfig,
+    run_transfer_experiment,
+    MemoryReuseActor,
+    PrototypeReuseActor,
+    BehavioralReuseActor,
+    RandomZActor,
+    ShuffledMemoryActor,
+    ConeSummary,
+    PerEpisodeRecord,
+)
 
 __all__ = [
     "ExperimentHarness",
@@ -27,4 +40,14 @@ __all__ = [
     "plot_compute_roi",
     "plot_commitment_atlas",
     "plot_standard_dashboard",
+    "CrossEnvTransferHarness",
+    "TransferConfig",
+    "run_transfer_experiment",
+    "MemoryReuseActor",
+    "PrototypeReuseActor",
+    "BehavioralReuseActor",
+    "RandomZActor",
+    "ShuffledMemoryActor",
+    "ConeSummary",
+    "PerEpisodeRecord",
 ]

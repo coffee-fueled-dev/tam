@@ -1,153 +1,202 @@
-center everything around three questions TAM is supposed to answer:
-
-1. **Did my commitment help?**
-2. **Was my uncertainty honest?**
-3. **What did it cost (compute / horizon / tightness) and was it worth it?**
-
-Below is a compact “canonical dashboard” that tends to stay interpretable across gridworld, pendulum, adversaries, etc.
+Below is a **concrete, implementation-ready TODO list**, ordered so that each block produces interpretable signal before you invest in the next one. Nothing here requires architectural changes beyond what you already have — this is about **making cross-environment reuse measurable and real**.
 
 ---
 
-## 1) Outcome vs Commitment Tradeoff (the one plot I’d keep)
+# Cross-Environment Commitment Reuse — Concrete TODO List
 
-**Scatter:** x = _sharpness_ (log cone volume)  
-y = _task outcome_ (domain metric: success%, return, J, regret, etc.)  
-Color = E[T] (or compute)  
-Marker shape = bind success (or calibration pass/fail)
+## PHASE 0 — Hygiene (do this first)
 
-**Why it’s universal:** It directly answers “tighter cones / longer commitments → better or worse outcomes?”  
-**How to read:** you want a frontier: as cones get tighter (left), outcomes improve (up) without blowing up cost color.
+Goal: ensure transfer results are statistically meaningful and comparable.
 
-If you only keep one performance plot, keep this.
+- [ ] **Multi-seed evaluation**
 
----
+  - Run each `(source_env, target_env, reuse_mode)` with **N ≥ 10 seeds**
+  - Store per-seed outcomes, not just means
 
-## 2) Honesty: Reliability Diagram (coverage curve) + single-number summary
+- [ ] **Confidence intervals**
 
-You already have calibration curves, but they’re abstract unless you tie them to _one number_:
+  - Report mean ± std **and** bootstrap 95% CI for:
+    - outcome (−J or success)
+    - coverage @ k\*
+    - bind success
+  - Add error bars to reuse-gain plots
 
-- Plot: empirical coverage vs nominal coverage over k (your existing curve)
-- Add: **ECE-like scalar** (area or mean absolute error across ks)
+- [ ] **Paired comparison**
 
-**Why:** It tells you if the tube is lying. If tubes are uncalibrated, everything else is suspect.  
-**Universal:** works for any prediction target (states, observations, value, opponent, etc.)
+  - For each seed, compute:
+    ```
+    Δ_memory = outcome(memory) − outcome(native)
+    Δ_proto  = outcome(prototype) − outcome(native)
+    ```
+  - Plot paired scatter or bar with CI
+  - This removes environment variance from the comparison
 
-**Interpretation shortcut:**
-
-- curve below nominal → overconfident (σ too small)
-- curve above nominal → underconfident (σ too big)
-
----
-
-## 3) “Did Commitment Help?” Counterfactual Gain Plot
-
-This is the missing bridge between “graphs” and “meaning”.
-
-For each eval episode, compute:
-
-- outcome with commitment-conditioned behavior (your normal TAM)
-- outcome with commitment removed / randomized / baseline policy
-
-Then plot:
-**Histogram or violin of ΔOutcome = Outcome(TAM) − Outcome(baseline)**  
-Optionally split by bins of volatility / OOD.
-
-**Why it’s universal:** It’s the cleanest evidence the commitment layer matters.  
-**How to read:** if ΔOutcome is centered near 0, TAM isn’t helping; if positive with heavy tail in hard/OOD bins, it is.
-
-This will make the rest of the dashboard make sense.
+- [ ] **Evaluation parity**
+  - Ensure eval uses identical settings across reuse modes:
+    - same horizon sampling
+    - same action noise (ideally 0)
+    - same `Hr_eval ∈ {0, 1, max}` (separate runs)
 
 ---
 
-## 4) Compute Payback Curve (reasoning / pondering ROI)
+## PHASE 1 — Diagnose z portability (before “fixing” transfer)
 
-Right now “Hr” and “ΔNLL” are hard to interpret because there’s no ROI framing.
+Goal: verify whether **z has shared semantics across envs at all**.
 
-Make one plot:
-**Scatter:** x = reasoning compute (Hr or E[Hr])  
-y = improvement (ΔNLL or ΔOutcome)  
-Color = episode difficulty proxy (volatility, memory risk, predicted NLL0)
+- [ ] **Cone-summary portability test**
 
-**Goal:** a positive trend: more compute → more improvement, mostly on hard episodes.
+  - Sample a fixed set of z’s from source memory (e.g. 50)
+  - For each z:
+    - Compute `(C_source(z), H_source(z))`
+    - Compute `(C_target(z), H_target(z))` using target tube
+  - Plot:
+    - `C_source vs C_target`
+    - `H_source vs H_target`
+  - If correlation ≈ 0 → z is not portable → reuse via distance is meaningless
 
-If you don’t see that, incentives are wrong or your refiner isn’t doing useful work.
-
----
-
-## 5) Time-Consistency Check: Early vs Late Tube Error
-
-This is domain-agnostic and explains a _lot_ of failure modes.
-
-Compute per episode:
-
-- weighted mean abs error in first third of horizon
-- weighted mean abs error in last third
-  (or use NLL)
-
-Plot:
-**y = late error**, **x = early error**  
-Color = E[T]  
-Diagonal is “consistent”; points above diagonal mean “good early, bad late” (classic tube exploit).
-
-This replaces a bunch of confusing plots with one that diagnoses the common pathology.
+- [ ] **Order preservation test**
+  - Rank z’s by sharpness / horizon in source
+  - Measure rank correlation in target
+  - This is the minimal requirement for reuse
 
 ---
 
-## 6) Commitment Atlas: “Which commitments actually work?”
+## PHASE 2 — Replace “nearest-z” with real reuse
 
-Since z-space is interpretable to you already, make it decision-grade:
+Goal: test **concept reuse**, not coordinate coincidence.
 
-In z-PCA space, plot points with:
+### 2A. Behavioral retrieval (recommended first)
 
-- color = success or task outcome
-- outline = bind success
-- size = E[T] (or confidence)
-- optionally: nearest-prototype id (if you build atlas)
+This is the **simplest meaningful reuse**.
 
-This turns “latent map” into “these are the reusable commitments worth keeping”.
+- [ ] From source env, store memory tuples:
 
----
+  ```
+  (z, mean_outcome, bind_rate, cone_volume, E[T])
+  ```
 
-# Minimal “Across-Domain” Dashboard (6 plots → 3 plots)
+- [ ] In target env:
 
-If you want _only three_ that stay meaningful everywhere:
+  - Sample K candidate z’s from source memory (e.g. K=10)
+  - For each candidate z:
+    - Evaluate _cheap proxy_ in target:
+      - predicted `NLL0`
+      - predicted cone volume
+      - predicted p_stop / E[T]
+  - Select best z by:
+    ```
+    score = −NLL0 − α*cone_vol + β*E[T]
+    ```
 
-1. **Outcome vs Sharpness** (color = compute/horizon; shape = bind)
-2. **Calibration curve + scalar error**
-3. **Compute ROI** (Hr vs improvement, colored by difficulty)
+- [ ] Compare against:
 
-Everything else is “nice to have”.
+  - native z
+  - nearest-neighbor z
+  - random z from source memory
 
----
-
-# Make them legible: add baselines and annotations
-
-Two rules make plots stop feeling like “graphs without basis”:
-
-### A) Always include a baseline line
-
-- outcome: baseline policy mean
-- calibration: y=x nominal
-- ROI: y=0 “no improvement”
-- early/late: diagonal
-
-### B) Always annotate with 2–3 numbers on the figure
-
-- mean outcome ± std
-- bind success rate
-- calibration error scalar
-- mean E[T], mean E[Hr]
-
-Even if you ignore the chart, the numbers give orientation.
+- [ ] Plot:
+  - outcome vs retrieval score
+  - fraction of episodes where retrieval beats native
 
 ---
 
-# Implementation trick: define a domain adapter
+## PHASE 3 — Prototype reuse done correctly
 
-To make this portable across environments, define in each env:
+Goal: test whether **basins** (not points) transfer.
 
-- `episode_outcome(info, states, actions) -> float`
-- `episode_difficulty(info) -> float` (volatility, entropy, rule switches, etc.)
-- `baseline_policy(obs) -> action` or a “no commitment” variant
+- [ ] Extract prototypes via **behavioral clustering**, not KMeans on z:
 
-Then your dashboard doesn’t care if it’s pendulum, gridworld, or adversary.
+  - cluster by `(cone_volume, E[T], bind_rate)` or outcome
+  - choose representative z per basin
+
+- [ ] During transfer:
+
+  - Evaluate each prototype z with proxy score (as above)
+  - Select best prototype _per episode_
+
+- [ ] Compare:
+
+  - best-of-K prototype
+  - nearest-prototype
+  - native z
+
+- [ ] Add ablation:
+  - number of prototypes K ∈ {1, 4, 8}
+
+---
+
+## PHASE 4 — Add minimal adaptation (only if reuse shows promise)
+
+Goal: make reuse plausible when raw z is misaligned.
+
+### 4A. Learned z-adapter (small, contained)
+
+- [ ] Train adapter:
+  ```
+  z_target = g(z_source)
+  ```
+- [ ] Objective:
+  - match **cone summaries** `(C, H)` between envs
+  - NOT raw z distance
+- [ ] Freeze main actor/tube
+- [ ] Evaluate:
+  - memory + adapter vs memory alone
+
+### 4B. Environment embedding (optional, stronger)
+
+- [ ] Add env embedding `e`
+  - actor: `q(z | s0, e)`
+  - tube: `tube(s0, z, e)`
+- [ ] Train on mixed envs
+- [ ] Test zero-shot on held-out env seeds
+- [ ] Measure whether same z regions are reused across e
+
+---
+
+## PHASE 5 — Canonical transfer plots (keep these, drop the rest)
+
+These are the **only plots you should rely on** for transfer.
+
+- [ ] **Transfer gain (paired)**
+
+  - y = outcome(reuse) − outcome(native)
+  - x = seed
+  - CI bands
+
+- [ ] **Cone-summary portability**
+
+  - `(C_source, H_source)` vs `(C_target, H_target)`
+
+- [ ] **Retrieval effectiveness**
+
+  - histogram of proxy scores
+  - win-rate vs native
+
+- [ ] **Reuse breakdown**
+  - stacked bar: fraction of episodes where:
+    - native wins
+    - reuse wins
+    - tie
+
+---
+
+## PHASE 6 — Sanity checks (non-negotiable)
+
+- [ ] Shuffled memory control (should destroy reuse benefit)
+- [ ] Random z baseline
+- [ ] Freeze vs unfreeze actor comparison
+- [ ] Disable reasoning vs enable reasoning (transfer often depends on it)
+
+---
+
+## Summary Decision Gates
+
+Only proceed if:
+
+- **Phase 1** shows partial portability of `(C,H)`
+- **Phase 2** beats native in ≥1 env with CI
+- **Phase 3** outperforms nearest-z
+
+If none of these hold, the conclusion is **not that TAM failed**, but that:
+
+> z currently encodes _environment-specific_ commitments, not transferable concepts — which tells you exactly what to fix next.

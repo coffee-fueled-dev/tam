@@ -235,6 +235,10 @@ class ExperimentHarness:
     
     def _evaluate(self, step: int) -> None:
         """Run evaluation at a given step."""
+        # Skip evaluation if eval_episodes is 0
+        if self.config.eval_episodes == 0:
+            return
+        
         try:
             from .evaluation import evaluate_agent_generic
         except ImportError:
@@ -267,6 +271,7 @@ class ExperimentHarness:
             self.snapshots_lo.append(snap_lo)
         except Exception as e:
             print(f"[eval @ {step:5d}] Warning: Evaluation (Hr={Hr_eval_lo}) failed: {e}")
+            return
         
         # Evaluate with full reasoning
         try:
