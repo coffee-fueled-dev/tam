@@ -30,6 +30,29 @@ from .cross_env_runner import (
     ConeSummary,
     PerEpisodeRecord,
 )
+from .functor import (
+    FunctorConfig,
+    FunctorTrainer,
+    ConeSignature,
+    LinearFunctor,
+    MLPFunctor,
+    create_functor,
+    get_cone_signature,
+    collect_cone_dataset,
+    run_functor_experiment,
+)
+from .intent_functor import (
+    IntentFunctorConfig,
+    IntentFunctorTrainer,
+    TubeSignature,
+    PairedSample,
+    AffineFunctor,
+    MLPFunctor,
+    create_intent_functor,
+    get_tube_signature,
+    collect_paired_dataset,
+    run_intent_functor_experiment,
+)
 
 __all__ = [
     "ExperimentHarness",
@@ -50,4 +73,25 @@ __all__ = [
     "ShuffledMemoryActor",
     "ConeSummary",
     "PerEpisodeRecord",
+    # Functor learning
+    "FunctorConfig",
+    "FunctorTrainer",
+    "ConeSignature",
+    "LinearFunctor",
+    "MLPFunctor",
+    "create_functor",
+    "get_cone_signature",
+    "collect_cone_dataset",
+    "run_functor_experiment",
+    # Intent functor (factored z)
+    "IntentFunctorConfig",
+    "IntentFunctorTrainer",
+    "TubeSignature",
+    "PairedSample",
+    "AffineFunctor",
+    "MLPFunctor",
+    "create_intent_functor",
+    "get_tube_signature",
+    "collect_paired_dataset",
+    "run_intent_functor_experiment",
 ]

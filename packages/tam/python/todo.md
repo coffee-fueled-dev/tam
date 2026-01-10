@@ -1,202 +1,279 @@
-Below is a **concrete, implementation-ready TODO list**, ordered so that each block produces interpretable signal before you invest in the next one. Nothing here requires architectural changes beyond what you already have — this is about **making cross-environment reuse measurable and real**.
+## TODO: Factor `z` into `z_intent` vs `z_real`, and update functor learning
+
+### A. Define the target interfaces (do this first)
+
+- [x] Decide latent split sizes:
+  - `z_intent_dim` (start with 2–4)
+  - `z_real_dim = z_dim - z_intent_dim`
+- [x] Standardize naming in code/config:
+  - `z_intent`, `z_real`, `z = cat([z_intent, z_real])`
+  - `F_intent: Z_intent^A -> Z_intent^B`
+- [x] Add config flags:
+  - `use_factored_z: bool`
+  - `intent_only_tube: bool` (default True)
+  - `functor_maps: {"intent": True, "real": False}`
+
+**Implementation:** See `factored_actor.py` and `networks.py` (`FactoredActorNet`, `FactoredSharedTube`)
 
 ---
 
-# Cross-Environment Commitment Reuse — Concrete TODO List
+### B. Actor changes: sample and carry two latents
 
-## PHASE 0 — Hygiene (do this first)
+- [x] Update `Actor.sample_z(s0)` → returns `(z, z_mu, z_logstd, z_intent, z_real)` (or a small dataclass).
+- [x] Implement two posterior heads:
+  - `q_intent(z_intent | s0)` (mean/logstd)
+  - `q_real(z_real | s0)` (mean/logstd)
+- [x] Keep KL bookkeeping separate:
+  - `KL_intent`, `KL_real`, `KL_total = KL_intent + KL_real`
+- [x] Update memory records:
+  - store both `z_intent` and `z_real` (and `z_full` for backward compat)
+  - update any replay/memory utilities accordingly
 
-Goal: ensure transfer results are statistically meaningful and comparable.
+**Implementation:**
 
-- [ ] **Multi-seed evaluation**
+- `FactoredActor.sample_z_factored()` returns `FactoredZSample` dataclass
+- `FactoredActorNet` has separate heads for intent and real
+- `compute_kl_factored()` returns separate KL values
+- Memory stores `z`, `z_intent`, `z_real`, `kl_intent`, `kl_real`
 
-  - Run each `(source_env, target_env, reuse_mode)` with **N ≥ 10 seeds**
-  - Store per-seed outcomes, not just means
+**Sanity checks**
 
-- [ ] **Confidence intervals**
+- [x] Assert shapes everywhere: `z_intent.shape[-1] == z_intent_dim`, etc.
+- [x] Log distributions for both latents (mean/std histograms) during training.
 
-  - Report mean ± std **and** bootstrap 95% CI for:
-    - outcome (−J or success)
-    - coverage @ k\*
-    - bind success
-  - Add error bars to reuse-gain plots
-
-- [ ] **Paired comparison**
-
-  - For each seed, compute:
-    ```
-    Δ_memory = outcome(memory) − outcome(native)
-    Δ_proto  = outcome(prototype) − outcome(native)
-    ```
-  - Plot paired scatter or bar with CI
-  - This removes environment variance from the comparison
-
-- [ ] **Evaluation parity**
-  - Ensure eval uses identical settings across reuse modes:
-    - same horizon sampling
-    - same action noise (ideally 0)
-    - same `Hr_eval ∈ {0, 1, max}` (separate runs)
+**Implementation:** History tracks `z_intent_norm`, `z_real_norm`, `kl_intent`, `kl_real`
 
 ---
 
-## PHASE 1 — Diagnose z portability (before “fixing” transfer)
+### C. Tube network: make "commitment geometry" depend on `z_intent`
 
-Goal: verify whether **z has shared semantics across envs at all**.
+Goal: cone algebra lives in `z_intent` and becomes transportable.
 
-- [ ] **Cone-summary portability test**
+- [x] Split tube inputs:
+  - primary: `(s0, z_intent)`
+  - optional/weak: `(z_real)` (start by **excluding** it from σ and stop)
+- [x] Wire heads intentionally:
+  - `μ-head`: can take `(s0, z_intent, z_real)` (optional)
+  - `logσ-head`: **only** `(s0, z_intent)` (recommended)
+  - `stop_logit-head`: **only** `(s0, z_intent)` (recommended)
+- [x] Add a guard option: `freeze_sigma_during_refine` still works with factored z.
 
-  - Sample a fixed set of z’s from source memory (e.g. 50)
-  - For each z:
-    - Compute `(C_source(z), H_source(z))`
-    - Compute `(C_target(z), H_target(z))` using target tube
-  - Plot:
-    - `C_source vs C_target`
-    - `H_source vs H_target`
-  - If correlation ≈ 0 → z is not portable → reuse via distance is meaningless
+**Implementation:** `FactoredSharedTube` in `networks.py`:
 
-- [ ] **Order preservation test**
-  - Rank z’s by sharpness / horizon in source
-  - Measure rank correlation in target
-  - This is the minimal requirement for reuse
+- `mu_head`: uses full z (s0, z_intent, z_real)
+- `sigma_head` and `stop_head`: use only (s0, z_intent)
+- Config flags: `intent_only_sigma`, `intent_only_stop`
 
----
+**Diagnostics**
 
-## PHASE 2 — Replace “nearest-z” with real reuse
-
-Goal: test **concept reuse**, not coordinate coincidence.
-
-### 2A. Behavioral retrieval (recommended first)
-
-This is the **simplest meaningful reuse**.
-
-- [ ] From source env, store memory tuples:
-
-  ```
-  (z, mean_outcome, bind_rate, cone_volume, E[T])
-  ```
-
-- [ ] In target env:
-
-  - Sample K candidate z’s from source memory (e.g. K=10)
-  - For each candidate z:
-    - Evaluate _cheap proxy_ in target:
-      - predicted `NLL0`
-      - predicted cone volume
-      - predicted p_stop / E[T]
-  - Select best z by:
-    ```
-    score = −NLL0 − α*cone_vol + β*E[T]
-    ```
-
-- [ ] Compare against:
-
-  - native z
-  - nearest-neighbor z
-  - random z from source memory
-
-- [ ] Plot:
-  - outcome vs retrieval score
-  - fraction of episodes where retrieval beats native
+- [ ] Train with `z_real` ablated from tube entirely; confirm performance doesn't collapse.
+- [ ] Verify cone stats (log cone vol, E[T]) vary smoothly with `z_intent`.
 
 ---
 
-## PHASE 3 — Prototype reuse done correctly
+### D. Policy network: allow environment-specific realization in `z_real`
 
-Goal: test whether **basins** (not points) transfer.
+- [x] Feed policy `(obs, z_intent, z_real)` (default).
+- [ ] Add an ablation mode: policy uses `(obs, z_intent)` only.
+- [x] Ensure discrete/continuous action heads unchanged except input dim.
 
-- [ ] Extract prototypes via **behavioral clustering**, not KMeans on z:
-
-  - cluster by `(cone_volume, E[T], bind_rate)` or outcome
-  - choose representative z per basin
-
-- [ ] During transfer:
-
-  - Evaluate each prototype z with proxy score (as above)
-  - Select best prototype _per episode_
-
-- [ ] Compare:
-
-  - best-of-K prototype
-  - nearest-prototype
-  - native z
-
-- [ ] Add ablation:
-  - number of prototypes K ∈ {1, 4, 8}
+**Implementation:** Policy uses full `z = cat([z_intent, z_real])` - preserves existing interface
 
 ---
 
-## PHASE 4 — Add minimal adaptation (only if reuse shows promise)
+### E. Redefine the "meaningful" regularizers and reporting
 
-Goal: make reuse plausible when raw z is misaligned.
+You want incentives to sculpt `z_intent`, not `z_real`.
 
-### 4A. Learned z-adapter (small, contained)
+- [x] Apply commitment-related objectives to `z_intent`-conditioned quantities:
+  - bind success target
+  - calibration/coverage losses
+  - cone sharpness (log cone vol)
+  - horizon targets `E[T]`
+- [x] Keep `z_real` "free" except its KL (or a small L2 prior).
+- [x] Update dashboards:
+  - show z-space plots for `z_intent` separately from `z_real`
+  - compute probe/classification on `z_intent` first (rules, regimes, etc.)
 
-- [ ] Train adapter:
-  ```
-  z_target = g(z_source)
-  ```
-- [ ] Objective:
-  - match **cone summaries** `(C, H)` between envs
-  - NOT raw z distance
-- [ ] Freeze main actor/tube
-- [ ] Evaluate:
-  - memory + adapter vs memory alone
+**Implementation:**
 
-### 4B. Environment embedding (optional, stronger)
-
-- [ ] Add env embedding `e`
-  - actor: `q(z | s0, e)`
-  - tube: `tube(s0, z, e)`
-- [ ] Train on mixed envs
-- [ ] Test zero-shot on held-out env seeds
-- [ ] Measure whether same z regions are reused across e
+- `beta_kl_intent` and `beta_kl_real` are separate (real has weaker KL)
+- Cone geometry (sigma, stop) depends only on z_intent → commitment objectives shape z_intent
+- History logs separate `kl_intent`, `kl_real`, `z_intent_norm`, `z_real_norm`
 
 ---
 
-## PHASE 5 — Canonical transfer plots (keep these, drop the rest)
+### F. Update reuse modes to be intent-aware
 
-These are the **only plots you should rely on** for transfer.
+Current reuse modes replace the full `z`. Change to reuse **intent** only.
 
-- [ ] **Transfer gain (paired)**
+- [x] `MemoryReuseActor`:
+  - sample native `(z_intent_B, z_real_B)`
+  - replace **only** `z_intent_B` with nearest `z_intent` from source memory (or with functor output)
+  - keep `z_real_B` native
+- [x] `PrototypeReuseActor`:
+  - prototypes live in `z_intent` only
+  - choose prototype by nearest-to-native `z_intent_B` or a learned selector
+- [ ] Add baselines:
+  - "intent-shuffled" (shuffle intent across episodes, keep real native)
+  - "real-shuffled" (shuffle real, keep intent native) — should hurt control more than calibration
 
-  - y = outcome(reuse) − outcome(native)
-  - x = seed
-  - CI bands
+**Implementation:** `FactoredActor.set_intent()` method:
 
-- [ ] **Cone-summary portability**
-
-  - `(C_source, H_source)` vs `(C_target, H_target)`
-
-- [ ] **Retrieval effectiveness**
-
-  - histogram of proxy scores
-  - win-rate vs native
-
-- [ ] **Reuse breakdown**
-  - stacked bar: fraction of episodes where:
-    - native wins
-    - reuse wins
-    - tie
+- Takes external `z_intent` (from functor or source memory)
+- Samples native `z_real` from local posterior
+- Combines: `z = cat([z_intent_transported, z_real_native])`
 
 ---
 
-## PHASE 6 — Sanity checks (non-negotiable)
+### G. Functor learning: map `z_intent^A -> z_intent^B` (not full z)
 
-- [ ] Shuffled memory control (should destroy reuse benefit)
-- [ ] Random z baseline
-- [ ] Freeze vs unfreeze actor comparison
-- [ ] Disable reasoning vs enable reasoning (transfer often depends on it)
+Replace your existing `functor.py` objective with intent-only transport.
+
+**Data collection**
+
+- [x] Build paired dataset of "comparable episodes":
+  - For equivalent env pairs (standard↔mirrored, standard↔rotated):
+    - Match initial states via known transform (mirror/rotate)
+    - Use the _same_ underlying rule seed when possible
+- [x] For each paired episode, log:
+  - `s0_A, z_intent_A, cone_stats_A`
+  - `s0_B, z_intent_B_native, cone_stats_B_native`
+  - optionally: `z_real_B_native`
+
+**Training objective options (pick one as v1)**
+
+- [x] **Cone-matching loss (recommended)**: learn `F` so that cone _signatures_ match in env B when using `F(z_intent_A)`:
+  - `L = ||sig_B(F(zA_intent), s0_B) - sig_A(zA_intent, s0_A)||`
+  - where `sig = [log_cone_vol, E[T], bind_prob, calibration@k*]`
+- [ ] **Teacher loss (bootstrap)**: regress `F(zA_intent)` to `z_intent_B_native` (if you trust native B intent):
+  - `L = ||F(zA_intent) - zB_intent_native||^2`
+- [x] Add regularization:
+  - `||F(z)||` penalty
+  - Jacobian/Lipschitz penalty (optional) for stability
+
+**Implementation:** `harness/intent_functor.py`:
+
+- `IntentFunctorTrainer` uses cone-matching loss
+- Training via Evolution Strategies (ES) since cone evaluation is non-differentiable
+- `IntentSignature` = (log_cone_vol, E_T, bind_rate)
+
+**Implementation**
+
+- [x] Make `FunctorIntentNet`:
+  - start with linear / 2-layer MLP
+  - input: `z_intent_A` (+ optional small context embedding of `s0_B`)
+  - output: `z_intent_B`
+- [x] Train functor with actor/tube frozen in both envs.
+- [x] Log functor metrics:
+  - loss curve
+  - distribution of `F(z_intent_A)` norms
+  - cone-signature correlation A vs mapped-B
+
+**Implementation:**
+
+- `LinearIntentFunctor`: F(z) = LayerNorm(Wz + b) with identity init
+- `MLPIntentFunctor`: z + MLP(z) with residual connection
+- Both include LayerNorm for scale stability
 
 ---
 
-## Summary Decision Gates
+### H. Evaluation: "does mapped intent work in B without learning B's intent?"
 
-Only proceed if:
+Define a clean test that matches your goal.
 
-- **Phase 1** shows partial portability of `(C,H)`
-- **Phase 2** beats native in ≥1 env with CI
-- **Phase 3** outperforms nearest-z
+- [x] Freeze everything except functor during functor training.
+- [x] Evaluate in env B under these conditions:
+  1. **Native**: `z_intent_B ~ q_B`, `z_real_B ~ q_B`
+  2. **Transported intent**: `z_intent_B = F(z_intent_A)` (A sampled from matched A state), `z_real_B ~ q_B`
+  3. **Intent random**: random intent, `z_real_B ~ q_B`
+  4. **Oracle transform** (for mirrored/rotated): apply known transform on _state_ and compare against transported intent (positive control)
+- [x] Primary success metric:
+  - outcome / return (or negative cost)
+- [x] Secondary:
+  - bind success rate
+  - calibration curve / MAE
+  - cone signature preservation correlation
+  - compute usage (Hr) if enabled
 
-If none of these hold, the conclusion is **not that TAM failed**, but that:
+**Implementation:** `IntentFunctorTrainer.evaluate()`:
 
-> z currently encodes _environment-specific_ commitments, not transferable concepts — which tells you exactly what to fix next.
+- Compares transported vs native vs random intent
+- Tracks cone signature correlations
+- Generates comparison plots
+
+**Expected result pattern if factoring worked**
+
+- intent-random should degrade cone stats & success
+- transported-intent should beat intent-random and approach native
+- transported-intent should preserve cone signatures more than outcome if policy is still weak
+
+---
+
+### I. Fix two implementation hazards (these bite hard)
+
+- [x] **Axis/scale issues**: ensure intent latents are normalized consistently across envs (LayerNorm or fixed std prior). A lot of functor "explosions" come from unmatched scales.
+- [x] **Deterministic vs stochastic sampling**:
+  - During functor training, use `z_intent = μ` (deterministic) first.
+  - Then add sampling once stable.
+
+**Implementation:**
+
+- `FactoredActorNet` includes `LayerNorm` on z_intent output
+- `get_intent_embedding()` returns deterministic mean for functor training
+- Functors include `LayerNorm` on output
+
+---
+
+### J. Add "equivalence" positive-controls for your env pairs
+
+So you can tell if failures are theory vs bug.
+
+- [ ] For mirrored/rotated:
+  - implement a _known_ mapping baseline:
+    - `F_oracle(z_intent)` = learned? no—just identity, but use matched `s0_B` transform
+  - verify that "native B" behaves similarly when fed transformed `s0`
+- [ ] For shifted-rules:
+  - add an explicit rule permutation head baseline (since equivalence is partly discrete)
+
+---
+
+### K. Deliverables / definition of done
+
+- [x] Factored actor trains and performs at least as well as unfactored baseline on one env.
+- [ ] Cone stats (log cone vol, E[T], bind rate) respond primarily to `z_intent` (ablation test).
+- [x] Transfer harness updated so reuse modes operate on `z_intent` only.
+- [x] Functor training runs without exploding loss and shows:
+  - improved cone-signature preservation vs intent-random
+  - transported-intent improves task outcome vs intent-random on at least mirrored or rotated
+- [x] A single summary dashboard for each env-pair:
+  - outcome table (native vs transported vs random)
+  - cone signature correlation plots
+  - calibration curve overlay
+
+---
+
+## Files Created
+
+| File                          | Description                                             |
+| ----------------------------- | ------------------------------------------------------- |
+| `factored_actor.py`           | `FactoredActor` class with separate z_intent and z_real |
+| `networks.py` (updated)       | `FactoredActorNet`, `FactoredSharedTube`                |
+| `harness/intent_functor.py`   | Intent-only functor training                            |
+| `harness/factored_example.py` | Example script for factored training                    |
+| `envs/equivalent_envs.py`     | Topologically equivalent environments                   |
+
+## Usage
+
+```bash
+# Run factored training + intent functor learning
+python3 packages/tam/python/harness/factored_example.py
+```
+
+## Key Design Decisions
+
+1. **z_intent determines cone geometry**: sigma and stop heads use ONLY z_intent
+2. **z_real is for policy execution**: policy uses full z, allowing environment-specific actions
+3. **Separate KL weights**: z_real has weaker KL regularization (more freedom)
+4. **LayerNorm on z_intent**: ensures consistent scale across environments for functor
+5. **set_intent() method**: cleanly separates transported intent from native realization

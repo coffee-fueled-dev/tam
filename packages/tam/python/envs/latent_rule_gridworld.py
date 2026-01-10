@@ -217,6 +217,49 @@ class LatentRuleGridworld:
         
         return self.observe()
     
+    def get_state_dict(self) -> Dict:
+        """
+        Get current state as a dictionary for paired environment creation.
+        
+        Returns:
+            dict with 'x', 'y', 'goal_x', 'goal_y', 'rule'
+        """
+        if self.state is None:
+            raise RuntimeError("Environment not reset")
+        
+        return {
+            'x': self.state.x,
+            'y': self.state.y,
+            'goal_x': self.state.goal_x,
+            'goal_y': self.state.goal_y,
+            'rule': self.state.rule,
+        }
+    
+    def reset_with_state(self, state_dict: Dict) -> np.ndarray:
+        """
+        Reset to a specific state (for paired experiments).
+        
+        Args:
+            state_dict: dict with 'x', 'y', 'goal_x', 'goal_y', 'rule'
+        
+        Returns:
+            observation
+        """
+        self.state = GridWorldState(
+            x=float(state_dict['x']),
+            y=float(state_dict['y']),
+            goal_x=float(state_dict['goal_x']),
+            goal_y=float(state_dict['goal_y']),
+            rule=int(state_dict['rule']),
+            steps=0,
+            hit_wall_count=0,
+            slip_count=0,
+            key_visits=[],
+            steps_to_first_key=None,
+        )
+        
+        return self.observe()
+    
     def observe(self) -> np.ndarray:
         """Return current observation."""
         if self.state is None:
