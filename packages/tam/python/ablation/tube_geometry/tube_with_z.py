@@ -30,7 +30,12 @@ class TubeNetWithZ(nn.Module):
     Tube network that takes (s0, z) as input.
     
     z is sampled from a posterior q(z|s0).
-    The tube (mu, sigma) depends on both s0 and z.
+    
+    Key design choice (sigma_from_z_only):
+    - If True: sigma depends ONLY on z (not s0)
+    - If False: sigma depends on (s0, z)
+    
+    When sigma_from_z_only=True, z becomes the SOLE controller of tube geometry.
     """
     
     def __init__(
@@ -40,12 +45,14 @@ class TubeNetWithZ(nn.Module):
         pred_dim: int = 2,
         M: int = 8,
         hidden_dim: int = 64,
+        sigma_from_z_only: bool = False,  # NEW: sigma depends only on z
     ):
         super().__init__()
         self.state_dim = state_dim
         self.z_dim = z_dim
         self.pred_dim = pred_dim
         self.M = M
+        self.sigma_from_z_only = sigma_from_z_only
         
         # Encoder: s0 → z posterior
         self.encoder = nn.Sequential(
@@ -57,14 +64,32 @@ class TubeNetWithZ(nn.Module):
         self.z_mu_head = nn.Linear(hidden_dim, z_dim)
         self.z_logstd_head = nn.Linear(hidden_dim, z_dim)
         
-        # Tube network: (s0, z) → (mu, sigma)
-        self.tube_encoder = nn.Sequential(
+        # Mu network: (s0, z) → mu (trajectory mean still uses s0)
+        self.mu_encoder = nn.Sequential(
             nn.Linear(state_dim + z_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
         )
         self.mu_head = nn.Linear(hidden_dim, pred_dim * M)
+        
+        # Sigma network: depends on z only OR (s0, z)
+        if sigma_from_z_only:
+            # Sigma depends ONLY on z - forces z to control geometry
+            self.sigma_encoder = nn.Sequential(
+                nn.Linear(z_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+            )
+        else:
+            # Sigma depends on (s0, z)
+            self.sigma_encoder = nn.Sequential(
+                nn.Linear(state_dim + z_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+            )
         self.sigma_head = nn.Linear(hidden_dim, pred_dim * M)
         
         # Initialize sigma to reasonable values
@@ -93,10 +118,17 @@ class TubeNetWithZ(nn.Module):
             mu_knots: [B, M, pred_dim]
             logsig_knots: [B, M, pred_dim]
         """
-        h = self.tube_encoder(torch.cat([s0, z], dim=-1))
+        # Mu always uses (s0, z) - needs to know where trajectory goes
+        h_mu = self.mu_encoder(torch.cat([s0, z], dim=-1))
+        mu = self.mu_head(h_mu).view(-1, self.M, self.pred_dim)
         
-        mu = self.mu_head(h).view(-1, self.M, self.pred_dim)
-        logsig = self.sigma_head(h).view(-1, self.M, self.pred_dim)
+        # Sigma uses z only OR (s0, z) depending on config
+        if self.sigma_from_z_only:
+            h_sigma = self.sigma_encoder(z)
+        else:
+            h_sigma = self.sigma_encoder(torch.cat([s0, z], dim=-1))
+        
+        logsig = self.sigma_head(h_sigma).view(-1, self.M, self.pred_dim)
         
         return mu, logsig
     
@@ -255,13 +287,17 @@ def train(
     lr: float = 1e-3,
     beta_kl: float = 0.001,
     seed: int = 0,
+    sigma_from_z_only: bool = False,
 ) -> Tuple[TubeNetWithZ, Dict[str, List[float]]]:
     """Train the tube network with z."""
     torch.manual_seed(seed)
     np.random.seed(seed)
     
     env = SimpleEnv(seed=seed)
-    net = TubeNetWithZ(state_dim=8, z_dim=z_dim, pred_dim=2, M=8, hidden_dim=64)
+    net = TubeNetWithZ(
+        state_dim=8, z_dim=z_dim, pred_dim=2, M=8, hidden_dim=64,
+        sigma_from_z_only=sigma_from_z_only,
+    )
     optimizer = optim.Adam(net.parameters(), lr=lr)
     
     lambda_bind = 1.0
@@ -276,6 +312,7 @@ def train(
     
     print(f"Training tube network WITH z (dim={z_dim})...")
     print(f"  beta_kl: {beta_kl}")
+    print(f"  sigma_from_z_only: {sigma_from_z_only}")
     
     for step in range(n_steps):
         s0 = env.reset()
@@ -653,6 +690,8 @@ def main():
     parser.add_argument("--z-dim", type=int, default=4)
     parser.add_argument("--beta-kl", type=float, default=0.001)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--sigma-from-z-only", action="store_true",
+                       help="Sigma depends ONLY on z, not s0")
     args = parser.parse_args()
     
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -673,6 +712,7 @@ def main():
         "z_dim": args.z_dim,
         "beta_kl": args.beta_kl,
         "seed": args.seed,
+        "sigma_from_z_only": args.sigma_from_z_only,
     }
     with open(out_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
@@ -684,6 +724,7 @@ def main():
         lr=1e-3,
         beta_kl=args.beta_kl,
         seed=args.seed,
+        sigma_from_z_only=args.sigma_from_z_only,
     )
     
     # Evaluate
