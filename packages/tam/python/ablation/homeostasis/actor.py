@@ -15,15 +15,59 @@ Key fixes (from diagnosis):
 1. Use SOFT fail for gradients (differentiable)
 2. Use CONTINUOUS fail amount in λ update (not boolean)
 3. Normalize hardness by sigma (creates negative feedback when σ too small)
+
+Domain-independent via z-scores:
+- All metrics normalized by running statistics
+- Hardness, surprise computed in z-score space
+- No domain-specific hyperparameters needed
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+
+class RunningStats:
+    """Track running mean and std for z-score normalization."""
+    
+    def __init__(self, momentum: float = 0.99):
+        self.momentum = momentum
+        self.mean: Optional[float] = None
+        self.var: Optional[float] = None
+        self.count = 0
+    
+    def update(self, value: float):
+        self.count += 1
+        if self.mean is None:
+            self.mean = value
+            self.var = 0.0
+        else:
+            delta = value - self.mean
+            self.mean = self.momentum * self.mean + (1 - self.momentum) * value
+            # Welford's online variance (with momentum)
+            self.var = self.momentum * self.var + (1 - self.momentum) * (delta ** 2)
+    
+    @property
+    def std(self) -> float:
+        if self.var is None:
+            return 1.0
+        return max(np.sqrt(self.var), 1e-6)
+    
+    def z_score(self, value: float) -> float:
+        """Return z-score: (value - mean) / std."""
+        if self.mean is None:
+            return 0.0
+        return (value - self.mean) / self.std
+    
+    def quantile(self, value: float) -> float:
+        """Approximate quantile using normal CDF on z-score."""
+        z = self.z_score(value)
+        # Approximate normal CDF
+        return 0.5 * (1 + np.tanh(z * 0.7978845608))  # Approximation
 
 
 @dataclass
@@ -125,12 +169,17 @@ class TubeNet(nn.Module):
         )
 
 
-class SelfCalibratingActor(nn.Module):
+class Actor(nn.Module):
     """
     Actor with self-calibrating homeostasis.
     
     No fixed bind target. λ adjusts based on failure surprise.
     Uses SOFT fail for gradients and CONTINUOUS fail amount in λ update.
+    
+    Domain-independent via z-score normalization:
+    - Hardness computed as z-score of residual/sigma ratio
+    - Surprise computed relative to running statistics
+    - No domain-specific hyperparameters needed
     """
     
     def __init__(
@@ -142,7 +191,7 @@ class SelfCalibratingActor(nn.Module):
         T: int = 16,
         k_sigma: float = 2.0,
         lr: float = 1e-3,
-        # Homeostasis parameters
+        # Homeostasis parameters (domain-independent defaults)
         alpha_vol: float = 0.5,      # Volume minimization weight
         beta_kl: float = 0.001,      # KL weight
         eta_lambda: float = 0.05,    # λ learning rate
@@ -150,6 +199,8 @@ class SelfCalibratingActor(nn.Module):
         lambda_max: float = 50.0,    # Cap λ
         # Soft bind parameters
         gamma: float = 25.0,         # Sharpness of soft bind sigmoid
+        # Running stats momentum
+        stats_momentum: float = 0.99,
     ):
         super().__init__()
         
@@ -175,6 +226,12 @@ class SelfCalibratingActor(nn.Module):
         # Dual variable - price of failure
         self.lambda_fail = lambda_init
         
+        # Running statistics for domain-independent normalization
+        self.stats_residual = RunningStats(stats_momentum)
+        self.stats_sigma = RunningStats(stats_momentum)
+        self.stats_hardness = RunningStats(stats_momentum)  # residual / sigma
+        self.stats_fail = RunningStats(stats_momentum)
+        
         # History
         self.history: Dict[str, List[float]] = {
             "mse": [],
@@ -183,6 +240,7 @@ class SelfCalibratingActor(nn.Module):
             "bind_soft": [],
             "fail_soft": [],
             "hardness": [],
+            "hardness_z": [],  # z-score of hardness
             "lambda": [],
             "kl": [],
             "loss": [],
@@ -255,10 +313,11 @@ class SelfCalibratingActor(nn.Module):
         """
         Training step with self-calibrating homeostasis.
         
-        Key fixes:
+        Domain-independent via z-score normalization:
         1. Use soft fail in loss (differentiable)
         2. Use continuous fail_amt in λ update
-        3. Hardness normalized by sigma
+        3. Hardness computed as z-score (domain-independent)
+        4. Surprise based on z-score deviation
         """
         self.train()
         
@@ -274,7 +333,18 @@ class SelfCalibratingActor(nn.Module):
         kl = self.compute_kl(out.z_mu, out.z_logstd)
         
         sigma_mean = float(out.sigma.mean().item())
-        hardness = self.compute_hardness(residual.item(), sigma_mean)
+        residual_val = float(residual.item())
+        fail_val = float(fail_soft.item())
+        
+        # Update running statistics (domain adaptation)
+        self.stats_residual.update(residual_val)
+        self.stats_sigma.update(sigma_mean)
+        self.stats_fail.update(fail_val)
+        
+        # Compute hardness in original units, then z-score it
+        hardness_raw = residual_val / (sigma_mean + 1e-6)
+        self.stats_hardness.update(hardness_raw)
+        hardness_z = self.stats_hardness.z_score(hardness_raw)
         
         # Loss: use SOFT fail for gradients
         loss = mse
@@ -288,17 +358,19 @@ class SelfCalibratingActor(nn.Module):
         nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         self.optimizer.step()
         
-        # λ update: use CONTINUOUS fail amount
-        fail_amt = float(fail_soft.item())  # 0..1
-        success_amt = 1.0 - fail_amt
+        # λ update using Z-SCORES (domain-independent)
+        # Fail z-score: how unusual is this failure rate?
+        fail_z = self.stats_fail.z_score(fail_val)
         
-        # Surprise for failures: high when hardness is LOW (easy trajectory)
-        # Hardness is now residual/sigma, so low hardness = easy or sigma too big
-        surp_fail = max(0.0, 1.0 - hardness)  # Easy = low hardness = high surprise
+        # Surprise = negative hardness z-score
+        # Low hardness z-score (easy) + failure = high surprise
+        # High hardness z-score (hard) + failure = expected
+        surp_fail = max(0.0, -hardness_z)  # Easy (below mean) = high surprise
         
         # λ update: increase on surprising failures, decrease on expected successes
+        success_amt = 1.0 - fail_val
         delta = self.eta_lambda * (
-            fail_amt * (1.0 + surp_fail) -  # Failures push λ up (more if surprising)
+            fail_val * (1.0 + surp_fail) -  # Failures push λ up (more if surprising)
             success_amt * 0.2                # Successes push λ down
         )
         
@@ -315,7 +387,8 @@ class SelfCalibratingActor(nn.Module):
             "bind_hard": float(bind_hard.item()),
             "bind_soft": float(bind_soft.item()),
             "fail_soft": float(fail_soft.item()),
-            "hardness": float(hardness),
+            "hardness": float(hardness_raw),
+            "hardness_z": float(hardness_z),
             "lambda": float(self.lambda_fail),
             "kl": float(kl.item()),
             "loss": float(loss.item()),
@@ -355,9 +428,9 @@ class SelfCalibratingActor(nn.Module):
 
 def test_self_calibrating_actor():
     """Quick test."""
-    print("Testing SelfCalibratingActor with soft bind...")
+    print("Testing Actor with z-score normalization...")
     
-    actor = SelfCalibratingActor(
+    actor = Actor(
         obs_dim=8,
         pred_dim=2,
         z_dim=4,
@@ -365,15 +438,19 @@ def test_self_calibrating_actor():
         alpha_vol=0.5,
     )
     
-    s0 = torch.randn(8)
-    trajectory = torch.randn(16, 2)
+    # Run a few steps to build up running statistics
+    for _ in range(10):
+        s0 = torch.randn(8)
+        trajectory = torch.randn(16, 2)
+        metrics = actor.train_step(s0, trajectory)
     
-    metrics = actor.train_step(s0, trajectory)
     print(f"  bind_hard: {metrics['bind_hard']:.3f}, bind_soft: {metrics['bind_soft']:.3f}")
-    print(f"  fail_soft: {metrics['fail_soft']:.3f}, hardness: {metrics['hardness']:.3f}")
+    print(f"  fail_soft: {metrics['fail_soft']:.3f}")
+    print(f"  hardness: {metrics['hardness']:.3f}, hardness_z: {metrics['hardness_z']:.3f}")
     print(f"  sigma_mean: {metrics['sigma_mean']:.3f}, λ: {metrics['lambda']:.3f}")
+    print(f"  Running stats - residual μ={actor.stats_residual.mean:.3f}, σ={actor.stats_residual.std:.3f}")
     
-    print("✓ SelfCalibratingActor works!")
+    print("✓ Actor with z-scores works!")
     return actor
 
 

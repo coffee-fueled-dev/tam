@@ -1,5 +1,5 @@
 """
-Train SelfCalibratingActor with emergent bind rate.
+Train Actor with emergent bind rate.
 
 Key insight: The optimal bind rate is NOT a hyperparameter - it emerges
 from the environment structure via the surprise-based λ update.
@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from homeostasis_actor import SelfCalibratingActor
+from actor import Actor
 
 
 class SimpleEnv:
@@ -76,14 +76,14 @@ class SimpleEnv:
 
 
 def train(
-    actor: SelfCalibratingActor,
+    actor: Actor,
     env: SimpleEnv,
     n_steps: int = 8000,
     log_every: int = 1000,
 ) -> Dict[str, List[float]]:
     """Train with self-calibrating homeostasis."""
     
-    print(f"Training SelfCalibratingActor for {n_steps} steps...")
+    print(f"Training Actor for {n_steps} steps...")
     print(f"  Volume weight (α): {actor.alpha_vol}")
     print(f"  λ learning rate (η): {actor.eta_lambda}")
     print(f"  Initial λ: {actor.lambda_fail}")
@@ -110,7 +110,7 @@ def train(
 
 
 def evaluate_per_rule(
-    actor: SelfCalibratingActor,
+    actor: Actor,
     env: SimpleEnv,
     n_samples: int = 100,
 ) -> Dict[int, Dict[str, float]]:
@@ -159,7 +159,7 @@ def evaluate_per_rule(
 
 def plot_training(history: Dict[str, List[float]], out_path: Path):
     """Plot training curves showing emergent behavior."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(2, 4, figsize=(18, 8))
     
     window = 200
     def smooth(x):
@@ -193,17 +193,27 @@ def plot_training(history: Dict[str, List[float]], out_path: Path):
     ax.set_ylabel("λ")
     ax.grid(True, alpha=0.3)
     
-    # 4. Hardness (normalized by sigma)
-    ax = axes[1, 0]
+    # 4. Hardness (raw)
+    ax = axes[0, 3]
     ax.plot(smooth(history["hardness"]), color='purple', alpha=0.8)
     ax.axhline(1.0, color='black', linestyle='--', linewidth=0.5, label='h=1')
-    ax.set_title("Hardness (residual/σ)\n(creates negative feedback)")
-    ax.set_ylabel("Hardness")
+    ax.set_title("Hardness (raw)")
+    ax.set_ylabel("residual/σ")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # 5. Hardness Z-score (domain-independent)
+    ax = axes[1, 0]
+    if "hardness_z" in history:
+        ax.plot(smooth(history["hardness_z"]), color='purple', alpha=0.8)
+    ax.axhline(0.0, color='black', linestyle='--', linewidth=0.5, label='z=0 (mean)')
+    ax.set_title("Hardness Z-score\n(domain-independent)")
+    ax.set_ylabel("Z-score")
     ax.set_xlabel("Step")
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # 5. Fail rate (soft, continuous)
+    # 6. Fail rate (soft, continuous)
     ax = axes[1, 1]
     ax.plot(smooth(history["fail_soft"]), color='red', alpha=0.8)
     ax.set_title("Soft Fail Rate\n(continuous for gradients)")
@@ -211,7 +221,7 @@ def plot_training(history: Dict[str, List[float]], out_path: Path):
     ax.set_xlabel("Step")
     ax.grid(True, alpha=0.3)
     
-    # 6. MSE
+    # 7. MSE
     ax = axes[1, 2]
     ax.plot(smooth(history["mse"]), color='orange')
     ax.set_title("MSE (mean fit)")
@@ -219,7 +229,15 @@ def plot_training(history: Dict[str, List[float]], out_path: Path):
     ax.set_xlabel("Step")
     ax.grid(True, alpha=0.3)
     
-    plt.suptitle("Self-Calibrating Homeostasis (with Soft Bind)", fontsize=14)
+    # 8. Loss
+    ax = axes[1, 3]
+    ax.plot(smooth(history["loss"]), color='brown')
+    ax.set_title("Total Loss")
+    ax.set_ylabel("Loss")
+    ax.set_xlabel("Step")
+    ax.grid(True, alpha=0.3)
+    
+    plt.suptitle("Self-Calibrating Homeostasis (with Z-score Normalization)", fontsize=14)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -364,7 +382,7 @@ def main():
     
     # Create actor
     env = SimpleEnv(seed=args.seed)
-    actor = SelfCalibratingActor(
+    actor = Actor(
         obs_dim=8,
         pred_dim=2,
         z_dim=args.z_dim,

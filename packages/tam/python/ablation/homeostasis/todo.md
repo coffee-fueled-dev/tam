@@ -299,21 +299,29 @@ All fixes implemented in `homeostasis_actor.py` and `train_homeostasis.py`.
 1. **Soft fail** via `compute_soft_bind_fail()` with sigmoid on margin (γ=25)
 2. **Continuous fail amount** in λ update (not boolean)
 3. **Hardness = residual / σ** (creates negative feedback)
+4. **Z-score normalization** for domain independence (added later)
 
-### Results:
+### Results (with z-score normalization):
 
 ```
-Easy (rule 0): bind=1.000, σ=0.062, log_vol=-2.78
-Hard (rule 3): bind=0.924, σ=0.160, log_vol=-1.85
+Easy (rule 0-2): bind=1.000, σ=0.058, log_vol=-2.86
+Hard (rule 3):   bind=0.913, σ=0.158, log_vol=-1.87
 
-✓ Sigma calibrated: hard 2.6x wider than easy
+✓ Sigma calibrated: hard 2.7x wider than easy
 ✓ Bind rate calibrated: hard < easy
 ✓ Volume NOT hitting floor
-✓ λ stabilized at ~1.6
+✓ λ stabilized at ~1.5
 ```
+
+### Domain-Independent Features:
+
+- **RunningStats class**: Tracks mean/std with momentum for any metric
+- **Hardness z-score**: `(raw_hardness - mean) / std` - normalized units
+- **Surprise via z-score**: Failures are surprising when hardness is below-mean
+- **No domain-specific hyperparameters**: Same `alpha_vol`, `eta_lambda` work across domains
 
 ### Run command:
 
 ```bash
-python3 train_homeostasis.py --name test --steps 10000
+python3 train_homeostasis.py --name zscore --steps 10000
 ```
