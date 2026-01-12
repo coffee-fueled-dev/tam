@@ -4,9 +4,9 @@ The **Trajectory-Affordance Model (TAM)** is a teleological framework that treat
 
 The model operates on a cycle of **situations** and **bindings**:
 
-- **Situation ():** An indexed instance of internal state and prior context that marks a specific point in a causal chain.
-- **Ports ():** Modes of interaction that define **Affordance Cones**—the set of all future trajectories an agent is willing to accept for that mode.
-- **Binding:** The transition from one situation to the next when the world’s response falls within the agent's chosen cone.
+- **Situation (sₙ):** An indexed instance of internal state and prior context that marks a specific point in a causal chain.
+- **Ports (p):** Modes of interaction that define **Affordance Cones**—the set of all future trajectories an agent is willing to accept for that mode.
+- **Binding:** The transition from one situation to the next when the world's response falls within the agent's chosen cone.
 
 ### 2. Operationalizing Agency
 
@@ -17,7 +17,7 @@ In TAM, agency is not a vague philosophical concept but a measurable geometric p
 
 ### 3. The Deliberation Engine (Competitive Binding)
 
-The implementation uses a **Cross-Entropy Method (CEM)** to simulate "thinking" before acting. The agent evaluates candidate commitments () based on a tri-part scoring function:
+The implementation uses a **Cross-Entropy Method (CEM)** to simulate "thinking" before acting. The agent evaluates candidate commitments (z) based on a tri-part scoring function:
 
 1. **Intent Proxy:** How accurately the commitment predicts the desired outcome.
 2. **Agency:** The tightness of the predicted trajectory tube (rewarding precision).
@@ -27,6 +27,14 @@ The implementation uses a **Cross-Entropy Method (CEM)** to simulate "thinking" 
 
 - **Rejection of Hedging:** In bimodal environments where two different futures are possible, a standard model might "hedge" by predicting a vague middle ground. TAM forces a **mode commitment**, where the agent chooses one specific path (e.g., "Left" or "Right") and rejects the high-entropy middle.
 - **Homeostasis of Control:** The agent constantly seeks an equilibrium where it is as precise as possible without being so rigid that it constantly "breaks the bind" with reality.
+
+### 5. Empirical Studies
+
+| Study                               | Focus                                                          |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `studies/tube_geometry/`            | Core mechanism: z controls tube geometry (σ depends only on z) |
+| `studies/homeostasis/`              | Self-calibrating λ discovers optimal bind rate per environment |
+| `studies/competitive-port-binding/` | CEM deliberation; bimodal commitment vs hedging                |
 
 ### Summary for Researchers
 
