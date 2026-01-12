@@ -37,8 +37,8 @@ This study provides the foundation for:
 
 ```bash
 # Train the actor
-python train_actor.py --name baseline --steps 4000
+python3 train_actor.py --name baseline --steps 4000
 
 # Visualize a trained model
-python visualize_tubes.py --model runs/<run_name>/model.pt
+python3 visualize_tubes.py --model runs/<run_name>/model.pt
 ```

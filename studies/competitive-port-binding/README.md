@@ -11,6 +11,7 @@ S(s₀, z) = -intent_proxy + α·agency - λ·risk
 ```
 
 Where:
+
 - **Intent proxy**: How well μ_T aligns with goal (available at bind time)
 - **Agency**: Tube tightness (-log σ)
 - **Risk**: Learned critic r_ψ(s₀, z) → p_fail
@@ -23,12 +24,12 @@ The agent uses Cross-Entropy Method (CEM) to search z-space, iteratively refinin
 
 Compares four z-selection strategies:
 
-| Mode | Description |
-|------|-------------|
-| Random | Sample one z ~ q(z\|s₀) |
-| Best-of-K | Sample K, pick best score |
-| CEM | Iterative refinement (4 rounds) |
-| Oracle | Use true outcome (diagnostic upper bound) |
+| Mode      | Description                               |
+| --------- | ----------------------------------------- |
+| Random    | Sample one z ~ q(z\|s₀)                   |
+| Best-of-K | Sample K, pick best score                 |
+| CEM       | Iterative refinement (4 rounds)           |
+| Oracle    | Use true outcome (diagnostic upper bound) |
 
 **Expected result**: CEM achieves tighter tubes than Random while maintaining acceptable bind rate—trading coverage for agency.
 
@@ -39,6 +40,7 @@ Tests the core TAM claim: in bimodal environments, the agent should **commit** t
 Environment: Same s₀ produces two incompatible trajectories (hidden mode ±1). A midline hedge covers both but sacrifices agency.
 
 **Key metric**: Mode Commitment Index (MCI)
+
 - MCI ≈ 0 → hedging (tube at midline)
 - MCI ≈ 1 → committed to one mode
 
@@ -46,20 +48,20 @@ Environment: Same s₀ produces two incompatible trajectories (hidden mode ±1).
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `actor.py` | CompetitiveActor with CEM binding, RiskNet critic, scoring function |
-| `train.py` | Binding mode comparison on 4-rule environment |
-| `train_bimodal.py` | Bimodal commitment experiment (rejection of hedging) |
+| File               | Purpose                                                             |
+| ------------------ | ------------------------------------------------------------------- |
+| `actor.py`         | CompetitiveActor with CEM binding, RiskNet critic, scoring function |
+| `train.py`         | Binding mode comparison on 4-rule environment                       |
+| `train_bimodal.py` | Bimodal commitment experiment (rejection of hedging)                |
 
 ## Usage
 
 ```bash
 # Standard competitive binding experiment
-python train.py --name v2 --steps 10000 --cem-iters 4
+python3 train.py --name v2 --steps 10000 --cem-iters 4
 
 # Bimodal commitment test
-python train_bimodal.py --name test --steps 10000 --bend-amplitude 0.15
+python3 train_bimodal.py --name test --steps 10000 --bend-amplitude 0.15
 ```
 
 ## Relationship to Other Studies
