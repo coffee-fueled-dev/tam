@@ -50,26 +50,30 @@ class FIFOQueue:
 
     @torch.no_grad()
     def enqueue(self, x: torch.Tensor):
-        x = F.normalize(x.detach(), dim=-1)
-        n = x.shape[0]
+        # Clone and normalize to avoid any reference or in-place issues
+        x_norm = F.normalize(x.detach().clone(), dim=-1)
+        n = x_norm.shape[0]
         if n >= self.size:
-            self.buf.copy_(x[-self.size :])
+            self.buf.copy_(x_norm[-self.size :].clone())
             self.ptr = 0
             self.full = True
             return
         end = self.ptr + n
         if end <= self.size:
-            self.buf[self.ptr:end] = x
+            self.buf[self.ptr:end].copy_(x_norm.clone())
         else:
             first = self.size - self.ptr
-            self.buf[self.ptr:] = x[:first]
-            self.buf[: end - self.size] = x[first:]
+            self.buf[self.ptr:].copy_(x_norm[:first].clone())
+            self.buf[: end - self.size].copy_(x_norm[first:].clone())
         self.ptr = end % self.size
         if self.ptr == 0:
             self.full = True
 
     def get(self) -> torch.Tensor:
-        return self.buf if self.full else self.buf[: self.ptr]
+        # Return a clone to avoid in-place modification issues when used in computation graph
+        if self.full:
+            return self.buf.clone()
+        return self.buf[: self.ptr].clone()
 
 
 class Actor(nn.Module):
@@ -239,22 +243,32 @@ class Actor(nn.Module):
         traj_delta: (T, pred_dim)
         """
         T, d = traj_delta.shape
-        x = traj_delta
+        # Clone to avoid in-place operations on input tensor
+        x = traj_delta.clone()
 
         # 1) time crop (keep contiguous window)
         if self.aug_time_crop_min_frac < 1.0:
             min_len = max(2, int(math.ceil(T * self.aug_time_crop_min_frac)))
             crop_len = torch.randint(low=min_len, high=T + 1, size=(1,), device=x.device).item()
             start = torch.randint(low=0, high=T - crop_len + 1, size=(1,), device=x.device).item()
-            crop = x[start : start + crop_len]
+            crop = x[start : start + crop_len].clone()  # Clone to avoid view issues
 
             # resample back to length T by linear interpolation in time
             t_old = torch.linspace(0, 1, crop_len, device=x.device, dtype=x.dtype)
             t_new = torch.linspace(0, 1, T, device=x.device, dtype=x.dtype)
-            # interpolate each dim
+            # interpolate each dim (manual linear interpolation for compatibility)
             crop_resamp = []
             for j in range(d):
-                crop_resamp.append(torch.interp(t_new, t_old, crop[:, j]))
+                # Manual linear interpolation
+                values_old = crop[:, j]
+                # Find indices for interpolation
+                indices = torch.searchsorted(t_old, t_new, right=True) - 1
+                indices = indices.clamp(0, crop_len - 2)
+                i0, i1 = indices, indices + 1
+                t0, t1 = t_old[i0], t_old[i1]
+                w = (t_new - t0) / (t1 - t0).clamp(min=1e-8)
+                v0, v1 = values_old[i0], values_old[i1]
+                crop_resamp.append((1 - w) * v0 + w * v1)
             x = torch.stack(crop_resamp, dim=-1)
 
         # 2) time jitter (roll)
@@ -274,37 +288,39 @@ class Actor(nn.Module):
         NT-Xent / InfoNCE with optional queue negatives.
         z1, z2: (B, D), already normalized or will be normalized here.
         """
-        z1 = F.normalize(z1, dim=-1)
-        z2 = F.normalize(z2, dim=-1)
-        B, D = z1.shape
+        # Clone BEFORE normalizing to avoid in-place modification of computation graph tensors
+        z1_norm = F.normalize(z1.clone(), dim=-1)
+        z2_norm = F.normalize(z2.clone(), dim=-1)
+        B, D = z1_norm.shape
 
         # positives: z1[i] with z2[i]
-        pos = (z1 * z2).sum(dim=-1, keepdim=True)  # (B, 1)
+        pos = (z1_norm * z2_norm).sum(dim=-1, keepdim=True)  # (B, 1)
 
         # negatives: within-batch + queue
         logits_neg = []
 
         # within-batch negatives against z2
-        sim_12 = z1 @ z2.t()  # (B, B)
-        mask = ~torch.eye(B, device=z1.device, dtype=torch.bool)
+        sim_12 = z1_norm @ z2_norm.t()  # (B, B)
+        mask = ~torch.eye(B, device=z1_norm.device, dtype=torch.bool)
         logits_neg.append(sim_12[mask].view(B, B - 1))
 
-        # queue negatives
-        self._ensure_queue(z1.device)
+        # queue negatives (get queue before computing loss to avoid any issues)
+        self._ensure_queue(z1_norm.device)
         q = self._queue.get()  # (Q, D) or empty
         if q.numel() > 0:
-            logits_neg.append(z1 @ q.t())  # (B, Q)
+            logits_neg.append(z1_norm @ q.t())  # (B, Q)
 
-        neg = torch.cat(logits_neg, dim=1) if len(logits_neg) > 0 else torch.empty(B, 0, device=z1.device)
+        neg = torch.cat(logits_neg, dim=1) if len(logits_neg) > 0 else torch.empty(B, 0, device=z1_norm.device)
 
         # assemble logits: [pos | neg]
         logits = torch.cat([pos, neg], dim=1) / max(1e-8, temperature)
-        labels = torch.zeros(B, dtype=torch.long, device=z1.device)  # positive at index 0
+        labels = torch.zeros(B, dtype=torch.long, device=z1_norm.device)  # positive at index 0
         loss = F.cross_entropy(logits, labels)
 
-        # update queue with z2 (stop-grad)
+        # update queue with z2 (stop-grad, clone to avoid any reference issues)
+        # Do this AFTER computing loss to avoid any gradient issues
         with torch.no_grad():
-            self._queue.enqueue(z2)
+            self._queue.enqueue(z2_norm.detach().clone())
 
         return loss
 
@@ -566,8 +582,9 @@ class Actor(nn.Module):
         v1 = torch.stack(v1, dim=0)  # (B,T,d)
         v2 = torch.stack(v2, dim=0)
 
-        z1 = self.encode(v1.reshape(B, -1))
-        z2 = self.encode(v2.reshape(B, -1))
+        # Encode and clone immediately to avoid any in-place issues
+        z1 = self.encode(v1.reshape(B, -1)).clone()
+        z2 = self.encode(v2.reshape(B, -1)).clone()
 
         loss = self._info_nce_loss(z1, z2, temperature=self.info_nce_temp)
 

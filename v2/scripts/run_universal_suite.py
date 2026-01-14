@@ -14,7 +14,7 @@ import argparse
 import torch
 from v2.eval import Runner, RunConfig
 from v2.eval.suites import UniversalSuite
-from v2.actors.knot_v2 import GeometricKnotActor
+from v2.actors.actor import Actor
 from v2.environments.cmg import CMGEnv, CMGConfig
 
 
@@ -56,7 +56,7 @@ def main():
     
     # Create config
     config = RunConfig(
-        actor_cls=GeometricKnotActor,
+        actor_cls=Actor,
         actor_kwargs={
             'z_dim': z_dim,
             'T': args.T,

@@ -135,11 +135,11 @@ class UniversalSuite:
             obs = env.reset()
             s0 = torch.tensor(obs, dtype=torch.float32, device=device)
             
-            # Select z
-            if hasattr(actor, 'select_z_geometric'):
+            # Select z - prefer v3 multimodal, then v2, then fallback
+            if hasattr(actor, 'select_z_geometric_multimodal'):
+                z_star = actor.select_z_geometric_multimodal(s0, trajectory_delta_hint=None)
+            elif hasattr(actor, 'select_z_geometric'):
                 z_star = actor.select_z_geometric(s0, trajectory_delta=None)
-            elif hasattr(actor, 'select_z_geometric_multimodal'):
-                z_star = actor.select_z_geometric_multimodal(s0)
             else:
                 # Fallback: random z
                 z_star = torch.randn(actor.z_dim, device=device)

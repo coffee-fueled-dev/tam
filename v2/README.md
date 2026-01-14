@@ -7,8 +7,7 @@ This directory contains the refactored TAM codebase following the structure outl
 ```
 v2/
 ├── actors/              # Actor implementations
-│   ├── knot_v2.py      # Supervised GeometricKnotActor
-│   └── knot_v3.py      # Unsupervised Actor with multimodal router
+│   └── actor.py      # Unsupervised Actor with multimodal router
 ├── environments/        # Environment implementations
 │   └── cmg/            # CMG-specific environment
 │       ├── env.py      # CMGEnv, CMGConfig
@@ -36,16 +35,19 @@ v2/
 ### Universal Components (Label-Free)
 
 1. **`eval/metrics.py`**
+
    - `compute_latent_metrics()` - Pairwise cosine, effective rank, variance (always available)
    - Optional supervised metrics (silhouette, CH, DB) when labels provided
    - `compute_contract_metrics()` - Leak, volume, start error aggregations
 
 2. **`eval/plots/latent.py`**
+
    - `plot_latent_scatter()` - Universal latent scatter (2D polar/Cartesian, higher-D PCA)
    - Optional label coloring, or color by reward/volume/head
    - `plot_pairwise_cosine_histogram()` - Label-free cosine similarity distribution
 
 3. **`eval/plots/geometry.py`**
+
    - `plot_tube_overlay()` - Single tube with optional actual trajectory
    - `plot_multi_start_tubes()` - Multiple tubes from different z (measures implicit ports)
    - `plot_energy_landscape()` - CEM energy basins (actor-only, universal)
@@ -60,6 +62,7 @@ v2/
 ### Remaining Components
 
 1. **`eval/runner.py`** - Main training/eval orchestration
+
    - `make_run_dir()` - Output directory creation
    - `seed_all()` - Reproducibility
    - `train_encoder_stage()` - Encoder-only warmup
@@ -68,16 +71,19 @@ v2/
    - `save_summary()` - JSON summary generation
 
 2. **`eval/dataset.py`** - Episode buffers and sampling
+
    - `EpisodeBuffer` - FIFO buffer for episodes
    - `EpisodeDataset` - Iterator for training
    - Mode-balanced sampling (CMG-specific, but can be generalized)
 
 3. **`environments/cmg/diagnostics.py`** - CMG topology tests
+
    - `fork_separability_test()` - Measures if environment forces disjoint futures
    - `commitment_regret_test()` - Volume penalty for shared z
    - `gating_irreversibility_test()` - Late-switching penalty
 
 4. **`eval/suites/universal.py`** - Universal suite definition
+
    - Learning curves
    - Episode rollouts
    - Tube overlap matrix
@@ -96,15 +102,15 @@ v2/
 4. **Environment-Specific**: CMG diagnostics live with CMG environment
 5. **Separation of Concerns**: Plots are pure rendering, metrics are pure computation
 
-## Usage Example (Future)
+## Usage Example
 
 ```python
 from v2.eval import Runner, RunConfig
-from v2.actors.knot_v2 import GeometricKnotActor
+from v2.actors.actor import Actor
 from v2.environments.cmg import CMGEnv, CMGConfig
 
 config = RunConfig(
-    actor_cls=GeometricKnotActor,
+    actor_cls=Actor,
     env_cls=CMGEnv,
     env_config=CMGConfig(d=3, K=4, T=20),
     train_epochs=2000,

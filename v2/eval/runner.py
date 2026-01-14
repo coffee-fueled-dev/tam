@@ -162,31 +162,52 @@ class Runner:
                         k = int(k[-1])
                     batch_labels.append(k)
                 
-                traj_batch = torch.stack(traj_deltas)
-                labels_batch = torch.tensor(batch_labels, dtype=torch.long, device=self.device)
-                traj_flat_batch = traj_batch.reshape(batch_size, -1)
+                traj_batch = torch.stack(traj_deltas)  # (batch_size, T, pred_dim)
                 
-                # Train encoder
-                if hasattr(self.actor, 'train_encoder_batch'):
+                # Train encoder - handle v3 (unsupervised SSL) vs v2 (supervised contrastive)
+                if hasattr(self.actor, 'train_encoder_ssl_batch'):
+                    # v3: Unsupervised InfoNCE (no labels needed)
+                    metrics = self.actor.train_encoder_ssl_batch(
+                        traj_batch, encoder_optimizer
+                    )
+                    # Collect z samples
+                    with torch.no_grad():
+                        traj_flat_batch = traj_batch.reshape(batch_size, -1)
+                        z_batch = self.actor.encode(traj_flat_batch)
+                        z_samples.extend([z.cpu().numpy() for z in z_batch])
+                        labels.extend(batch_labels)  # Keep labels for metrics even if not used in training
+                elif hasattr(self.actor, 'train_encoder_batch'):
+                    # v2: Supervised contrastive
+                    labels_batch = torch.tensor(batch_labels, dtype=torch.long, device=self.device)
+                    traj_flat_batch = traj_batch.reshape(batch_size, -1)
                     metrics = self.actor.train_encoder_batch(
                         traj_flat_batch, None, labels_batch, encoder_optimizer, epoch=batch_idx
                     )
+                    # Collect z samples
+                    with torch.no_grad():
+                        z_batch = self.actor.encode(traj_flat_batch)
+                        z_samples.extend([z.cpu().numpy() for z in z_batch])
+                        labels.extend(batch_labels)
                 else:
                     # Fallback: single-step training
                     metrics = {}
+                    traj_flat_batch = traj_batch.reshape(batch_size, -1)
+                    labels_batch = torch.tensor(batch_labels, dtype=torch.long, device=self.device)
                     for i in range(batch_size):
-                        step_metrics = self.actor.train_encoder_step(
-                            traj_batch[i], encoder_optimizer,
-                            mode_label=batch_labels[i], epoch=epoch
-                        )
+                        if hasattr(self.actor, 'train_encoder_step'):
+                            step_metrics = self.actor.train_encoder_step(
+                                traj_batch[i], encoder_optimizer,
+                                mode_label=batch_labels[i], epoch=epoch
+                            )
+                        else:
+                            step_metrics = {'loss': 0.0}
                         if i == 0:
                             metrics = step_metrics
-                
-                # Collect z samples
-                with torch.no_grad():
-                    z_batch = self.actor.encode(traj_flat_batch)
-                    z_samples.extend([z.cpu().numpy() for z in z_batch])
-                    labels.extend(batch_labels)
+                    # Collect z samples
+                    with torch.no_grad():
+                        z_batch = self.actor.encode(traj_flat_batch)
+                        z_samples.extend([z.cpu().numpy() for z in z_batch])
+                        labels.extend(batch_labels)
                 
                 self.training_history['warmup'].append(metrics)
                 
@@ -225,13 +246,16 @@ class Runner:
         if generate_episode_fn is None:
             generate_episode_fn = self._default_generate_episode
         
-        # Freeze encoder
-        if hasattr(self.actor, 'encoder_mlp'):
+        # Freeze encoder (v3 doesn't freeze encoder during actor training, but we can optionally do it)
+        # v3 keeps encoder trainable for router, so we don't freeze it
+        if hasattr(self.actor, 'encoder_mlp') and not hasattr(self.actor, 'z_router'):
+            # Only freeze for v2, v3 needs encoder for router
             self.actor.encoder_mlp.requires_grad_(False)
-        elif hasattr(self.actor, 'encoder'):
+        elif hasattr(self.actor, 'encoder') and not hasattr(self.actor, 'z_router'):
             self.actor.encoder.requires_grad_(False)
         
         # Create optimizer for actor networks
+        # v3 needs router params too, v2 doesn't have them
         actor_params = []
         if hasattr(self.actor, 'mu_net'):
             actor_params.extend(self.actor.mu_net.parameters())
@@ -241,6 +265,11 @@ class Runner:
             actor_params.extend(self.actor.obs_proj.parameters())
         if hasattr(self.actor, 'z_encoder'):
             actor_params.extend(self.actor.z_encoder.parameters())
+        # v3 specific: router networks
+        if hasattr(self.actor, 'z_router'):
+            actor_params.extend(self.actor.z_router.parameters())
+        if hasattr(self.actor, 'z_logits'):
+            actor_params.extend(self.actor.z_logits.parameters())
         
         actor_optimizer = optim.Adam(actor_params, lr=1e-3)
         
@@ -284,14 +313,21 @@ class Runner:
             s0 = torch.tensor(episode['obs'][0], dtype=torch.float32, device=self.device)
             traj = torch.tensor(episode['x'][1:], dtype=torch.float32, device=self.device)
             
-            # Encode trajectory
-            traj_delta = traj - s0[:self.actor.pred_dim]
-            with torch.no_grad():
-                traj_flat = traj_delta.reshape(-1)
-                z = self.actor.encode(traj_flat)
-            
-            # Train actor
-            metrics = self.actor.train_step(s0, traj, z, actor_optimizer)
+            # Train actor - handle v3 (WTA) vs v2 (single z)
+            if hasattr(self.actor, 'train_step_wta'):
+                # v3: Winner-take-all training (unsupervised, no z needed)
+                # v3 expects trajectory delta, not full trajectory
+                traj_delta = traj - s0[:self.actor.pred_dim]
+                metrics = self.actor.train_step_wta(s0, traj_delta, actor_optimizer)
+            elif hasattr(self.actor, 'train_step'):
+                # v2: Supervised training with encoded z
+                traj_delta = traj - s0[:self.actor.pred_dim]
+                with torch.no_grad():
+                    traj_flat = traj_delta.reshape(-1)
+                    z = self.actor.encode(traj_flat)
+                metrics = self.actor.train_step(s0, traj, z, actor_optimizer)
+            else:
+                raise ValueError("Actor must have train_step_wta or train_step method")
             self.training_history['actor'].append(metrics)
             
             # Add new episode to buffer periodically
@@ -344,7 +380,13 @@ class Runner:
         print(f"\nEvaluation ({n_episodes} episodes)...")
         
         if select_z_fn is None:
-            select_z_fn = lambda s0: self.actor.select_z_geometric(s0, trajectory_delta=None)
+            # Use v3 multimodal selection if available, otherwise v2
+            if hasattr(self.actor, 'select_z_geometric_multimodal'):
+                select_z_fn = lambda s0: self.actor.select_z_geometric_multimodal(s0, trajectory_delta_hint=None)
+            elif hasattr(self.actor, 'select_z_geometric'):
+                select_z_fn = lambda s0: self.actor.select_z_geometric(s0, trajectory_delta=None)
+            else:
+                raise ValueError("Actor must have select_z_geometric_multimodal or select_z_geometric method")
         
         all_z_stars = []
         all_rewards = []
@@ -363,23 +405,28 @@ class Runner:
             mu, sigma = self.actor.get_tube(s0, z_star)
             mu_np = mu.detach().cpu().numpy()[0]
             
-            # Execute
+            # Execute and collect trajectory
             curr_obs = obs
             total_reward = 0
+            actual_traj = [obs[:self.actor.pred_dim]]  # Collect actual trajectory
             
             for t in range(self.actor.T):
                 action = mu_np[t] - curr_obs[:self.actor.pred_dim]
                 curr_obs, reward, done, info = self.env.step(action)
                 total_reward += reward
+                actual_traj.append(curr_obs[:self.actor.pred_dim])
             
             all_rewards.append(total_reward)
             all_modes.append(info.get('k', 0))
             
             # Compute contract metrics for this episode (if available)
             if hasattr(self.actor, 'contract_terms'):
-                traj = torch.tensor([info.get('x', curr_obs)], dtype=torch.float32, device=self.device)
+                # v3 has contract_terms method
+                # Convert actual_traj list to numpy array first, then to tensor (avoids warning)
+                actual_traj_np = np.array(actual_traj[1:])  # Skip first obs (start state)
+                traj_tensor = torch.tensor(actual_traj_np, dtype=torch.float32, device=self.device)
                 with torch.no_grad():
-                    terms = self.actor.contract_terms(s0, traj, mu.squeeze(0), sigma.squeeze(0))
+                    terms = self.actor.contract_terms(s0, traj_tensor, mu.squeeze(0), sigma.squeeze(0))
                     all_metrics.append({k: v.item() if isinstance(v, torch.Tensor) else v for k, v in terms.items()})
             else:
                 # Fallback: compute basic metrics from tube
@@ -387,7 +434,7 @@ class Runner:
                     all_metrics.append({
                         'leak': 0.0,  # Would need actual trajectory
                         'vol': sigma.mean().item(),
-                        'start_err': (mu[0, 0] - s0[0]).pow(2).mean().item(),
+                        'start_err': (mu[0, 0] - s0[:self.actor.pred_dim]).pow(2).mean().item(),
                     })
         
         # Aggregate results

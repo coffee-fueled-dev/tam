@@ -15,8 +15,7 @@ Below is a concrete file structure + a “keep vs move” classification for eve
 ```
 tam/
   actors/
-    knot_v2.py
-    knot_v3.py               # your new online unsupervised actor variant (optional)
+    actor.py               # your new online unsupervised actor variant (optional)
   environments/
     cmg/
       __init__.py
