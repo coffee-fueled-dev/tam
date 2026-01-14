@@ -1,120 +1,80 @@
-#!/usr/bin/env python3
 """
-Sweep across all Alien levels: NONE → ALIEN_1 → ALIEN_2 → ALIEN_3
+Sweep across alien levels for the Alien Sensors Experiment.
 
-Generates a summary plot: mode agreement vs alien level.
+Runs train_alien.py for each AlienLevel and collects results.
 """
 
 import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
-
-# Ensure we can import from parent directories
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from alien_obs import AlienLevel
 
 
-def run_experiment(alien_level: int, args) -> dict:
-    """Run a single alien level experiment."""
+def run_experiment(
+    alien_level: int,
+    actor_steps: int,
+    functor_epochs: int,
+    pair_samples: int,
+    eval_samples: int,
+    z_dim: int,
+    alien_dim: int,
+    seed: int,
+) -> dict:
+    """Run a single experiment at given alien level."""
     cmd = [
-        sys.executable, str(Path(__file__).parent / "train_alien.py"),
+        sys.executable,
+        str(Path(__file__).parent / "train_alien.py"),
         "--alien-level", str(alien_level),
-        "--actor-steps", str(args.actor_steps),
-        "--functor-epochs", str(args.functor_epochs),
-        "--pair-samples", str(args.pair_samples),
-        "--eval-samples", str(args.eval_samples),
-        "--z-dim", str(args.z_dim),
-        "--alien-dim", str(args.alien_dim),
-        "--seed", str(args.seed),
+        "--actor-steps", str(actor_steps),
+        "--functor-epochs", str(functor_epochs),
+        "--pair-samples", str(pair_samples),
+        "--eval-samples", str(eval_samples),
+        "--z-dim", str(z_dim),
+        "--alien-dim", str(alien_dim),
+        "--seed", str(seed),
     ]
     
+    level_name = AlienLevel(alien_level).name
     print(f"\n{'='*60}")
-    print(f"Running Alien Level {alien_level}")
+    print(f"Running {level_name}")
     print(f"{'='*60}")
     
-    result = subprocess.run(cmd, capture_output=False, text=True)
+    result = subprocess.run(cmd, capture_output=False)
     
     if result.returncode != 0:
-        print(f"Warning: Experiment failed for level {alien_level}")
+        print(f"  ❌ {level_name} failed!")
         return None
     
     # Find the most recent run for this level
     runs_dir = Path(__file__).parent / "runs"
-    level_names = ["NONE", "ALIEN_1", "ALIEN_2", "ALIEN_3"]
-    level_name = level_names[alien_level]
+    level_runs = sorted(
+        [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(level_name)],
+        key=lambda x: x.stat().st_mtime,
+        reverse=True,
+    )
     
-    matching = sorted([d for d in runs_dir.iterdir() if d.name.startswith(level_name)], reverse=True)
-    if not matching:
+    if not level_runs:
+        print(f"  ❌ No output found for {level_name}")
         return None
     
-    summary_path = matching[0] / "summary.json"
-    if summary_path.exists():
-        with open(summary_path) as f:
-            return json.load(f)
-    return None
-
-
-def plot_sweep(summaries: dict, out_path: Path):
-    """Plot summary across all alien levels."""
-    levels = list(summaries.keys())
-    level_names = ["NONE", "ALIEN_1", "ALIEN_2", "ALIEN_3"]
+    latest_run = level_runs[0]
+    summary_path = latest_run / "summary.json"
     
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    if not summary_path.exists():
+        print(f"  ❌ No summary.json in {latest_run}")
+        return None
     
-    # Mode agreement vs alien level
-    ax = axes[0]
-    agreements = [summaries[l]["mode_agreement"]["mean"] for l in levels]
-    ax.bar(levels, agreements, color='#2ecc71', edgecolor='black')
-    ax.axhline(0.5, color='red', linestyle='--', label='Chance')
-    ax.axhline(0.85, color='blue', linestyle='--', label='Target')
-    ax.set_xticks(levels)
-    ax.set_xticklabels([level_names[l] for l in levels])
-    ax.set_ylabel("Mode Agreement")
-    ax.set_title("Intent Transfer vs Alien Level")
-    ax.set_ylim(0, 1)
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis='y')
+    with open(summary_path) as f:
+        summary = json.load(f)
     
-    # Bind rate comparison
-    ax = axes[1]
-    x = np.arange(len(levels))
-    width = 0.35
+    summary["run_dir"] = str(latest_run)
+    summary["alien_level"] = level_name
     
-    trans_binds = [summaries[l]["transfer"]["bind_mean"] for l in levels]
-    cem_binds = [summaries[l]["B_CEM"]["bind_mean"] for l in levels]
-    
-    ax.bar(x - width/2, trans_binds, width, label='Transfer', color='#2ecc71')
-    ax.bar(x + width/2, cem_binds, width, label='B-CEM', color='#3498db')
-    ax.set_xticks(x)
-    ax.set_xticklabels([level_names[l] for l in levels])
-    ax.set_ylabel("Bind Rate")
-    ax.set_title("Transfer vs B-CEM")
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    # Log volume comparison
-    ax = axes[2]
-    trans_vols = [summaries[l]["transfer"]["log_vol_mean"] for l in levels]
-    cem_vols = [summaries[l]["B_CEM"]["log_vol_mean"] for l in levels]
-    
-    ax.bar(x - width/2, trans_vols, width, label='Transfer', color='#2ecc71')
-    ax.bar(x + width/2, cem_vols, width, label='B-CEM', color='#3498db')
-    ax.set_xticks(x)
-    ax.set_xticklabels([level_names[l] for l in levels])
-    ax.set_ylabel("Log Volume")
-    ax.set_title("Tube Tightness")
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    plt.suptitle("Alien Sensors Sweep: Topological Bridge Sufficiency")
-    plt.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved sweep plot to {out_path}")
+    return summary
 
 
 def main():
@@ -126,37 +86,111 @@ def main():
     parser.add_argument("--z-dim", type=int, default=4)
     parser.add_argument("--alien-dim", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--levels", type=str, default="0,1,2,3", help="Comma-separated alien levels")
+    parser.add_argument("--levels", type=str, default="0,1,2,3",
+                        help="Comma-separated list of alien levels to run")
     args = parser.parse_args()
     
     levels = [int(x) for x in args.levels.split(",")]
     
-    summaries = {}
-    for level in levels:
-        summary = run_experiment(level, args)
-        if summary:
-            summaries[level] = summary
+    print(f"\n{'='*60}")
+    print("Alien Sensors Sweep (Minimal Actor)")
+    print(f"Levels: {[AlienLevel(l).name for l in levels]}")
+    print(f"{'='*60}")
     
-    if summaries:
-        out_path = Path(__file__).parent / "sweep_results.png"
-        plot_sweep(summaries, out_path)
+    results = []
+    
+    for level in levels:
+        summary = run_experiment(
+            alien_level=level,
+            actor_steps=args.actor_steps,
+            functor_epochs=args.functor_epochs,
+            pair_samples=args.pair_samples,
+            eval_samples=args.eval_samples,
+            z_dim=args.z_dim,
+            alien_dim=args.alien_dim,
+            seed=args.seed,
+        )
+        if summary:
+            results.append(summary)
+    
+    # Print summary table with fairness metrics
+    print(f"\n{'='*70}")
+    print("SWEEP SUMMARY (with Fairness Controls)")
+    print(f"{'='*70}")
+    print(f"\n{'Level':<10} {'Ceiling':<10} {'Transfer':<10} {'Lift':<10} {'Shuffle':<10} {'Bind Δ':<10}")
+    print("-" * 70)
+    
+    for r in results:
+        level = r.get("alien_level", "?")
+        ceiling = r.get("bayes_ceiling", 0.5)
+        transfer = r.get("mode_agreement", {}).get("mean", 0)
+        lift = r.get("lift", 0)
+        shuffle = r.get("shuffle_ablation", {}).get("mode_agreement", {}).get("mean", 0)
+        trans_bind = r.get("transfer", {}).get("bind_mean", 0)
+        cem_bind = r.get("B_CEM", {}).get("bind_mean", 0)
+        bind_diff = abs(trans_bind - cem_bind)
         
-        # Save combined summary
-        with open(Path(__file__).parent / "sweep_summary.json", "w") as f:
-            json.dump(summaries, f, indent=2)
+        print(f"{level:<10} {ceiling:<10.1%} {transfer:<10.1%} {lift:<+10.1%} {shuffle:<10.1%} {bind_diff:<10.3f}")
+    
+    # Analysis
+    print(f"\n{'='*70}")
+    print("FAIRNESS ANALYSIS")
+    print(f"{'='*70}")
+    
+    print("\n1. Bayes Ceiling Check (is B's sensor mode-blind?):")
+    for r in results:
+        level = r["alien_level"]
+        ceiling = r.get("bayes_ceiling", 0.5)
+        mode_blind = ceiling < 0.6
+        status = "✓ mode-blind" if mode_blind else "⚠ has mode info"
+        print(f"   {level}: ceiling={ceiling:.1%} → {status}")
+    
+    print("\n2. Lift Check (does A add value?):")
+    for r in results:
+        level = r["alien_level"]
+        lift = r.get("lift", 0)
+        positive = lift > 0.05
+        status = "✓ A adds value" if positive else "⚠ low lift"
+        print(f"   {level}: lift={lift:+.1%} → {status}")
+    
+    print("\n3. Shuffle Ablation (does breaking correspondence hurt?):")
+    for r in results:
+        level = r["alien_level"]
+        ceiling = r.get("bayes_ceiling", 0.5)
+        shuffle = r.get("shuffle_ablation", {}).get("mode_agreement", {}).get("mean", 0)
+        collapsed = shuffle < ceiling + 0.10
+        status = "✓ collapsed" if collapsed else "⚠ still works (leakage?)"
+        print(f"   {level}: shuffle={shuffle:.1%} vs ceiling={ceiling:.1%} → {status}")
+    
+    # Win conditions (updated)
+    print(f"\n{'='*70}")
+    print("STRONG RESULTS (all fairness checks pass)")
+    print(f"{'='*70}")
+    
+    for r in results:
+        level = r["alien_level"]
+        ceiling = r.get("bayes_ceiling", 0.5)
+        transfer = r.get("mode_agreement", {}).get("mean", 0)
+        lift = r.get("lift", 0)
+        shuffle = r.get("shuffle_ablation", {}).get("mode_agreement", {}).get("mean", 0)
+        trans_bind = r.get("transfer", {}).get("bind_mean", 0)
+        cem_bind = r.get("B_CEM", {}).get("bind_mean", 0)
         
-        # Print summary table
-        print(f"\n{'='*60}")
-        print("SWEEP SUMMARY")
-        print(f"{'='*60}")
-        print(f"{'Level':<10} {'Agreement':>12} {'Trans Bind':>12} {'CEM Bind':>12}")
-        print("-" * 50)
-        for level in summaries:
-            s = summaries[level]
-            print(f"{['NONE','ALIEN_1','ALIEN_2','ALIEN_3'][level]:<10} "
-                  f"{s['mode_agreement']['mean']:>11.1%} "
-                  f"{s['transfer']['bind_mean']:>12.3f} "
-                  f"{s['B_CEM']['bind_mean']:>12.3f}")
+        lift_ok = lift > 0.05
+        shuffle_ok = shuffle < ceiling + 0.10
+        ma_ok = transfer > 0.85
+        bind_ok = abs(trans_bind - cem_bind) < 0.05
+        
+        all_ok = lift_ok and shuffle_ok and ma_ok and bind_ok
+        status = "🎉 STRONG" if all_ok else "⚠ partial"
+        checks = f"lift={lift:+.1%}, shuffle_Δ={shuffle-ceiling:+.1%}, ma={transfer:.1%}"
+        print(f"  {status} {level}: {checks}")
+    
+    # Save sweep results
+    sweep_out = Path(__file__).parent / "runs" / f"sweep_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    with open(sweep_out, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"\nSweep results saved to {sweep_out}")
 
 
 if __name__ == "__main__":

@@ -6,10 +6,20 @@ B's observations have ~zero mutual information with A's observations,
 as long as the viability basins (left vs right) are isomorphic.
 
 Protocol:
-1. Train Actor A on normal observations
-2. Train Actor B on alien observations (same latent dynamics)
+1. Train Actor A on normal observations (learns basins from geometry)
+2. Train Actor B on alien observations (same latent dynamics, different obs)
 3. Train functor F: zA → zB on paired commitments
 4. Evaluate: Transfer should match B-CEM despite alien obs
+
+Fairness Controls (per feedback):
+- Bayes ceiling: What mode accuracy can B achieve from obs alone?
+- Lift = Transfer - Ceiling: The actual value added by A's commitment
+- Shuffle ablation: Functor trained on shuffled z_A→z_B (should collapse to ceiling)
+
+Uses MinimalCompetitiveActor with:
+- Gaussian NLL + volume loss (clean, interpretable)
+- Mode-prototype max-fit + agency scoring (forces mode commitment)
+- No RiskNet, no homeostasis (minimal confounders)
 """
 
 import argparse
@@ -25,12 +35,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-# Also add competitive-port-binding for BimodalActor
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "competitive-port-binding"))
-
-from train_bimodal import BimodalActor, BimodalEnv as CPBBimodalEnv
+from minimal_actor import MinimalCompetitiveActor, BindingMode
 from alien_obs import AlienObsWrapper, AlienLevel
 
 
@@ -42,11 +47,14 @@ class BimodalEnv:
     """
     Bimodal environment with two incompatible futures from same s0.
     
-    Observation format: [x, y, goal_x, goal_y] matching CompetitiveActor's
-    extract_goal() which expects goal at indices 2:4.
+    Observation format: [x, y, goal_x, goal_y]
     
-    CRITICAL: Mode is DETERMINISTIC from s0, not random.
-    This ensures both actors learn consistent z→mode mappings.
+    IMPORTANT: Mode can be RANDOM or DETERMINISTIC.
+    - Random mode: Neither A nor B can decode mode from obs (Bayes ceiling ~50%)
+    - Deterministic mode: Both can decode (ceiling ~100%), tests different claim
+    
+    For the "topological bridge" claim, use random mode so coordination
+    MUST flow through A's commitment geometry.
     """
     
     def __init__(
@@ -55,7 +63,7 @@ class BimodalEnv:
         T: int = 16,
         bend_amp: float = 0.15,
         base_noise: float = 0.02,
-        deterministic_mode: bool = True,  # Mode determined by s0
+        deterministic_mode: bool = False,  # FALSE = random mode (fair test)
     ):
         self.rng = np.random.default_rng(seed)
         self.T = T
@@ -68,33 +76,18 @@ class BimodalEnv:
         self.reset()
     
     def _compute_deterministic_mode(self, s0: np.ndarray) -> int:
-        """
-        Deterministic mode from s0.
-        
-        Mode depends on the perpendicular direction from start to goal:
-        - If goal is "above" the x=y diagonal relative to start: mode +1
-        - Otherwise: mode -1
-        
-        This creates a consistent mode labeling that both actors can learn.
-        """
+        """Deterministic mode from s0 (for baseline comparison)."""
         x, y, goal_x, goal_y = s0
-        # Direction from start to goal
-        dx, dy = goal_x - x, goal_y - y
-        # Perpendicular signed: positive if goal is "left" of forward direction
-        # Using cross product with vertical: dx * 0 - dy * 1 = -dy
-        # Actually simpler: use the angle or a hash of the state
-        # Most stable: mode = sign of (goal_y - y) - (goal_x - x)
-        # This creates two regions based on whether goal is above or below the x=y line through start
         perp_sign = (goal_y - y) - (goal_x - x)
         return 1 if perp_sign > 0 else -1
     
     def reset(self, force_mode: int = None) -> np.ndarray:
-        """Reset and return latent state [x, y, goal_x, goal_y]."""
+        """Reset and return latent state."""
         self.s0_latent = np.array([
-            self.rng.uniform(0.2, 0.8),  # x
-            self.rng.uniform(0.2, 0.8),  # y
-            self.rng.uniform(0.2, 0.8),  # goal_x
-            self.rng.uniform(0.2, 0.8),  # goal_y
+            self.rng.uniform(0.2, 0.8),
+            self.rng.uniform(0.2, 0.8),
+            self.rng.uniform(0.2, 0.8),
+            self.rng.uniform(0.2, 0.8),
         ], dtype=np.float32)
         
         if force_mode is not None:
@@ -102,23 +95,24 @@ class BimodalEnv:
         elif self.deterministic_mode:
             self.mode = self._compute_deterministic_mode(self.s0_latent)
         else:
+            # Random mode - neither A nor B can decode from observations
             self.mode = self.rng.choice([-1, 1])
         
         return self.s0_latent.copy()
     
     def get_mode_prototypes(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Get deterministic mode trajectories (no noise)."""
-        return self._generate_trajectory(mode=1, noise=False), \
-               self._generate_trajectory(mode=-1, noise=False)
+        """Get clean mode trajectories (no noise)."""
+        return (
+            self._generate_trajectory(mode=1, noise=False),
+            self._generate_trajectory(mode=-1, noise=False),
+        )
     
     def _generate_trajectory(self, mode: int, noise: bool = True) -> np.ndarray:
         """Generate trajectory for given mode."""
         traj = np.zeros((self.T, 2), dtype=np.float32)
         
         x, y, goal_x, goal_y = self.s0_latent
-        dx = goal_x - x
-        dy = goal_y - y
-        
+        dx, dy = goal_x - x, goal_y - y
         dist = np.sqrt(dx**2 + dy**2) + 1e-6
         d_unit = np.array([dx / dist, dy / dist])
         d_perp = np.array([-d_unit[1], d_unit[0]])
@@ -139,15 +133,8 @@ class BimodalEnv:
         return traj
     
     def generate_trajectory(self) -> np.ndarray:
-        """Generate trajectory for current mode (with noise)."""
+        """Generate trajectory for current mode."""
         return self._generate_trajectory(self.mode, noise=True)
-    
-    def get_realized_mode(self, trajectory: np.ndarray) -> int:
-        """Determine which mode a trajectory belongs to based on deviation."""
-        mode_plus, mode_minus = self.get_mode_prototypes()
-        d_plus = ((trajectory - mode_plus) ** 2).mean()
-        d_minus = ((trajectory - mode_minus) ** 2).mean()
-        return 1 if d_plus < d_minus else -1
 
 
 # =============================================================================
@@ -169,61 +156,164 @@ class FunctorNet(nn.Module):
         return self.net(z_A)
 
 
+class BayesCeilingClassifier(nn.Module):
+    """
+    Simple classifier: B_obs → mode prediction.
+    
+    Used to compute the Bayes ceiling: what mode accuracy can B achieve
+    from its observations alone, without any information from A?
+    
+    If ceiling is high, B's sensors carry mode information.
+    If ceiling is ~50%, B's sensors are truly "alien" (mode-blind).
+    """
+    
+    def __init__(self, obs_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+    
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """Returns logit for mode=+1."""
+        return self.net(obs).squeeze(-1)
+    
+    def predict_mode(self, obs: torch.Tensor) -> torch.Tensor:
+        """Returns predicted mode sign (+1 or -1)."""
+        with torch.no_grad():
+            logit = self.forward(obs)
+            return torch.sign(torch.tanh(logit))
+
+
+def train_bayes_ceiling(
+    obs_fn,
+    input_dim: int = 4,
+    n_samples: int = 5000,
+    n_epochs: int = 50,
+    batch_size: int = 256,
+    lr: float = 1e-3,
+    seed: int = 999,
+) -> Tuple[BayesCeilingClassifier, float]:
+    """
+    Train a classifier to predict mode from B's observations alone.
+    
+    IMPORTANT: Uses a fresh environment with RANDOM mode to measure
+    the true Bayes ceiling (what B can decode from obs alone).
+    
+    Returns:
+        classifier: Trained BayesCeilingClassifier
+        accuracy: Best validation accuracy (the "Bayes ceiling")
+    """
+    # Use a separate env with RANDOM mode for ceiling computation
+    ceiling_env = BimodalEnv(seed=seed, deterministic_mode=False)
+    
+    # Collect training data
+    obs_list, mode_list = [], []
+    
+    for _ in range(n_samples):
+        latent = ceiling_env.reset()
+        obs = obs_fn(latent)
+        mode = ceiling_env.mode
+        
+        obs_list.append(obs)
+        mode_list.append(1.0 if mode > 0 else 0.0)  # Binary label
+    
+    obs_data = torch.tensor(np.array(obs_list), dtype=torch.float32)
+    mode_data = torch.tensor(np.array(mode_list), dtype=torch.float32)
+    
+    # Split train/val
+    n_train = int(0.8 * n_samples)
+    obs_train, obs_val = obs_data[:n_train], obs_data[n_train:]
+    mode_train, mode_val = mode_data[:n_train], mode_data[n_train:]
+    
+    # Train classifier
+    obs_dim = obs_data.shape[1]
+    classifier = BayesCeilingClassifier(obs_dim)
+    optimizer = optim.Adam(classifier.parameters(), lr=lr)
+    criterion = nn.BCEWithLogitsLoss()
+    
+    best_acc = 0.5
+    
+    for epoch in range(n_epochs):
+        classifier.train()
+        perm = torch.randperm(n_train)
+        
+        for i in range(0, n_train, batch_size):
+            idx = perm[i:i+batch_size]
+            obs_batch = obs_train[idx]
+            mode_batch = mode_train[idx]
+            
+            logits = classifier(obs_batch)
+            loss = criterion(logits, mode_batch)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        
+        # Validation accuracy
+        classifier.eval()
+        with torch.no_grad():
+            val_logits = classifier(obs_val)
+            val_preds = (val_logits > 0).float()
+            val_acc = (val_preds == mode_val).float().mean().item()
+            best_acc = max(best_acc, val_acc)
+    
+    return classifier, best_acc
+
+
 # =============================================================================
 # 3) Training Functions
 # =============================================================================
 
 def train_actor(
-    actor: BimodalActor,
+    actor: MinimalCompetitiveActor,
     env: BimodalEnv,
-    obs_transform,  # callable: latent -> obs
-    bend_amplitude: float,
+    obs_transform,
     n_steps: int = 5000,
     log_every: int = 1000,
     name: str = "Actor",
-    use_latent_for_deviation: bool = False,  # If True, use original latent for d computation
 ) -> Dict[str, List[float]]:
-    """Train a BimodalActor with mode commitment."""
+    """Train a MinimalCompetitiveActor with mode commitment."""
     print(f"Training {name} for {n_steps} steps...")
     
     for step in range(n_steps):
         latent = env.reset()
         traj = env.generate_trajectory()
         
+        # Get mode prototypes for scoring
+        proto_plus, proto_minus = env.get_mode_prototypes()
+        prototypes = (
+            torch.tensor(proto_plus, dtype=torch.float32),
+            torch.tensor(proto_minus, dtype=torch.float32),
+        )
+        
         obs = obs_transform(latent)
         obs_t = torch.tensor(obs, dtype=torch.float32)
         traj_t = torch.tensor(traj, dtype=torch.float32)
-        latent_t = torch.tensor(latent, dtype=torch.float32)  # Original s0 for deviation
         
-        # BimodalActor uses CEM with mode commitment scoring
-        # For alien obs, we use obs for prediction but latent for deviation computation
-        if use_latent_for_deviation:
-            z, details = actor.select_z_cem(obs_t, bend_amplitude)
-            # Recompute d using original latent
-            d_signed = actor.compute_signed_deviation(details["mu"].unsqueeze(0), latent_t).item()
-        else:
-            z, details = actor.select_z_cem(obs_t, bend_amplitude)
+        # Select z via CEM with mode-prototype scoring
+        z, details = actor.select_z_cem(obs_t, prototypes, env.bend_amp)
         
-        mu = details["mu"]
-        sigma = details["sigma"]
-        
-        metrics = actor.train_step(obs_t, traj_t, z, mu, sigma, bend_amplitude)
+        # Train
+        metrics = actor.train_step(obs_t, traj_t, z, env.bend_amp)
         
         if step % log_every == 0:
             recent_bind = np.mean(actor.history["bind_hard"][-min(500, step+1):]) if actor.history["bind_hard"] else 0
             recent_mci = np.mean(actor.history["mci"][-min(500, step+1):]) if actor.history["mci"] else 0
             print(f"  Step {step}: bind={recent_bind:.3f}, MCI={recent_mci:.3f}")
     
-    return actor.history
+    return dict(actor.history)
 
 
 def collect_paired_data(
-    actor_A: BimodalActor,
-    actor_B: BimodalActor,
+    actor_A: MinimalCompetitiveActor,
+    actor_B: MinimalCompetitiveActor,
     env: BimodalEnv,
     obs_A_fn,
     obs_B_fn,
-    bend_amplitude: float,
     n_samples: int = 5000,
 ) -> Dict[str, np.ndarray]:
     """Collect paired (zA*, zB*, mode) from CEM binding."""
@@ -236,17 +326,23 @@ def collect_paired_data(
     
     for _ in range(n_samples):
         latent = env.reset()
-        latent_t = torch.tensor(latent, dtype=torch.float32)  # Original s0 for deviation
+        latent_t = torch.tensor(latent, dtype=torch.float32)
+        
+        # Mode prototypes (same for both since same underlying dynamics)
+        proto_plus, proto_minus = env.get_mode_prototypes()
+        prototypes = (
+            torch.tensor(proto_plus, dtype=torch.float32),
+            torch.tensor(proto_minus, dtype=torch.float32),
+        )
         
         obs_A = torch.tensor(obs_A_fn(latent), dtype=torch.float32)
         obs_B = torch.tensor(obs_B_fn(latent), dtype=torch.float32)
         
         with torch.no_grad():
-            z_A, details_A = actor_A.select_z_cem(obs_A, bend_amplitude)
-            z_B, details_B = actor_B.select_z_cem(obs_B, bend_amplitude)
+            z_A, details_A = actor_A.select_z_cem(obs_A, prototypes, env.bend_amp)
+            z_B, details_B = actor_B.select_z_cem(obs_B, prototypes, env.bend_amp)
             
-            # Compute signed deviation using ORIGINAL LATENT (not alien obs)
-            # This gives consistent mode measurement across A and B
+            # Compute signed deviation using ORIGINAL LATENT for consistent mode measurement
             d_signed_A = actor_A.compute_signed_deviation(details_A["mu"].unsqueeze(0), latent_t).item()
             d_signed_B = actor_B.compute_signed_deviation(details_B["mu"].unsqueeze(0), latent_t).item()
         
@@ -255,7 +351,6 @@ def collect_paired_data(
         d_A.append(d_signed_A)
         d_B.append(d_signed_B)
     
-    # Derive modes from signed deviation
     modes_A = np.sign(np.array(d_A))
     modes_B = np.sign(np.array(d_B))
     
@@ -276,26 +371,32 @@ def train_functor(
     batch_size: int = 256,
     lr: float = 1e-3,
     lambda_struct: float = 0.1,
-    filter_by_mode: bool = True,
+    shuffle_pairs: bool = False,
 ) -> Dict[str, List[float]]:
-    """Train functor F: zA → zB."""
+    """
+    Train functor F: zA → zB.
+    
+    Args:
+        shuffle_pairs: If True, shuffle Z_A independently of Z_B (ablation).
+                       This breaks the correspondence and should collapse 
+                       transfer to Bayes ceiling if A's commitment is the bridge.
+    """
     optimizer = optim.Adam(functor.parameters(), lr=lr)
     
-    # Filter to pairs where A and B committed to the same mode
-    if filter_by_mode and "modes_A" in pairs and "modes_B" in pairs:
-        mask = pairs["modes_A"] == pairs["modes_B"]
-        Z_A = torch.tensor(pairs["Z_A"][mask], dtype=torch.float32)
-        Z_B = torch.tensor(pairs["Z_B"][mask], dtype=torch.float32)
-        print(f"  Filtered to {mask.sum()}/{len(mask)} mode-aligned pairs ({mask.mean():.1%})")
-    else:
-        Z_A = torch.tensor(pairs["Z_A"], dtype=torch.float32)
-        Z_B = torch.tensor(pairs["Z_B"], dtype=torch.float32)
-    
+    Z_A = torch.tensor(pairs["Z_A"], dtype=torch.float32)
+    Z_B = torch.tensor(pairs["Z_B"], dtype=torch.float32)
     N = Z_A.shape[0]
+    
+    if shuffle_pairs:
+        # Shuffle Z_A to break correspondence (ablation)
+        shuffle_idx = torch.randperm(N)
+        Z_A = Z_A[shuffle_idx]
+        print(f"  [SHUFFLE ABLATION] Breaking z_A ↔ z_B correspondence")
     
     history = {"loss": [], "align_loss": [], "struct_loss": []}
     
-    print(f"Training functor for {n_epochs} epochs...")
+    label = "shuffled functor" if shuffle_pairs else "functor"
+    print(f"Training {label} for {n_epochs} epochs...")
     
     for epoch in range(n_epochs):
         perm = torch.randperm(N)
@@ -308,8 +409,10 @@ def train_functor(
             
             z_B_hat = functor(z_A)
             
+            # Alignment loss
             align_loss = ((z_B_hat - z_B) ** 2).mean()
             
+            # Structure preservation (pairwise distances)
             B = z_A.shape[0]
             if B > 1:
                 D_B = torch.cdist(z_B, z_B)
@@ -341,34 +444,55 @@ def train_functor(
 # =============================================================================
 
 def evaluate_transfer(
-    actor_A: BimodalActor,
-    actor_B: BimodalActor,
+    actor_A: MinimalCompetitiveActor,
+    actor_B: MinimalCompetitiveActor,
     functor: FunctorNet,
     env: BimodalEnv,
     obs_A_fn,
     obs_B_fn,
-    bend_amplitude: float,
     n_samples: int = 500,
+    functor_label: str = "transfer",
+    use_random_mode: bool = True,  # Force random mode during eval
 ) -> Dict[str, Dict]:
-    """Evaluate transfer with mode agreement metric."""
+    """
+    Evaluate transfer with mode agreement metric.
+    
+    IMPORTANT: use_random_mode=True ensures B can't exploit learned obs→mode
+    mappings during evaluation. Mode agreement must come from the functor.
+    """
     actor_A.eval()
     actor_B.eval()
     functor.eval()
     
+    # Temporarily override mode setting if needed
+    original_deterministic = env.deterministic_mode
+    if use_random_mode:
+        env.deterministic_mode = False
+    
     results = {
-        "transfer": defaultdict(list),
+        functor_label: defaultdict(list),
         "B_CEM": defaultdict(list),
         "B_random": defaultdict(list),
     }
     mode_agreements = []
+    A_correct_list = []  # How often A commits to correct mode (upper bound)
     d_A_list, d_transfer_list = [], []
+    true_modes = []
     
-    print(f"Evaluating on {n_samples} samples...")
+    print(f"Evaluating {functor_label} on {n_samples} samples (random_mode={use_random_mode})...")
     
     for _ in range(n_samples):
         latent = env.reset()
         traj = env.generate_trajectory()
-        latent_t = torch.tensor(latent, dtype=torch.float32)  # Original s0 for deviation
+        latent_t = torch.tensor(latent, dtype=torch.float32)
+        true_mode = env.mode
+        true_modes.append(true_mode)
+        
+        proto_plus, proto_minus = env.get_mode_prototypes()
+        prototypes = (
+            torch.tensor(proto_plus, dtype=torch.float32),
+            torch.tensor(proto_minus, dtype=torch.float32),
+        )
         
         obs_A = torch.tensor(obs_A_fn(latent), dtype=torch.float32)
         obs_B = torch.tensor(obs_B_fn(latent), dtype=torch.float32)
@@ -376,32 +500,42 @@ def evaluate_transfer(
         
         with torch.no_grad():
             # 1. Transfer: zA* from A, map through F
-            z_A, details_A = actor_A.select_z_cem(obs_A, bend_amplitude)
+            z_A, details_A = actor_A.select_z_cem(obs_A, prototypes, env.bend_amp)
             z_B_transfer = functor(z_A.unsqueeze(0)).squeeze(0)
             mu_trans, sigma_trans = actor_B.predict_tube(obs_B, z_B_transfer)
             mu_trans = mu_trans.squeeze(0)
             sigma_trans = sigma_trans.squeeze(0)
             
             # 2. B-CEM
-            z_B_cem, details_B_CEM = actor_B.select_z_cem(obs_B, bend_amplitude)
+            z_B_cem, details_B_CEM = actor_B.select_z_cem(obs_B, prototypes, env.bend_amp)
             
             # 3. B-random
             z_B_rand, details_B_rand = actor_B.select_z_random(obs_B)
             
-            # Mode agreement: compare signed deviations using ORIGINAL LATENT
+            # Mode agreement: compare A's commitment against TRUE MODE
+            # This is the fair test: does the functor map A→B preserving mode intent?
             d_A = actor_A.compute_signed_deviation(details_A["mu"].unsqueeze(0), latent_t).item()
             d_transfer = actor_B.compute_signed_deviation(mu_trans.unsqueeze(0), latent_t).item()
             
             d_A_list.append(d_A)
             d_transfer_list.append(d_transfer)
             
-            # Mode agreement: same sign = same mode commitment
-            mode_agree = (np.sign(d_A) == np.sign(d_transfer)) if abs(d_A) > 0.02 and abs(d_transfer) > 0.02 else False
-            mode_agreements.append(1.0 if mode_agree else 0.0)
+            # Mode agreement: A's commitment matches TRUE mode
+            # (d > 0 means committed to mode +1, d < 0 means committed to mode -1)
+            A_mode_commit = np.sign(d_A) if abs(d_A) > 0.02 else 0
+            transfer_mode_commit = np.sign(d_transfer) if abs(d_transfer) > 0.02 else 0
+            
+            # Does A commit to correct mode? (upper bound - A can see normal obs)
+            A_correct = (A_mode_commit == true_mode) if A_mode_commit != 0 else False
+            A_correct_list.append(1.0 if A_correct else 0.0)
+            
+            # Does transfer commit to correct mode?
+            transfer_correct = (transfer_mode_commit == true_mode) if transfer_mode_commit != 0 else False
+            mode_agreements.append(1.0 if transfer_correct else 0.0)
             
             # Evaluate all methods
             for name, mu, sigma in [
-                ("transfer", mu_trans, sigma_trans),
+                (functor_label, mu_trans, sigma_trans),
                 ("B_CEM", details_B_CEM["mu"], details_B_CEM["sigma"]),
                 ("B_random", details_B_rand["mu"], details_B_rand["sigma"]),
             ]:
@@ -413,32 +547,33 @@ def evaluate_transfer(
                 results[name]["log_vol"].append(log_vol)
                 results[name]["mse"].append(mse)
     
+    # Restore original mode setting
+    env.deterministic_mode = original_deterministic
+    
     # Summarize
     summary = {}
     for name in results:
         summary[name] = {
-            "bind_mean": np.mean(results[name]["bind"]),
-            "bind_std": np.std(results[name]["bind"]),
-            "log_vol_mean": np.mean(results[name]["log_vol"]),
-            "log_vol_std": np.std(results[name]["log_vol"]),
-            "mse_mean": np.mean(results[name]["mse"]),
+            "bind_mean": float(np.mean(results[name]["bind"])),
+            "bind_std": float(np.std(results[name]["bind"])),
+            "log_vol_mean": float(np.mean(results[name]["log_vol"])),
+            "log_vol_std": float(np.std(results[name]["log_vol"])),
+            "mse_mean": float(np.mean(results[name]["mse"])),
         }
     
     summary["mode_agreement"] = {
-        "mean": np.mean(mode_agreements),
-        "std": np.std(mode_agreements),
+        "mean": float(np.mean(mode_agreements)),
+        "std": float(np.std(mode_agreements)),
         "n": len(mode_agreements),
     }
     
-    # Correlation between A's d and transfer's d
+    # A's accuracy (upper bound for transfer)
+    summary["A_mode_accuracy"] = float(np.mean(A_correct_list))
+    
     d_corr = np.corrcoef(d_A_list, d_transfer_list)[0, 1] if len(d_A_list) > 1 else 0
     summary["d_correlation"] = float(d_corr) if not np.isnan(d_corr) else 0
     
-    print(f"\nResults:")
-    for name in ["B_random", "transfer", "B_CEM"]:
-        print(f"  {name}: bind={summary[name]['bind_mean']:.3f}, vol={summary[name]['log_vol_mean']:.2f}")
-    print(f"  Mode Agreement: {summary['mode_agreement']['mean']:.1%}")
-    print(f"  d Correlation (A vs Transfer): {summary['d_correlation']:.3f}")
+    print(f"  {functor_label}: bind={summary[functor_label]['bind_mean']:.3f}, mode_agr={summary['mode_agreement']['mean']:.1%}, A_acc={summary['A_mode_accuracy']:.1%}")
     
     return summary
 
@@ -448,7 +583,7 @@ def evaluate_transfer(
 # =============================================================================
 
 def plot_training(hist_A: Dict, hist_B: Dict, out_path: Path):
-    """Plot training curves for BimodalActor."""
+    """Plot training curves."""
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     
     window = 100
@@ -476,7 +611,7 @@ def plot_training(hist_A: Dict, hist_B: Dict, out_path: Path):
     axes[0, 2].legend()
     axes[0, 2].grid(True, alpha=0.3)
     
-    # Row 2: Mode commitment metrics
+    # Row 2: Mode commitment
     axes[1, 0].plot(smooth(hist_A["mci"]), label='Actor A', color='blue')
     axes[1, 0].plot(smooth(hist_B["mci"]), label='Actor B (Alien)', color='red')
     axes[1, 0].set_title("Mode Commitment Index")
@@ -490,9 +625,9 @@ def plot_training(hist_A: Dict, hist_B: Dict, out_path: Path):
     axes[1, 1].legend()
     axes[1, 1].grid(True, alpha=0.3)
     
-    axes[1, 2].plot(hist_A["lambda"], label='Actor A', color='blue')
-    axes[1, 2].plot(hist_B["lambda"], label='Actor B (Alien)', color='red')
-    axes[1, 2].set_title("Lambda")
+    axes[1, 2].plot(smooth(hist_A["nll"]), label='Actor A', color='blue')
+    axes[1, 2].plot(smooth(hist_B["nll"]), label='Actor B (Alien)', color='red')
+    axes[1, 2].set_title("NLL Loss")
     axes[1, 2].legend()
     axes[1, 2].grid(True, alpha=0.3)
     
@@ -502,10 +637,9 @@ def plot_training(hist_A: Dict, hist_B: Dict, out_path: Path):
 
 
 def analyze_basin_structure(
-    actor: BimodalActor,
+    actor: MinimalCompetitiveActor,
     env: BimodalEnv,
     obs_fn,
-    bend_amplitude: float,
     n_samples: int = 500,
     name: str = "Actor",
 ) -> Dict[str, float]:
@@ -517,12 +651,17 @@ def analyze_basin_structure(
     
     for _ in range(n_samples):
         latent = env.reset()
-        latent_t = torch.tensor(latent, dtype=torch.float32)  # Original s0 for deviation
+        latent_t = torch.tensor(latent, dtype=torch.float32)
         obs = torch.tensor(obs_fn(latent), dtype=torch.float32)
         
+        proto_plus, proto_minus = env.get_mode_prototypes()
+        prototypes = (
+            torch.tensor(proto_plus, dtype=torch.float32),
+            torch.tensor(proto_minus, dtype=torch.float32),
+        )
+        
         with torch.no_grad():
-            z, details = actor.select_z_cem(obs, bend_amplitude)
-            # Use original latent for deviation computation
+            z, details = actor.select_z_cem(obs, prototypes, env.bend_amp)
             d_signed = actor.compute_signed_deviation(details["mu"].unsqueeze(0), latent_t).item()
             d_values.append(d_signed)
             
@@ -531,24 +670,19 @@ def analyze_basin_structure(
             else:
                 z_minus.append(z.numpy())
     
-    z_plus = np.array(z_plus)
-    z_minus = np.array(z_minus)
+    z_plus = np.array(z_plus) if z_plus else np.array([]).reshape(0, actor.z_dim)
+    z_minus = np.array(z_minus) if z_minus else np.array([]).reshape(0, actor.z_dim)
     
-    # Compute separation metrics
     if len(z_plus) > 10 and len(z_minus) > 10:
         mean_plus = z_plus.mean(axis=0)
         mean_minus = z_minus.mean(axis=0)
         
-        # Distance between basin centers
         basin_distance = np.linalg.norm(mean_plus - mean_minus)
-        
-        # Average within-basin spread
         spread_plus = np.sqrt(((z_plus - mean_plus) ** 2).sum(axis=1)).mean()
         spread_minus = np.sqrt(((z_minus - mean_minus) ** 2).sum(axis=1)).mean()
         avg_spread = (spread_plus + spread_minus) / 2
-        
-        # Separation ratio (higher = more distinct basins)
         separation_ratio = basin_distance / (avg_spread + 1e-6)
+        mci_mean = np.abs(np.array(d_values)).mean() / env.bend_amp
         
         print(f"  {name} basin analysis:")
         print(f"    Mode+ samples: {len(z_plus)}, Mode- samples: {len(z_minus)}")
@@ -556,16 +690,13 @@ def analyze_basin_structure(
         print(f"    Avg spread: {avg_spread:.3f}")
         print(f"    Separation ratio: {separation_ratio:.2f} (>2 = good separation)")
         
-        # Also compute MCI (Mode Commitment Index)
-        mci_mean = np.abs(np.array(d_values)).mean() / bend_amplitude if 'd_values' in dir() else 0
-        
         return {
             "basin_distance": float(basin_distance),
             "avg_spread": float(avg_spread),
             "separation_ratio": float(separation_ratio),
             "n_plus": len(z_plus),
             "n_minus": len(z_minus),
-            "mci_mean": float(mci_mean) if 'mci_mean' in dir() else 0,
+            "mci_mean": float(mci_mean),
         }
     else:
         print(f"  {name}: Not enough samples in both modes")
@@ -573,13 +704,12 @@ def analyze_basin_structure(
 
 
 def plot_z_space(
-    actor_A: BimodalActor,
-    actor_B: BimodalActor,
+    actor_A: MinimalCompetitiveActor,
+    actor_B: MinimalCompetitiveActor,
     env: BimodalEnv,
     obs_A_fn,
     obs_B_fn,
     out_path: Path,
-    bend_amplitude: float = 0.15,
     n_samples: int = 300,
 ):
     """Visualize z-space basin structure for both actors."""
@@ -590,15 +720,20 @@ def plot_z_space(
     
     for _ in range(n_samples):
         latent = env.reset()
-        latent_t = torch.tensor(latent, dtype=torch.float32)  # Original s0 for deviation
+        latent_t = torch.tensor(latent, dtype=torch.float32)
         obs_A = torch.tensor(obs_A_fn(latent), dtype=torch.float32)
         obs_B = torch.tensor(obs_B_fn(latent), dtype=torch.float32)
         
+        proto_plus, proto_minus = env.get_mode_prototypes()
+        prototypes = (
+            torch.tensor(proto_plus, dtype=torch.float32),
+            torch.tensor(proto_minus, dtype=torch.float32),
+        )
+        
         with torch.no_grad():
-            z_A, details_A = actor_A.select_z_cem(obs_A, bend_amplitude)
-            z_B, details_B = actor_B.select_z_cem(obs_B, bend_amplitude)
+            z_A, details_A = actor_A.select_z_cem(obs_A, prototypes, env.bend_amp)
+            z_B, details_B = actor_B.select_z_cem(obs_B, prototypes, env.bend_amp)
             
-            # Use original latent for deviation computation
             d_A = actor_A.compute_signed_deviation(details_A["mu"].unsqueeze(0), latent_t).item()
             d_B = actor_B.compute_signed_deviation(details_B["mu"].unsqueeze(0), latent_t).item()
             
@@ -704,8 +839,7 @@ def main():
     parser.add_argument("--eval-samples", type=int, default=500)
     parser.add_argument("--z-dim", type=int, default=4)
     parser.add_argument("--alien-dim", type=int, default=64)
-    parser.add_argument("--bend-amplitude", type=float, default=0.15,
-                        help="Mode separation amplitude")
+    parser.add_argument("--bend-amplitude", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     
@@ -720,7 +854,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\n{'='*60}")
-    print(f"Alien Sensors Experiment")
+    print(f"Alien Sensors Experiment (Minimal Actor + Fairness Controls)")
     print(f"Level: {alien_level.name}")
     print(f"Output: {out_dir}")
     print(f"{'='*60}\n")
@@ -728,8 +862,8 @@ def main():
     with open(out_dir / "config.json", "w") as f:
         json.dump(vars(args), f, indent=2)
     
-    # Environment
-    env = BimodalEnv(seed=args.seed)
+    # Environment: DETERMINISTIC mode for consistent A↔B mapping
+    env = BimodalEnv(seed=args.seed, bend_amp=args.bend_amplitude, deterministic_mode=True)
     
     # Observation transforms
     obs_A_fn = lambda x: x  # Identity for A
@@ -747,56 +881,100 @@ def main():
         obs_B_fn = alien_wrapper
         obs_B_dim = alien_wrapper.obs_dim
     
-    # Actors (using BimodalActor with mode commitment)
-    actor_A = BimodalActor(obs_dim=4, z_dim=args.z_dim, T=16)
-    actor_B = BimodalActor(obs_dim=obs_B_dim, z_dim=args.z_dim, T=16)
+    # =========================================================================
+    # FAIRNESS CONTROL 1: Bayes Ceiling
+    # What mode accuracy can B achieve from observations alone?
+    # Uses RANDOM mode to measure true information content of B's obs.
+    # =========================================================================
+    print("\n[Bayes Ceiling] Training classifier: B_obs → mode (random mode)")
+    ceiling_classifier, bayes_ceiling = train_bayes_ceiling(
+        obs_B_fn, input_dim=4, n_samples=args.pair_samples, seed=args.seed + 5000
+    )
+    print(f"  Bayes Ceiling (B_obs → mode): {bayes_ceiling:.1%}")
+    print(f"  (If ceiling ≈ 50%, B's sensors are truly mode-blind)")
+    print(f"  (Training/pairing use deterministic mode for consistent mappings)")
     
-    bend_amplitude = args.bend_amplitude
+    # Actors (using MinimalCompetitiveActor)
+    actor_A = MinimalCompetitiveActor(obs_dim=4, z_dim=args.z_dim, T=16)
+    actor_B = MinimalCompetitiveActor(obs_dim=obs_B_dim, z_dim=args.z_dim, T=16)
     
     # === Stage 0: Train Actor A ===
     print("\n[Stage 0] Training Actor A (normal obs)")
-    hist_A = train_actor(actor_A, env, obs_A_fn, bend_amplitude, n_steps=args.actor_steps, name="A")
+    hist_A = train_actor(actor_A, env, obs_A_fn, n_steps=args.actor_steps, name="A")
     torch.save(actor_A.state_dict(), out_dir / "actor_A.pt")
     
     # === Stage 1: Train Actor B (alien obs) ===
     print(f"\n[Stage 1] Training Actor B ({alien_level.name} obs)")
-    hist_B = train_actor(actor_B, env, obs_B_fn, bend_amplitude, n_steps=args.actor_steps, name="B")
+    hist_B = train_actor(actor_B, env, obs_B_fn, n_steps=args.actor_steps, name="B")
     torch.save(actor_B.state_dict(), out_dir / "actor_B.pt")
     
     plot_training(hist_A, hist_B, out_dir / "training.png")
     
     # === Basin Analysis ===
     print("\n[Basin Analysis] Checking z-space structure")
-    basin_A = analyze_basin_structure(actor_A, env, obs_A_fn, bend_amplitude, n_samples=500, name="A")
-    basin_B = analyze_basin_structure(actor_B, env, obs_B_fn, bend_amplitude, n_samples=500, name="B")
+    basin_A = analyze_basin_structure(actor_A, env, obs_A_fn, n_samples=500, name="A")
+    basin_B = analyze_basin_structure(actor_B, env, obs_B_fn, n_samples=500, name="B")
     
     try:
-        plot_z_space(actor_A, actor_B, env, obs_A_fn, obs_B_fn, out_dir / "z_space.png", bend_amplitude)
+        plot_z_space(actor_A, actor_B, env, obs_A_fn, obs_B_fn, out_dir / "z_space.png")
     except ImportError:
         print("  (sklearn not available for PCA visualization)")
     
-    # === Stage 2: Train Functor ===
-    print("\n[Stage 2] Collecting paired data and training functor")
-    pairs = collect_paired_data(actor_A, actor_B, env, obs_A_fn, obs_B_fn, bend_amplitude, n_samples=args.pair_samples)
+    # === Stage 2: Collect Paired Data ===
+    print("\n[Stage 2] Collecting paired data")
+    pairs = collect_paired_data(actor_A, actor_B, env, obs_A_fn, obs_B_fn, n_samples=args.pair_samples)
     np.savez(out_dir / "pairs.npz", **pairs)
     
-    # Check mode agreement in paired data
     pair_agreement = (pairs["modes_A"] == pairs["modes_B"]).mean()
     print(f"  Pair mode agreement (A vs B native): {pair_agreement:.1%}")
     
-    # d correlation shows how well commitment directions align
     d_corr = np.corrcoef(pairs["d_A"], pairs["d_B"])[0, 1]
     print(f"  d correlation (A vs B): {d_corr:.3f}")
     
+    # === Stage 2a: Train Normal Functor ===
+    print("\n[Stage 2a] Training NORMAL functor (z_A → z_B)")
     functor = FunctorNet(z_dim=args.z_dim)
-    # Don't filter - let functor learn any correspondence
-    functor_hist = train_functor(functor, pairs, n_epochs=args.functor_epochs, filter_by_mode=False)
+    functor_hist = train_functor(functor, pairs, n_epochs=args.functor_epochs, shuffle_pairs=False)
     torch.save(functor.state_dict(), out_dir / "functor.pt")
     
-    # === Stage 3: Evaluate ===
-    print("\n[Stage 3] Evaluating transfer")
-    summary = evaluate_transfer(actor_A, actor_B, functor, env, obs_A_fn, obs_B_fn, bend_amplitude, n_samples=args.eval_samples)
+    # =========================================================================
+    # FAIRNESS CONTROL 2: Shuffle Ablation
+    # Train functor with shuffled z_A to break correspondence.
+    # If transfer still works, there's leakage; if it collapses to ceiling, A is the bridge.
+    # =========================================================================
+    print("\n[Stage 2b] Training SHUFFLED functor (ablation)")
+    functor_shuffled = FunctorNet(z_dim=args.z_dim)
+    _ = train_functor(functor_shuffled, pairs, n_epochs=args.functor_epochs, shuffle_pairs=True)
+    torch.save(functor_shuffled.state_dict(), out_dir / "functor_shuffled.pt")
     
+    # === Stage 3: Evaluate Normal Transfer ===
+    print("\n[Stage 3a] Evaluating NORMAL transfer")
+    summary = evaluate_transfer(
+        actor_A, actor_B, functor, env, obs_A_fn, obs_B_fn,
+        n_samples=args.eval_samples, functor_label="transfer"
+    )
+    
+    # === Stage 3b: Evaluate Shuffled Transfer (Ablation) ===
+    print("\n[Stage 3b] Evaluating SHUFFLED transfer (ablation)")
+    summary_shuffled = evaluate_transfer(
+        actor_A, actor_B, functor_shuffled, env, obs_A_fn, obs_B_fn,
+        n_samples=args.eval_samples, functor_label="transfer_shuffled"
+    )
+    
+    # =========================================================================
+    # Compute Lift and Compile Results
+    # =========================================================================
+    transfer_acc = summary["mode_agreement"]["mean"]
+    shuffle_acc = summary_shuffled["mode_agreement"]["mean"]
+    lift = transfer_acc - bayes_ceiling
+    shuffle_lift = shuffle_acc - bayes_ceiling
+    
+    summary["bayes_ceiling"] = float(bayes_ceiling)
+    summary["lift"] = float(lift)
+    summary["shuffle_ablation"] = {
+        "mode_agreement": summary_shuffled["mode_agreement"],
+        "lift": float(shuffle_lift),
+    }
     summary["pair_mode_agreement"] = float(pair_agreement)
     summary["basin_A"] = basin_A
     summary["basin_B"] = basin_B
@@ -808,12 +986,19 @@ def main():
     
     # === Final Report ===
     print(f"\n{'='*60}")
-    print("ALIEN SENSORS RESULTS")
+    print("ALIEN SENSORS RESULTS (with Fairness Controls)")
     print(f"{'='*60}")
     
-    ma = summary["mode_agreement"]["mean"]
-    trans_bind = summary["transfer"]["bind_mean"]
-    cem_bind = summary["B_CEM"]["bind_mean"]
+    print(f"\n┌─────────────────────────────────────────────────────────┐")
+    print(f"│  FAIRNESS METRICS                                       │")
+    print(f"├─────────────────────────────────────────────────────────┤")
+    print(f"│  Bayes Ceiling (B_obs → mode):  {bayes_ceiling:>6.1%}                 │")
+    print(f"│  Transfer Accuracy:             {transfer_acc:>6.1%}                 │")
+    print(f"│  Lift (Transfer - Ceiling):     {lift:>+6.1%}                 │")
+    print(f"├─────────────────────────────────────────────────────────┤")
+    print(f"│  Shuffle Ablation Accuracy:     {shuffle_acc:>6.1%}                 │")
+    print(f"│  Shuffle Lift:                  {shuffle_lift:>+6.1%}                 │")
+    print(f"└─────────────────────────────────────────────────────────┘")
     
     print(f"\nBasin Structure:")
     if basin_A:
@@ -821,21 +1006,36 @@ def main():
     if basin_B:
         print(f"  B separation ratio: {basin_B.get('separation_ratio', 0):.2f}")
     
-    print(f"\nPair Mode Agreement (A vs B): {pair_agreement:.1%}")
-    print(f"Transfer Mode Agreement: {ma:.1%}")
-    print(f"Transfer Bind: {trans_bind:.3f}")
+    trans_bind = summary["transfer"]["bind_mean"]
+    cem_bind = summary["B_CEM"]["bind_mean"]
+    print(f"\nTransfer Bind: {trans_bind:.3f}")
     print(f"B-CEM Bind: {cem_bind:.3f}")
     
-    # Success criteria
-    agreement_ok = ma > 0.85
+    # Success criteria (updated with fairness)
+    lift_positive = lift > 0.05  # Transfer adds >5% over B's own ceiling
+    shuffle_collapsed = shuffle_acc < bayes_ceiling + 0.10  # Shuffle near ceiling
+    agreement_ok = transfer_acc > 0.85
     bind_ok = abs(trans_bind - cem_bind) < 0.05
     
     print(f"\nSuccess Criteria:")
+    print(f"  {'✓' if lift_positive else '✗'} Positive lift (Transfer > Ceiling + 5%)")
+    print(f"  {'✓' if shuffle_collapsed else '✗'} Shuffle ablation collapses (~ceiling)")
     print(f"  {'✓' if agreement_ok else '✗'} Mode agreement > 85%")
     print(f"  {'✓' if bind_ok else '✗'} Transfer matches B-CEM bind")
     
-    if agreement_ok and bind_ok:
-        print(f"\n🎉 SUCCESS: Topological bridge works at {alien_level.name}!")
+    # Interpretation
+    print(f"\nInterpretation:")
+    if lift_positive and shuffle_collapsed:
+        print(f"  ✓ A's commitment IS the bridge (not B's sensor leakage)")
+    elif not lift_positive:
+        print(f"  ⚠ B can already infer mode from sensors (low lift)")
+    elif not shuffle_collapsed:
+        print(f"  ⚠ Possible leakage: shuffle should collapse to ceiling")
+    
+    if agreement_ok and bind_ok and lift_positive and shuffle_collapsed:
+        print(f"\n🎉 STRONG RESULT: Topological bridge verified at {alien_level.name}!")
+    elif agreement_ok and bind_ok:
+        print(f"\n✓ Transfer works at {alien_level.name} (but see fairness caveats)")
     else:
         print(f"\n⚠ Transfer not fully achieved at {alien_level.name}")
     

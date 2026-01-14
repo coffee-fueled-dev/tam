@@ -1,41 +1,73 @@
-The **Trajectory-Affordance Model (TAM)** is a teleological framework that treats intelligence as the capacity to negotiate commitments with the future. Unlike traditional Reinforcement Learning, which maximizes a scalar reward, TAM defines an agent's "agency" by its ability to select and maintain specific, low-entropy "tubes" in trajectory space.
+## The Philosophy of Agency through Geometry
 
-### 1. The Core Ontology
+At its core, this model operates on the principle that agency is the ability to make and maintain a specific commitment in the face of environmental uncertainty. Rather than predicting a single future point, the model generates a **volumetric envelope**—a "tube" in trajectory space—that represents its intended path and its allowed tolerance. This tube is a physical contract: the model defines a mean spine representing its intent and a time-varying radius representing its commitment to precision. The model’s fundamental objective is to minimize the total volume of these tubes (Agency) while ensuring that the environment’s realized trajectory remains strictly within the tube's boundaries (Binding Success).
 
-The model operates on a cycle of **situations** and **bindings**:
+## The Geometric Contract and Binding
 
-- **Situation (sₙ):** An indexed instance of internal state and prior context that marks a specific point in a causal chain.
-- **Ports (p):** Modes of interaction that define **Affordance Cones**—the set of all future trajectories an agent is willing to accept for that mode.
-- **Binding:** The transition from one situation to the next when the world's response falls within the agent's chosen cone.
+The "Geometric Contract" is the mathematical tension between **Agency** and **Rationality**. Agency is defined as the drive to "crush" the volume of the commitment; a lower-volume tube represents a more specific, higher-fidelity intent. However, this drive is constrained by the environment's physical reality. If the model makes a commitment that is too narrow to accommodate the environment's discontinuous dynamics or noise, the contract is "broken," resulting in a massive "leakage" penalty. Mathematically, the binding success is governed by a hinge loss where the realized state must satisfy . This forces the model to expand its tolerance only where the environment is unpredictable and to tighten it where the world is controllable.
 
-### 2. Operationalizing Agency
+## Self-Organization of Latent Ports
 
-In TAM, agency is not a vague philosophical concept but a measurable geometric property:
+The most critical feature of this model is how it handles environmental discontinuities. In complex worlds, a single latent representation cannot satisfy binding for multiple distinct behaviors without requiring an enormous, "lazy" volume. To regain its agency, the model is forced to **shatter its latent space** into discrete attractors, or "Ports." These ports represent different regimes of the environment—for example, one port might emerge to handle the dynamics of grasping an object, while another handles the dynamics of free-space motion. During training, the model uses a contrastive signal to push these representations apart, ensuring that the latent space organizes into distinct islands of intent that correspond to the natural "modes" of the world.
 
-- **Agency as Compression:** Agency is inversely correlated with the width of the affordance cone. A "smart" agent exerts agency by committing to a narrow, specific future (minimal tube volume) while ensuring that the "bind" remains reliable.
-- **The Zero-Agency Baseline:** An agent that accepts any possible future has an agency of zero.
+## Rational Commitment and Inference
 
-### 3. The Deliberation Engine (Competitive Binding)
+During inference, the model does not simply "react" to its current state . Instead, it engages in a process of **Rational Commitment** via the Cross-Entropy Method (CEM). It samples various candidate values from its latent space and "imagines" the resulting tubes. It then selects the that offers the most "rational" bet: the one that minimizes volume while maximizing the probability of binding success given the current state. This allows the model to exhibit **will**—selecting a specific port and following through on that commitment even if the environment provides a distracting signal, so long as the original geometric contract remains unbroken.
 
-The implementation uses a **Cross-Entropy Method (CEM)** to simulate "thinking" before acting. The agent evaluates candidate commitments (z) based on a tri-part scoring function:
+## The Architectural Bottleneck
 
-1. **Intent Proxy:** How accurately the commitment predicts the desired outcome.
-2. **Agency:** The tightness of the predicted trajectory tube (rewarding precision).
-3. **Risk Pred (Reliability):** A learned critic's estimate of whether the world will actually stay within that tube.
+To ensure the model learns "will" over "reaction," the architecture employs a deliberate bottleneck. The path for the current observation is kept extremely narrow, while the path for the latent commitment is deep and wide. This physical imbalance prevents the model from relying on "coordinate leakage"—where it simply maps its current position to an action—and instead forces it to find a high-level intent that can govern the entire trajectory. By making the observation a secondary signal, we ensure that the generated tube is a product of the model’s internal attractors, grounding its actions in a self-organized map of environmental possibilities.
 
-### 4. Key Empirical Insights
+## Formulation
 
-- **Rejection of Hedging:** In bimodal environments where two different futures are possible, a standard model might "hedge" by predicting a vague middle ground. TAM forces a **mode commitment**, where the agent chooses one specific path (e.g., "Left" or "Right") and rejects the high-entropy middle.
-- **Homeostasis of Control:** The agent constantly seeks an equilibrium where it is as precise as possible without being so rigid that it constantly "breaks the bind" with reality.
+This section provides the formal mathematical framework for the Self-Organizing Geometric Commitment Model, bridging the abstract concept of "will" with the specific implementation details of the Geometric Knot Actor.
 
-### 5. Empirical Studies
+---
 
-| Study                               | Focus                                                          |
-| ----------------------------------- | -------------------------------------------------------------- |
-| `studies/tube_geometry/`            | Core mechanism: z controls tube geometry (σ depends only on z) |
-| `studies/homeostasis/`              | Self-calibrating λ discovers optimal bind rate per environment |
-| `studies/competitive-port-binding/` | CEM deliberation; bimodal commitment vs hedging                |
+### I. The Geometric Primitive: The Knot-Based Tube
 
-### Summary for Researchers
+The commitment is defined as a trajectory envelope in -dimensional space over timesteps. To ensure geometric smoothness and reduce the degrees of freedom, the model predicts a set of discrete **Knots**, which are then interpolated to form the full tube.
 
-TAM can be described as a **geometric theory of intent**. It shifts the focus of AI from "what action is best" to "what future am I willing to accept?" This makes it particularly relevant to **AI Safety** (ensuring predictable, steerable behavior) and **Mechanistic Interpretability** (mapping internal latent modes to explicit future commitments).
+**The Spine (Intent):** The spine represents the intended path. It is generated by a mapping , where is the initial state and is the latent commitment.
+
+Where and are embedding functions with a deliberate parameter imbalance (The Bottleneck).
+
+**The Tolerance (Certainty):** Crucially, the tolerance is a function of the latent commitment alone, representing a "commitment to precision" that is independent of the immediate environment.
+
+The resulting tube at any time is the ball , where is a scaling constant (often set to 1.0 or 2.0).
+
+### II. The Objective Function: The Geometric Contract
+
+The model is trained by minimizing a multi-objective loss function that balances the competing pressures of Agency, Rationality, and Self-Organization.
+
+**1. Agency (Volume Pressure):** The model is incentivized to minimize the "space" it claims in the future.
+
+In implementation, this is often the mean of the values, acting as a pressure to crush the tube toward a deterministic line.
+
+**2. Rationality (Binding Success):** The model must account for the realized environment trajectory . If the environment "leaks" out of the tube, a hinge loss is applied.
+
+This creates a "physical floor" for ; the model cannot satisfy the contract if it is more precise than the environment allows.
+
+**3. Self-Organization (Intent Contrast):** To prevent all commitments from collapsing into a single "average" path, a Supervised Contrastive Loss () is applied to the latent space. If two trajectories and belong to the same environmental mode (Port), their embeddings and are pulled together; otherwise, they are pushed apart.
+
+### III. Rational Commitment (Inference via CEM)
+
+At inference time, the model does not have access to the future trajectory and must instead "bet" on a that it believes will satisfy the contract. This is formulated as a search for the optimal using the Cross-Entropy Method (CEM):
+
+Where:
+
+- \*\*\*\*: Preference for high-precision commitments.
+- \*\*\*\*: A "Binding Anchor" that ensures the commitment starts exactly where the agent is currently positioned.
+
+By iterating through generations of samples, the model selects the most "resolute" path that is physically grounded in its current state, effectively choosing which "Port" to activate.
+
+### IV. The Architectural Bottleneck Specs
+
+To force the model to rely on the "will" () over the "reaction" (), the implementation imposes a strict parameter ratio.
+
+| Component                  | Path | Hidden Dim | Parameter Weight |
+| -------------------------- | ---- | ---------- | ---------------- |
+| **Observation Encoder ()** |      | 8 - 16     | ~0.05% of total  |
+| **Latent Encoder ()**      |      | 256 - 512  | ~99.95% of total |
+
+This bottleneck ensures that can only provide a "geometric anchor" (where am I?), while must provide the "topological intent" (where am I going?).
