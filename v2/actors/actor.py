@@ -109,8 +109,8 @@ class Actor(nn.Module):
         alpha_leak: float = 10.0,
         k_sigma: float = 1.0,
 
-        # Bottleneck
-        s0_emb_dim: int = 8,
+        # Bottleneck - auto-scales with pred_dim if None
+        s0_emb_dim: int = None,
 
         # Multimodal proposal (ports)
         M: int = 8,                 # number of proposal heads (constant)
@@ -120,6 +120,7 @@ class Actor(nn.Module):
         regret_delta: float = 0.05, # gate threshold on regret proxy
         repel_tau: float = 0.25,    # cosine similarity margin; smaller -> more separation
         repel_weight: float = 0.2,  # repulsion strength when gate is on
+        repel_min: float = 0.05,    # always-on minimum repulsion (prevents early collapse)
 
         # Encoder self-supervision
         info_nce_temp: float = 0.2,
@@ -148,6 +149,10 @@ class Actor(nn.Module):
         self.alpha_vol = alpha_vol
         self.alpha_leak = alpha_leak
         self.k_sigma = k_sigma
+        
+        # Auto-scale s0_emb_dim with dimension for better high-d scaling
+        if s0_emb_dim is None:
+            s0_emb_dim = min(128, max(32, pred_dim * 2))
         self.s0_emb_dim = s0_emb_dim
 
         # Multimodal proposal params
@@ -156,6 +161,7 @@ class Actor(nn.Module):
         self.regret_delta = float(regret_delta)
         self.repel_tau = float(repel_tau)
         self.repel_weight = float(repel_weight)
+        self.repel_min = float(repel_min)
 
         # Encoder SSL params
         self.info_nce_temp = float(info_nce_temp)
@@ -177,46 +183,58 @@ class Actor(nn.Module):
         self.register_buffer("steps_since_reseed", torch.zeros(1, dtype=torch.long))
 
         # --------- Encoder: trajectory_delta -> z (unit sphere) ---------
+        enc_hidden = max(256, pred_dim * 8)
         self.encoder_mlp = nn.Sequential(
-            nn.Linear(T * pred_dim, 256),
+            nn.Linear(T * pred_dim, enc_hidden),
+            nn.LayerNorm(enc_hidden),
             nn.ReLU(),
-            nn.Linear(256, 128),
+            nn.Linear(enc_hidden, enc_hidden // 2),
             nn.ReLU(),
-            nn.Linear(128, z_dim),
+            nn.Linear(enc_hidden // 2, z_dim),
         )
 
         # --------- Bottleneck encoders ---------
         self.obs_proj = nn.Linear(obs_dim, s0_emb_dim)
+        z_enc_hidden = max(256, z_dim * 16)
         self.z_encoder = nn.Sequential(
-            nn.Linear(z_dim, 512),
+            nn.Linear(z_dim, z_enc_hidden),
+            nn.LayerNorm(z_enc_hidden),
             nn.ReLU(),
-            nn.Linear(512, 256),
+            nn.Linear(z_enc_hidden, 256),
             nn.ReLU(),
         )
 
-        # --------- Tube decoders ---------
+        # --------- Tube decoders (capacity scales with pred_dim) ---------
+        dec_hidden = max(256, pred_dim * 4)
         self.mu_net = nn.Sequential(
-            nn.Linear(s0_emb_dim + 256, 64),
+            nn.Linear(s0_emb_dim + 256, dec_hidden),
+            nn.LayerNorm(dec_hidden),
             nn.ReLU(),
-            nn.Linear(64, n_knots * pred_dim),
+            nn.Linear(dec_hidden, dec_hidden),
+            nn.ReLU(),
+            nn.Linear(dec_hidden, n_knots * pred_dim),
         )
 
         self.sigma_net = nn.Sequential(
-            nn.Linear(z_dim, 64),
+            nn.Linear(z_dim + s0_emb_dim, dec_hidden),  # Now also conditioned on s0
+            nn.LayerNorm(dec_hidden),
             nn.ReLU(),
-            nn.Linear(64, n_knots * pred_dim),
+            nn.Linear(dec_hidden, dec_hidden),
+            nn.ReLU(),
+            nn.Linear(dec_hidden, n_knots * pred_dim),
         )
 
         # --------- Multimodal proposal q(z|s0) ---------
+        router_hidden = max(128, s0_emb_dim * 2)
         self.z_router = nn.Sequential(
-            nn.Linear(s0_emb_dim, 64),
+            nn.Linear(s0_emb_dim, router_hidden),
             nn.ReLU(),
-            nn.Linear(64, self.M * z_dim),
+            nn.Linear(router_hidden, self.M * z_dim),
         )
         self.z_logits = nn.Sequential(
-            nn.Linear(s0_emb_dim, 64),
+            nn.Linear(s0_emb_dim, router_hidden),
             nn.ReLU(),
-            nn.Linear(64, self.M),
+            nn.Linear(router_hidden, self.M),
         )
 
         # InfoNCE queue is created lazily once we know device
@@ -376,7 +394,9 @@ class Actor(nn.Module):
         h = torch.cat([s_proj, z_encoded], dim=-1)
 
         mu_k = self.mu_net(h).view(B, self.n_knots, -1)
-        sigma_k = F.softplus(self.sigma_net(z).view(B, self.n_knots, -1))
+        # sigma_net now takes z + s_proj for state-dependent uncertainty
+        sigma_input = torch.cat([z, s_proj], dim=-1)
+        sigma_k = F.softplus(self.sigma_net(sigma_input).view(B, self.n_knots, -1))
 
         mu = _lin_interp_knots_to_T(mu_k, self.T)
         sigma = _lin_interp_knots_to_T(sigma_k, self.T)
@@ -388,24 +408,41 @@ class Actor(nn.Module):
     def contract_terms(self, s0: torch.Tensor, trajectory: torch.Tensor, mu: torch.Tensor, sigma: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         s0: (obs_dim,)
-        trajectory: (T, pred_dim)  (usually trajectory delta)
+        trajectory: (T, pred_dim)  (usually trajectory delta, so trajectory[0] ≈ 0)
         mu, sigma:  (T, pred_dim)
         """
+        d = self.pred_dim
+        eps = 1e-6
+        
+        # Radial/Mahalanobis residual with k_sigma inside sigma term
+        # This keeps k_sigma as a "tube width multiplier" rather than threshold modifier
+        residual = (trajectory - mu) / (sigma * self.k_sigma + eps)  # (T, d)
+        r2 = residual.pow(2).sum(dim=-1)  # (T,) - squared Mahalanobis distance per timestep
+        
+        # Leakage: penalize when normalized residual exceeds dimension threshold
+        # Threshold c = d means "within 1 sigma on average across dims"
+        leakage = torch.relu(r2 - float(d)).mean()
+        
+        # Over-estimation: penalize when sigma is too large relative to actual deviation
         dist = torch.abs(trajectory - mu)
+        over_estimation = torch.relu(sigma - dist * 1.5).mean()
+        
+        # Log-volume: dimension-aware (sum of log sigmas = log of product)
+        # This prevents volume from exploding in high dimensions
+        volume = torch.log(sigma + eps).sum(dim=-1).mean()
 
-        leakage = torch.relu(dist - sigma * self.k_sigma).pow(2).mean()
-        over_estimation = torch.relu(sigma - dist * 1.2).mean()
-        volume = sigma.mean()
-
-        s0_pos = s0[: self.pred_dim]
-        start_error = (mu[0] - s0_pos).pow(2).mean()
+        # Anchor mu start to trajectory start (both in delta coordinates)
+        # Normalized by dimension for consistent scaling
+        start_error = (mu[0] - trajectory[0]).pow(2).sum() / d
 
         traj_direction = trajectory[-1] - trajectory[0]
         tube_direction = mu[-1] - mu[0]
+        # Direction similarity is already dimension-agnostic (cosine)
         direction_sim = F.cosine_similarity(traj_direction.unsqueeze(0), tube_direction.unsqueeze(0))
         direction_loss = (1.0 - direction_sim).mean()
 
-        endpoint_error = (mu[-1] - trajectory[-1]).pow(2).mean()
+        # Endpoint error: normalized by dimension
+        endpoint_error = (mu[-1] - trajectory[-1]).pow(2).sum() / d
 
         return {
             "leak": leakage,
@@ -490,12 +527,14 @@ class Actor(nn.Module):
         sorted_losses, _ = torch.sort(losses_t)
         regret_proxy = (sorted_losses[1] - sorted_losses[0]) if self.M >= 2 else torch.tensor(0.0, device=best.device)
 
-        # gated repulsion: only when regret indicates multi-basin necessity
+        # Repulsion: always-on minimum + gated additional when regret indicates multi-basin necessity
+        # This prevents early head collapse in high dimensions
         repel_gate = (regret_proxy > self.regret_delta).float()
         repel = self.repulsion_loss(z_modes) if self.M >= 2 else torch.tensor(0.0, device=best.device)
 
-        # Total loss: WTA + (optional) repulsion
-        loss = best + (self.repel_weight * repel_gate) * repel
+        # Total loss: WTA + always-on min repulsion + gated additional repulsion
+        repel_coef = self.repel_min + self.repel_weight * repel_gate
+        loss = best + repel_coef * repel
 
         optimizer.zero_grad()
         loss.backward()
@@ -669,14 +708,17 @@ class Actor(nn.Module):
         if z.dim() == 1:
             z = z.unsqueeze(0)
         N = z.shape[0]
+        d = self.pred_dim
         mu, sigma = self.get_tube(s0.unsqueeze(0), z, force_z_only=force_z_only)  # (N,T,d)
 
-        s0_pos = s0[: self.pred_dim]
-        start_error = torch.norm(mu[:, 0, :] - s0_pos, dim=-1)
-        start_penalty = - (start_error ** 2) * 100.0
+        # Tube mu is in delta coordinates, so it should start near 0
+        # Normalized by dimension for consistent scaling across different pred_dim
+        start_error_sq = (mu[:, 0, :] ** 2).sum(dim=-1) / d  # normalized squared L2
+        start_penalty = -start_error_sq * 100.0
 
-        displacement = torch.norm(mu[:, -1, :] - mu[:, 0, :], dim=-1)
-        progress_reward = torch.log(displacement + 1e-6) * 3.0
+        # Displacement reward: use normalized norm
+        displacement_sq = ((mu[:, -1, :] - mu[:, 0, :]) ** 2).sum(dim=-1) / d
+        progress_reward = torch.log(displacement_sq + 1e-6) * 1.5  # log of squared = 2*log
 
         agency_score = -sigma.mean(dim=(1, 2)) * 0.3
         sigma_consistency = -sigma.std(dim=(1, 2))

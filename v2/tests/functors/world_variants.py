@@ -41,13 +41,13 @@ class WorldVariantConfig:
     divergence_strength: float = 1.0
 
 
-def create_world_A(seed: int = 42, K: int = 4) -> WorldVariantConfig:
+def create_world_A(seed: int = 42, K: int = 4, d: int = 3) -> WorldVariantConfig:
     """
     Create World A: Baseline CMG with moderate noise.
     """
     np.random.seed(seed)
     return WorldVariantConfig(
-        d=3,
+        d=d,
         K=K,
         T=20,
         t_gate=5,
@@ -60,7 +60,7 @@ def create_world_A(seed: int = 42, K: int = 4) -> WorldVariantConfig:
     )
 
 
-def create_world_B(seed: int = 43, K: int = 4) -> WorldVariantConfig:
+def create_world_B(seed: int = 43, K: int = 4, d: int = 3) -> WorldVariantConfig:
     """
     Create World B: Higher noise, different action scale.
     
@@ -68,7 +68,7 @@ def create_world_B(seed: int = 43, K: int = 4) -> WorldVariantConfig:
     """
     np.random.seed(seed)
     return WorldVariantConfig(
-        d=3,
+        d=d,
         K=K,
         T=20,
         t_gate=5,
@@ -81,7 +81,7 @@ def create_world_B(seed: int = 43, K: int = 4) -> WorldVariantConfig:
     )
 
 
-def create_world_C(seed: int = 44, K: int = 4) -> WorldVariantConfig:
+def create_world_C(seed: int = 44, K: int = 4, d: int = 3) -> WorldVariantConfig:
     """
     Create World C: Rotated observations, different drift.
     
@@ -89,16 +89,24 @@ def create_world_C(seed: int = 44, K: int = 4) -> WorldVariantConfig:
     """
     np.random.seed(seed)
     
-    # Random rotation matrix
+    # Random rotation matrix (rotate first two dimensions)
     theta = np.pi / 6  # 30 degree rotation
-    R = np.array([
-        [np.cos(theta), -np.sin(theta), 0],
-        [np.sin(theta), np.cos(theta), 0],
-        [0, 0, 1],
-    ], dtype=np.float32)
+    R = np.eye(d, dtype=np.float32)
+    if d >= 2:
+        R[0, 0] = np.cos(theta)
+        R[0, 1] = -np.sin(theta)
+        R[1, 0] = np.sin(theta)
+        R[1, 1] = np.cos(theta)
+    
+    # Drift vector
+    drift = np.zeros(d, dtype=np.float32)
+    if d >= 1:
+        drift[0] = 0.02
+    if d >= 2:
+        drift[1] = -0.01
     
     return WorldVariantConfig(
-        d=3,
+        d=d,
         K=K,
         T=20,
         t_gate=5,
@@ -106,7 +114,7 @@ def create_world_C(seed: int = 44, K: int = 4) -> WorldVariantConfig:
         noise_obs=0.01,
         action_scale=1.0,
         damping=0.1,
-        drift=np.array([0.02, -0.01, 0.0], dtype=np.float32),
+        drift=drift,
         obs_rotation=R,
         early_divergence=True,
         divergence_strength=1.0,

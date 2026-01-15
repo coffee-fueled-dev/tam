@@ -21,6 +21,14 @@ def main():
                         default="all", help="Which test to run")
     parser.add_argument("--functor-epochs", type=int, default=5000,
                         help="Training epochs for triadic functor alignment")
+    parser.add_argument("--K", type=int, default=3,
+                        help="Number of modes/basins")
+    parser.add_argument("--z-dim", type=int, default=2,
+                        help="Latent dimension")
+    parser.add_argument("--d", type=int, default=None,
+                        help="State dimension (default: z_dim + 1)")
+    parser.add_argument("--n-probes", type=int, default=None,
+                        help="Number of probes (default: K+1)")
     args = parser.parse_args()
     
     # Create output directory
@@ -65,6 +73,8 @@ def main():
             output_dir,
             n_actor_epochs=args.epochs,
             n_functor_epochs=args.functor_epochs,
+            K=args.K,
+            z_dim=args.z_dim,
         )
     
     if args.test in ("probe", "all"):
@@ -76,6 +86,10 @@ def main():
             output_dir,
             n_actor_epochs=args.epochs,
             n_functor_epochs=args.functor_epochs,
+            K=args.K,
+            z_dim=args.z_dim,
+            d=args.d,
+            n_probes=args.n_probes,
         )
     
     # Summary
@@ -84,25 +98,78 @@ def main():
     print("="*60)
     
     if "rank" in results:
-        print(f"Rank correlation: {results['rank'].get('rank_correlation', 'N/A'):.3f}")
+        val = results['rank'].get('rank_correlation', 'N/A')
+        if isinstance(val, (int, float)):
+            print(f"Rank correlation: {val:.3f}")
+        else:
+            print(f"Rank correlation: {val}")
     
     if "cycle" in results:
-        print(f"Cycle similarity: {results['cycle'].get('mean_similarity', 'N/A'):.3f}")
+        val = results['cycle'].get('mean_similarity', 'N/A')
+        if isinstance(val, (int, float)):
+            print(f"Cycle similarity: {val:.3f}")
+        else:
+            print(f"Cycle similarity: {val}")
     
     if "composition" in results:
-        print(f"Composition similarity: {results['composition'].get('mean_cosine_sim', 'N/A'):.3f}")
+        val = results['composition'].get('mean_cosine_sim', 'N/A')
+        if isinstance(val, (int, float)):
+            print(f"Composition similarity: {val:.3f}")
+        else:
+            print(f"Composition similarity: {val}")
         print(f"Composition holds: {results['composition'].get('composition_holds', 'N/A')}")
     
     if "triadic" in results:
-        print(f"Triadic composition similarity: {results['triadic'].get('final_comp_sim', 'N/A'):.3f}")
-        print(f"Triadic task accuracy: {results['triadic'].get('final_mean_acc', 'N/A'):.3f}")
+        val = results['triadic'].get('final_comp_sim', 'N/A')
+        if isinstance(val, (int, float)):
+            print(f"Triadic composition similarity: {val:.3f}")
+        else:
+            print(f"Triadic composition similarity: {val}")
+        val = results['triadic'].get('final_mean_acc', 'N/A')
+        if isinstance(val, (int, float)):
+            print(f"Triadic task accuracy: {val:.3f}")
+        else:
+            print(f"Triadic task accuracy: {val}")
         print(f"Gauge fixed by interaction: {results['triadic'].get('gauge_fixed', 'N/A')}")
     
     if "probe" in results:
-        print(f"Probe composition similarity: {results['probe'].get('final_comp_sim', 'N/A'):.3f}")
-        print(f"Probe agreement A→B: {results['probe'].get('probe_sim_AB', 'N/A'):.3f}")
-        print(f"Probe agreement A→C: {results['probe'].get('probe_sim_AC', 'N/A'):.3f}")
-        print(f"Gauge fixed by probes: {results['probe'].get('gauge_fixed', 'N/A')}")
+        probe_results = results['probe']
+        comp_sim = probe_results.get('comp_sim', 'N/A')
+        probe_sim = probe_results.get('probe_sim', 'N/A')
+        comp_zscore = probe_results.get('comp_zscore', 'N/A')
+        probe_pvalue = probe_results.get('probe_pvalue', 'N/A')
+        probe_pvalue_at_res = probe_results.get('probe_pvalue_at_resolution', False)
+        probe_adv = probe_results.get('probe_adv', 'N/A')
+        null_is_valid = probe_results.get('null_is_valid', True)
+        gauge_fixed = probe_results.get('gauge_fixed', 'N/A')
+        
+        if isinstance(comp_sim, (int, float)):
+            print(f"Probe composition similarity: {comp_sim:.3f} (z={comp_zscore:.1f}σ)" if isinstance(comp_zscore, (int, float)) else f"Probe composition similarity: {comp_sim:.3f}")
+        else:
+            print(f"Probe composition similarity: {comp_sim}")
+        
+        if isinstance(probe_sim, (int, float)):
+            stats_parts = []
+            if isinstance(probe_adv, (int, float)):
+                stats_parts.append(f"adv={probe_adv:+.3f}")
+            if isinstance(probe_pvalue, (int, float)):
+                # Report as inequality when at resolution limit
+                if probe_pvalue_at_res:
+                    stats_parts.append(f"p<{probe_pvalue:.4f}")
+                else:
+                    stats_parts.append(f"p={probe_pvalue:.4f}")
+            stats_str = ", ".join(stats_parts)
+            if stats_str:
+                print(f"Probe agreement: {probe_sim:.3f} ({stats_str})")
+            else:
+                print(f"Probe agreement: {probe_sim:.3f}")
+        else:
+            print(f"Probe agreement: {probe_sim}")
+        
+        if not null_is_valid:
+            print("⚠️ WARNING: Degenerate null distribution. Test may be invalid.")
+        
+        print(f"Gauge fixed by probes: {gauge_fixed}")
     
     # Save summary
     import json
