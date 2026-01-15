@@ -1,5 +1,5 @@
 .llm-context
-runs
+artifacts
 
 # dependencies (bun install)
 node_modules
