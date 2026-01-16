@@ -82,15 +82,22 @@ class Actor(nn.Module):
         )
         
         # Port Proposer
-        # Output size: M * (Logit + K*3 + K*1)
-        self.port_head = nn.Linear(256, n_ports * (1 + n_knots * 4))
+        # Output size: M * (Logit + K*3 + K*1 + K*1) where last K*1 is knot existence logits
+        self.port_head = nn.Linear(256, n_ports * (1 + n_knots * 5))
         
-    def forward(self, obs, intent):
+    def forward(self, obs, intent, previous_velocity=None):
         """
+        Args:
+            obs: (B, obs_dim) observation tensor
+            intent: (B, 3) intent/target direction tensor
+            previous_velocity: Optional (B, 3) or (3,) tensor of previous path velocity for G1 continuity
+                              If provided, enforces that first knot direction matches this velocity
+        
         Returns:
             logits: (B, M)
             mu_t:   (B, M, T, 3) - Interpolated Tube
             sigma_t:(B, M, T, 1) - Interpolated Radius
+            knot_mask: (B, M, K) - Knot existence mask (0.0 = inactive, 1.0 = active)
         """
         B = obs.size(0)
         situation = self.encoder(torch.cat([obs, intent], dim=-1))
@@ -98,37 +105,141 @@ class Actor(nn.Module):
         raw_out = self.port_head(situation).view(B, self.n_ports, -1)
         logits = raw_out[:, :, 0]
         
-        # Extract Knots & Sigmas
-        geo_params = raw_out[:, :, 1:].view(B, self.n_ports, self.n_knots, 4)
+        # Extract Knots, Sigmas, and Knot Existence Logits
+        geo_params = raw_out[:, :, 1:].view(B, self.n_ports, self.n_knots, 5)
         knots_raw = geo_params[..., :3]
-        sigmas_raw = F.softplus(geo_params[..., 3:]) + 0.1
+        sigmas_raw = F.softplus(geo_params[..., 3:4]) + 0.1
+        knot_existence_logits = geo_params[..., 4:5]  # (B, M, K, 1)
+        
+        # Apply sigmoid to get knot existence mask (0.0 = inactive, 1.0 = active)
+        # First and last knots are always active (required for spline)
+        knot_mask_raw = torch.sigmoid(knot_existence_logits).squeeze(-1)  # (B, M, K)
+        # Create mask with first and last always active (non-inplace operation)
+        device = knot_mask_raw.device
+        ones_first = torch.ones(B, self.n_ports, 1, device=device)
+        ones_last = torch.ones(B, self.n_ports, 1, device=device)
+        knot_mask = torch.cat([ones_first, knot_mask_raw[:, :, 1:-1], ones_last], dim=-1)
         
         # Causal Anchoring: Knot 0 is always (0,0,0) relative to actor
         knots_rel = knots_raw - knots_raw[:, :, 0:1, :]
+        
+        # G1 CONTINUITY: Enforce by construction (not penalty)
+        # If previous_velocity is provided, ensure first knot direction matches it
+        # This prevents "jagged zags" structurally rather than through loss penalties
+        if previous_velocity is not None:
+            # Normalize previous velocity to get direction
+            if previous_velocity.dim() == 1:
+                prev_vel = previous_velocity.unsqueeze(0)  # (1, 3)
+            else:
+                prev_vel = previous_velocity  # (B, 3) or (1, 3)
+            
+            # Ensure prev_vel is (B, 3) for broadcasting
+            if prev_vel.size(0) == 1 and B > 1:
+                prev_vel = prev_vel.expand(B, -1)
+            elif prev_vel.size(0) != B:
+                prev_vel = prev_vel[:B]  # Take first B if needed
+            
+            prev_vel_norm = prev_vel / (torch.norm(prev_vel, dim=-1, keepdim=True) + 1e-6)  # (B, 3)
+            
+            # Project first knot direction onto previous velocity direction
+            # knots_rel[:, :, 1, :] is the second knot (first after origin)
+            # We want the direction from knot 0 to knot 1 to align with prev_vel_norm
+            if self.n_knots > 1:
+                # Get current first segment direction
+                first_segment = knots_rel[:, :, 1:2, :]  # (B, M, 1, 3)
+                first_segment_norm = first_segment / (torch.norm(first_segment, dim=-1, keepdim=True) + 1e-6)
+                
+                # Project onto previous velocity direction
+                # We want: first_segment_dir = prev_vel_norm * scale
+                # So: scale = dot(first_segment_dir, prev_vel_norm)
+                # Then: first_segment = prev_vel_norm * scale * magnitude
+                prev_vel_expanded = prev_vel_norm.view(B, 1, 1, 3)  # (B, 1, 1, 3) broadcasts to (B, M, 1, 3)
+                
+                # Get magnitude of first segment
+                first_segment_mag = torch.norm(first_segment, dim=-1, keepdim=True)  # (B, M, 1, 1)
+                
+                # Align direction: use previous velocity direction, preserve magnitude
+                # Blend: 80% previous velocity direction, 20% network's learned direction
+                # This allows the network to learn while enforcing continuity
+                aligned_direction = 0.8 * prev_vel_expanded + 0.2 * first_segment_norm
+                aligned_direction = aligned_direction / (torch.norm(aligned_direction, dim=-1, keepdim=True) + 1e-6)
+                aligned_first_segment = aligned_direction * first_segment_mag
+                
+                # Replace first segment with aligned version
+                knots_rel = torch.cat([knots_rel[:, :, :1, :], aligned_first_segment, knots_rel[:, :, 2:, :]], dim=2)
         
         # INTENT BIAS: Push the last knot toward the intent
         # This ensures that even with random weights, tubes are biased toward the goal
         # Reshape intent to (B, 1, 3) to broadcast across ports (M dimension)
         intent_bias = intent.view(B, 1, 3)  # (B, 1, 3) broadcasts to (B, M, 3)
-        # Add a fraction of intent to the last knot to guide the network
+        # Add a fraction of intent to the last knot to guide the network (non-inplace)
         # Using 0.5 means the network learns to add the other 0.5 through training
-        knots_rel[:, :, -1, :] = knots_rel[:, :, -1, :] + intent_bias * 0.5
+        knots_rel_last = knots_rel[:, :, -1:, :] + intent_bias.unsqueeze(2) * 0.5
+        knots_rel = torch.cat([knots_rel[:, :, :-1, :], knots_rel_last], dim=2)
         
-        # Flatten for efficient interpolation
-        knots_flat = knots_rel.view(B * self.n_ports, self.n_knots, 3)
-        sigmas_flat = sigmas_raw.view(B * self.n_ports, self.n_knots, 1)
+        # Filter inactive knots: keep only knots with mask > 0.5
+        # This creates variable-length knot sequences per port
+        mu_dense_list = []
+        sigma_dense_list = []
         
-        # Interpolate
-        mu_dense, sigma_dense = CausalSpline.interpolate(
-            knots_flat, sigmas_flat, resolution=self.interp_res
-        )
+        for b in range(B):
+            for m in range(self.n_ports):
+                # Get active knots for this port
+                active_mask = knot_mask[b, m] > 0.5  # (K,)
+                active_indices = torch.where(active_mask)[0]
+                device = active_indices.device if len(active_indices) > 0 else knots_rel.device
+                
+                # Ensure at least first and last knots are included
+                if len(active_indices) == 0:
+                    # If no knots active, use first and last
+                    active_indices = torch.tensor([0, self.n_knots - 1], device=device)
+                else:
+                    # Ensure first knot is included
+                    if not torch.any(active_indices == 0):
+                        active_indices = torch.cat([torch.tensor([0], device=device), active_indices])
+                    # Ensure last knot is included
+                    if not torch.any(active_indices == self.n_knots - 1):
+                        active_indices = torch.cat([active_indices, torch.tensor([self.n_knots - 1], device=device)])
+                    # Sort and remove duplicates
+                    active_indices = torch.unique(torch.sort(active_indices)[0])
+                
+                # Extract active knots and sigmas
+                active_knots = knots_rel[b, m, active_indices, :].unsqueeze(0)  # (1, K_active, 3)
+                active_sigmas = sigmas_raw[b, m, active_indices, :].unsqueeze(0)  # (1, K_active, 1)
+                
+                # Interpolate with filtered knots
+                mu_dense_port, sigma_dense_port = CausalSpline.interpolate(
+                    active_knots, active_sigmas, resolution=self.interp_res
+                )
+                
+                mu_dense_list.append(mu_dense_port.squeeze(0))  # (T, 3)
+                sigma_dense_list.append(sigma_dense_port.squeeze(0))  # (T, 1)
         
-        # Reshape back to (B, M, T, 3)
-        T = mu_dense.shape[1]  # Number of interpolated points
-        mu_t = mu_dense.view(B, self.n_ports, T, 3)
-        sigma_t = sigma_dense.view(B, self.n_ports, T, 1)
+        # Pad to same length for batching (use max length)
+        max_T = max(m.shape[0] for m in mu_dense_list)
+        device = mu_dense_list[0].device
         
-        return logits, mu_t, sigma_t
+        mu_t_padded = []
+        sigma_t_padded = []
+        for mu, sigma in zip(mu_dense_list, sigma_dense_list):
+            T = mu.shape[0]
+            if T < max_T:
+                # Pad with last value
+                pad_mu = mu[-1:].repeat(max_T - T, 1)
+                pad_sigma = sigma[-1:].repeat(max_T - T, 1)
+                mu_padded = torch.cat([mu, pad_mu], dim=0)
+                sigma_padded = torch.cat([sigma, pad_sigma], dim=0)
+            else:
+                mu_padded = mu
+                sigma_padded = sigma
+            mu_t_padded.append(mu_padded)
+            sigma_t_padded.append(sigma_padded)
+        
+        # Stack and reshape
+        mu_t = torch.stack(mu_t_padded).view(B, self.n_ports, max_T, 3)
+        sigma_t = torch.stack(sigma_t_padded).view(B, self.n_ports, max_T, 1)
+        
+        return logits, mu_t, sigma_t, knot_mask
 
     def select_port(self, logits, mu_t, intent_target):
         # Heuristic: Closest tube end-point to target, weighted by logits
@@ -217,13 +328,139 @@ class Actor(nn.Module):
 # ==========================================
 
 class SimulationWrapper:
-    def __init__(self, obstacles):
+    def __init__(self, obstacles, bounds=None):
+        """
+        Args:
+            obstacles: List of (position, radius) tuples
+            bounds: Optional dict with 'min' and 'max' keys, each a list of 3 floats [x, y, z]
+                   If None, defaults to [-2, -2, -2] to [12, 12, 2]
+        """
         self.obstacles = obstacles
-        self.debug_tubes = []
+        self.debug_tubes = [] 
+        
+        # Set default bounds if not provided
+        if bounds is None:
+            self.bounds = {
+                'min': [-2.0, -2.0, -2.0],
+                'max': [12.0, 12.0, 2.0]
+            }
+        else:
+            self.bounds = bounds
+        
+        # Convert to tensors for easier computation
+        self.bounds_min = torch.tensor(self.bounds['min'], dtype=torch.float32)
+        self.bounds_max = torch.tensor(self.bounds['max'], dtype=torch.float32)
+    
+    def get_observation(self, current_pos, target_pos, max_obstacles=10):
+        """
+        Get observation with spatial context ("sight") including obstacle information.
+        
+        This provides the Actor with predictive context, allowing it to learn
+        geometric rules rather than memorizing specific coordinates.
+        
+        Uses a fixed-size observation with padding to decouple from exact obstacle count.
+        
+        Args:
+            current_pos: (1, 3) or (3,) current position tensor
+            target_pos: (3,) or (1, 3) target position tensor
+            max_obstacles: Maximum number of obstacles to include (default: 10)
+                          Observation is always this size, padded with zeros if fewer obstacles
+        
+        Returns:
+            observation: torch.Tensor of shape (obs_dim,)
+            obs_dim = 3 (rel_goal) + max_obstacles * 4 (rel_obs_pos + obs_radius)
+        """
+        # Ensure current_pos is (3,)
+        if current_pos.dim() > 1:
+            current_pos_flat = current_pos.squeeze(0)
+        else:
+            current_pos_flat = current_pos
+        
+        # Ensure target_pos is (3,)
+        if target_pos.dim() > 1:
+            target_pos_flat = target_pos.squeeze(0)
+        else:
+            target_pos_flat = target_pos
+        
+        # Relative goal vector
+        rel_goal = target_pos_flat - current_pos_flat  # (3,)
+        
+        # Get obstacle context: relative positions and radii
+        # Sort obstacles by distance to current position (nearest first)
+        device = current_pos_flat.device if hasattr(current_pos_flat, 'device') else None
+        obstacle_info = []
+        for obs_p, obs_r in self.obstacles:
+            obs_pos = torch.tensor(obs_p, dtype=torch.float32, device=device)
+            rel_obs_pos = obs_pos - current_pos_flat  # (3,)
+            obs_radius = torch.tensor([obs_r], dtype=torch.float32, device=device)  # (1,)
+            distance = torch.norm(rel_obs_pos)
+            obstacle_info.append((distance.item(), rel_obs_pos, obs_radius))
+        
+        # Sort by distance and take nearest max_obstacles
+        obstacle_info.sort(key=lambda x: x[0])
+        obstacle_info = obstacle_info[:max_obstacles]
+        
+        # Build obstacle features: [rel_pos_x, rel_pos_y, rel_pos_z, radius] for each obstacle
+        obs_parts = [rel_goal]
+        for _, rel_obs_pos, obs_radius in obstacle_info:
+            obs_parts.append(rel_obs_pos)  # (3,)
+            obs_parts.append(obs_radius)   # (1,)
+        
+        # Pad with zeros if we have fewer than max_obstacles
+        # The actor can learn to ignore zero-padded obstacles (radius=0 means no obstacle)
+        # This decouples observation from exact obstacle count - add/remove obstacles freely!
+        num_obstacles_present = len(obstacle_info)
+        if num_obstacles_present < max_obstacles:
+            # Pad with zero vectors: [0, 0, 0, 0] for each missing obstacle
+            zeros_3d = torch.zeros(3, dtype=torch.float32, device=device)
+            zeros_1d = torch.zeros(1, dtype=torch.float32, device=device)
+            for _ in range(max_obstacles - num_obstacles_present):
+                obs_parts.append(zeros_3d)  # Zero relative position
+                obs_parts.append(zeros_1d)  # Zero radius (indicates no obstacle - actor learns to ignore)
+        
+        # Concatenate all parts
+        observation = torch.cat(obs_parts, dim=0)  # (3 + max_obstacles*4,)
+        
+        return observation
+    
+    def enforce_boundaries(self, position):
+        """
+        Clamp position to stay within boundaries.
+        
+        NOTE: In execute() and run_episode(), boundaries are handled inline
+        to create deviation (like obstacles) that surfaces through binding failure.
+        This method is kept for utility purposes but boundaries should generally
+        be handled as physics that creates deviation.
+        
+        Args:
+            position: torch.Tensor of shape (3,) or (1, 3)
+        
+        Returns:
+            clamped position: torch.Tensor of same shape
+        """
+        # Ensure bounds are on the same device as position
+        device = position.device
+        bounds_min = self.bounds_min.to(device)
+        bounds_max = self.bounds_max.to(device)
+        
+        if position.dim() == 2:
+            # (1, 3) -> (3,)
+            pos_flat = position.squeeze(0)
+            clamped = torch.clamp(pos_flat, bounds_min, bounds_max)
+            return clamped.unsqueeze(0)
+        else:
+            # (3,)
+            return torch.clamp(position, bounds_min, bounds_max)
     
     def execute(self, mu_t, sigma_t, current_pos):
         """
         Execute a tube in the world, checking for obstacles and binding violations.
+        
+        PHILOSOPHY: All physics (obstacles, boundaries, etc.) creates deviation from
+        the planned tube. This deviation surfaces through binding failure:
+        - Exception: binding failed (deviation > sigma)
+        - Magnitude: deviation distance
+        - Position: where the violation occurred (actual_p after physics)
         
         Args:
             mu_t: (T, 3) relative tube trajectory
@@ -274,12 +511,12 @@ class SimulationWrapper:
             # Start with expected position
             actual_p = expected_p.clone()
             
-            # Check for obstacles
+            # Check for obstacles (physics that creates deviation)
             for obs_p, obs_r in self.obstacles:
                 obs_pos = torch.tensor(obs_p, dtype=torch.float32, device=actual_p.device)
                 d = torch.norm(actual_p - obs_pos)
                 if d < obs_r:
-                    # Collision: push away from obstacle
+                    # Collision: push away from obstacle (creates deviation from expected)
                     vec = actual_p - obs_pos
                     if d > 1e-6:
                         actual_p = obs_pos + (vec / d) * obs_r
@@ -287,10 +524,30 @@ class SimulationWrapper:
                         # If exactly on obstacle, push in a random direction
                         actual_p = obs_pos + torch.tensor([obs_r, 0, 0], dtype=torch.float32, device=actual_p.device)
             
+            # Check boundaries (physics that creates deviation - same as obstacles)
+            # Boundaries should push back, creating deviation that can trigger binding failure
+            device = actual_p.device
+            bounds_min = self.bounds_min.to(device)
+            bounds_max = self.bounds_max.to(device)
+            
+            # Check each dimension for boundary violations
+            for dim in range(3):
+                if actual_p[dim] < bounds_min[dim]:
+                    # Violated lower bound: push to boundary (creates deviation)
+                    actual_p[dim] = bounds_min[dim]
+                elif actual_p[dim] > bounds_max[dim]:
+                    # Violated upper bound: push to boundary (creates deviation)
+                    actual_p[dim] = bounds_max[dim]
+            
             # Binding check: if deviation exceeds sigma, stop early
+            # This captures ALL physics deviations: obstacles, boundaries, etc.
+            # Exception: binding failed
+            # Magnitude: deviation distance
+            # Position: where the violation occurred (actual_p)
             deviation = torch.norm(actual_p - expected_p)
             if deviation > affordance_r:
-                # Binding broken, return path up to this point
+                # Binding broken - physics (obstacle/boundary) created too much deviation
+                # Record the exception: position where binding failed
                 actual_path.append(actual_p.clone())
                 break
             
@@ -319,10 +576,14 @@ class SimulationWrapper:
         
         while steps < max_steps:
             rel_goal = target - current_pos
-            obs = torch.randn(1, 10) 
+            
+            # Get observation with spatial context ("sight")
+            obs = self.get_observation(current_pos, target)  # (obs_dim,)
+            obs = obs.unsqueeze(0)  # (1, obs_dim) for batch dimension
             
             with torch.no_grad():
-                logits, mu_t, sigma_t = actor(obs, rel_goal)
+                # run_episode doesn't track previous_velocity, so pass None
+                logits, mu_t, sigma_t, knot_mask = actor(obs, rel_goal, previous_velocity=None)
                 
                 # FIX: Use .item() to get a python integer, not a Tensor
                 best_idx_tensor = actor.select_port(logits, mu_t, rel_goal)
@@ -353,19 +614,39 @@ class SimulationWrapper:
                 # Move
                 actual_p = expected_p.clone()
                 
-                # Simple Physics: Check for Obstacles
+                # Simple Physics: Check for Obstacles (creates deviation)
                 for obs_p, obs_r in self.obstacles:
                     d = torch.norm(actual_p - torch.tensor(obs_p))
                     if d < obs_r:
-                        # Simple bounce/block
+                        # Simple bounce/block (pushes back, creating deviation)
                         vec = actual_p - torch.tensor(obs_p)
                         actual_p = torch.tensor(obs_p) + (vec / d) * obs_r
                 
+                # Check boundaries (physics that creates deviation - same as obstacles)
+                # Boundaries push back, creating deviation that can trigger binding failure
+                # Convert bounds to same format as obstacles (tensors)
+                bounds_min_t = torch.tensor(self.bounds['min'], dtype=torch.float32)
+                bounds_max_t = torch.tensor(self.bounds['max'], dtype=torch.float32)
+                
+                # Check each dimension for boundary violations
+                for dim in range(3):
+                    if actual_p[dim] < bounds_min_t[dim]:
+                        # Violated lower bound: push to boundary (creates deviation)
+                        actual_p[dim] = bounds_min_t[dim]
+                    elif actual_p[dim] > bounds_max_t[dim]:
+                        # Violated upper bound: push to boundary (creates deviation)
+                        actual_p[dim] = bounds_max_t[dim]
+                
                 # BINDING CHECK
                 # If reality (actual_p) is too far from plan (expected_p)
+                # This captures ALL physics deviations: obstacles, boundaries, etc.
+                # Exception: binding failed
+                # Magnitude: deviation distance
+                # Position: where the violation occurred (actual_p)
                 deviation = torch.norm(actual_p - expected_p)
                 if deviation > affordance_r:
                     # Update state to where we actually ended up
+                    # This is the exception position - where binding failed
                     current_pos = actual_p.view(1, 3)
                     path_history.append(current_pos.squeeze().numpy())
                     binding_broken = True
@@ -387,12 +668,30 @@ class SimulationWrapper:
 # ==========================================
 
 class LivePlotter:
-    def __init__(self, obstacles, target_pos):
+    def __init__(self, obstacles, target_pos, bounds=None):
+        """
+        Args:
+            obstacles: List of (position, radius) tuples
+            target_pos: Initial target position
+            bounds: Optional dict with 'min' and 'max' keys for bounding box
+        """
         plt.ion()
         self.fig = plt.figure(figsize=(12, 8))
         self.ax = self.fig.add_subplot(111, projection='3d')
         self.obstacles = obstacles
         self.target_pos = target_pos
+        
+        # Set default bounds if not provided
+        if bounds is None:
+            self.bounds = {
+                'min': [-2.0, -2.0, -2.0],
+                'max': [12.0, 12.0, 2.0]
+            }
+        else:
+            self.bounds = bounds
+        
+        # Plot bounding box as wireframe
+        self._plot_bounding_box()
         
         # Plot obstacles
         for obs_p, obs_r in obstacles:
@@ -419,15 +718,45 @@ class LivePlotter:
         self.path_markers = []  # Store path endpoint markers
         self.current_pos_marker = None
         self.current_episode = -1  # Track current episode to detect transitions
+        self.reached_goal_markers = []  # Store markers for goals reached in current episode
         
         self.ax.set_xlabel('X')
         self.ax.set_ylabel('Y')
         self.ax.set_zlabel('Z')
         self.ax.set_title('Live Training: Tube Warping Visualization')
         self.ax.legend()
-        self.ax.set_xlim(-2, 12)
-        self.ax.set_ylim(-2, 12)
-        self.ax.set_zlim(-2, 2)
+        self.ax.set_xlim(self.bounds['min'][0], self.bounds['max'][0])
+        self.ax.set_ylim(self.bounds['min'][1], self.bounds['max'][1])
+        self.ax.set_zlim(self.bounds['min'][2], self.bounds['max'][2])
+    
+    def _plot_bounding_box(self):
+        """Plot the bounding box as a wireframe cube."""
+        min_b = self.bounds['min']
+        max_b = self.bounds['max']
+        
+        # Define the 8 vertices of the bounding box
+        vertices = np.array([
+            [min_b[0], min_b[1], min_b[2]],  # 0: min corner
+            [max_b[0], min_b[1], min_b[2]],  # 1
+            [max_b[0], max_b[1], min_b[2]],  # 2
+            [min_b[0], max_b[1], min_b[2]],  # 3
+            [min_b[0], min_b[1], max_b[2]],  # 4
+            [max_b[0], min_b[1], max_b[2]],  # 5
+            [max_b[0], max_b[1], max_b[2]],  # 6
+            [min_b[0], max_b[1], max_b[2]],  # 7: max corner
+        ])
+        
+        # Define the 12 edges of the cube
+        edges = [
+            [0, 1], [1, 2], [2, 3], [3, 0],  # Bottom face
+            [4, 5], [5, 6], [6, 7], [7, 4],  # Top face
+            [0, 4], [1, 5], [2, 6], [3, 7],  # Vertical edges
+        ]
+        
+        # Plot edges
+        for edge in edges:
+            points = vertices[edge]
+            self.ax.plot3D(*points.T, color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Boundary' if edge == edges[0] else '')
         
     def update(self, mu_t, sigma_t, actual_path, current_pos, episode, step):
         """
@@ -584,7 +913,8 @@ class LivePlotter:
         
         # Update title with episode/step info and key metrics
         avg_sigma = float(sigma_np.mean()) if len(sigma_np) > 0 else 0.0
-        self.ax.set_title(f'Episode {episode}, Step {step} | Avg σ: {avg_sigma:.3f}')
+        goals_reached_count = len(self.reached_goal_markers)
+        self.ax.set_title(f'Episode {episode}, Step {step} | Avg σ: {avg_sigma:.3f} | Goals Reached: {goals_reached_count}')
         
         # Refresh plot with longer pause for visibility
         plt.draw()
@@ -620,17 +950,91 @@ class LivePlotter:
         if self.current_pos_marker is not None:
             self.current_pos_marker.remove()
             self.current_pos_marker = None
+        
+        # Remove reached goal markers
+        for marker in self.reached_goal_markers:
+            marker.remove()
+        self.reached_goal_markers = []
+    
+    def mark_goal_reached(self, goal_pos):
+        """
+        Mark a goal as reached and add it to the visualization.
+        
+        Args:
+            goal_pos: (3,) numpy array or tensor with goal position
+        """
+        # Convert to numpy if needed
+        if isinstance(goal_pos, torch.Tensor):
+            goal_np = goal_pos.detach().cpu().numpy() if goal_pos.requires_grad else goal_pos.cpu().numpy()
+        else:
+            goal_np = np.array(goal_pos)
+        
+        # Ensure it's 1D
+        if goal_np.ndim > 1:
+            goal_np = goal_np.squeeze()
+        
+        # Add a marker for the reached goal (different color/style from current target)
+        reached_marker = self.ax.scatter(
+            goal_np[0], goal_np[1], goal_np[2],
+            color='gold', s=200, marker='*', edgecolors='orange',
+            linewidths=2, alpha=0.8, label='Reached Goal' if len(self.reached_goal_markers) == 0 else '',
+            zorder=9
+        )
+        self.reached_goal_markers.append(reached_marker)
+        self.ax.legend()
     
     def close(self):
         plt.ioff()
         plt.close(self.fig)
 
 
-def train_actor(actor, episodes=50, plot_live=True):
+def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
+    """
+    Train the actor in the environment.
+    
+    Args:
+        actor: Actor model to train
+        episodes: Number of training episodes
+        plot_live: Whether to show live visualization
+        max_observed_obstacles: Maximum number of obstacles in observation (fixed size)
+                                You can add/remove obstacles without changing this!
+    """
     optimizer = optim.Adam(actor.parameters(), lr=1e-3)
-    obstacles = [([5.0, 5.0, 0.0], 2.5)]
-    sim = SimulationWrapper(obstacles)
+    # Multiple obstacles creating a more challenging navigation environment
+    # You can freely add/remove obstacles here - the observation will pad/truncate automatically
+    obstacles = [
+        ([5.0, 5.0, 0.0], 2.5),      # Central obstacle
+        ([3.0, 8.0, 0.0], 1.5),      # Upper left
+        # ([8.0, 3.0, 0.0], 1.5),      # Lower right
+        # ([7.0, 7.0, 0.0], 1.8),      # Upper right cluster
+        # ([2.0, 2.0, 0.0], 1.2),      # Lower left
+        # ([9.0, 6.0, 0.0], 1.3),      # Right side
+        # ([4.0, 9.0, 0.0], 1.4),      # Top area
+    ]
+    
+    # Define environment boundaries
+    bounds = {
+        'min': [-2.0, -2.0, -2.0],
+        'max': [12.0, 12.0, 2.0]
+    }
+    
+    sim = SimulationWrapper(obstacles, bounds=bounds)
     target_pos = torch.tensor([10.0, 10.0, 0.0])
+    
+    # Calculate observation dimension: 3 (rel_goal) + max_observed_obstacles * 4
+    # This is FIXED regardless of actual obstacle count (uses padding/truncation)
+    obs_dim = 3 + max_observed_obstacles * 4
+    
+    # Verify actor's obs_dim matches (will raise error if mismatch)
+    if hasattr(actor, 'encoder'):
+        # Check the first layer input size
+        first_layer = list(actor.encoder.children())[0]
+        if isinstance(first_layer, nn.Linear):
+            expected_input = first_layer.in_features - 3  # Subtract intent_dim
+            if expected_input != obs_dim:
+                raise ValueError(f"Actor obs_dim mismatch: expected {obs_dim} (3 + {max_observed_obstacles}*4), "
+                               f"but actor expects {expected_input}. "
+                               f"Initialize Actor with obs_dim={obs_dim}")
     
     # Create session directory and file
     artifacts_dir = "/Users/zach/Documents/dev/cfd/tam/artifacts"
@@ -643,6 +1047,9 @@ def train_actor(actor, episodes=50, plot_live=True):
         "session_timestamp": session_timestamp,
         "episodes": episodes,
         "obstacles": obstacles,
+        "bounds": bounds,
+        "obs_dim": obs_dim,
+        "max_observed_obstacles": max_observed_obstacles,
         "initial_target": target_pos.tolist(),
         "episodes_data": []
     }
@@ -650,21 +1057,32 @@ def train_actor(actor, episodes=50, plot_live=True):
     # Initialize live plotter
     plotter = None
     if plot_live:
-        plotter = LivePlotter(obstacles, target_pos.numpy())
+        plotter = LivePlotter(obstacles, target_pos.numpy(), bounds=bounds)
     
     print(f"Training {episodes} episodes... (Session: {session_timestamp})")
+    print(f"Observation dimension: {obs_dim} (3 goal + {max_observed_obstacles} max obstacles * 4)")
+    print(f"Actual obstacles in environment: {len(obstacles)}")
 
     for ep in range(episodes):
         current_pos = torch.zeros((1, 3))
         ep_loss = 0
         goals_reached = 0
+        previous_velocity = None  # Track previous path direction for G1 continuity
+        total_steps_taken = 0  # Track actual steps taken in this episode
         
         # Each episode is a sequence of situations
         for step in range(10):
-            rel_goal = target_pos - current_pos
-            obs = torch.randn(1, 10) 
+            total_steps_taken += 1  # Count this step
+            # Get observation with spatial context ("sight")
+            # This provides predictive affordance: actor can see obstacles before hitting them
+            # Observation is fixed-size: nearest max_observed_obstacles obstacles (padded if fewer)
+            obs = sim.get_observation(current_pos, target_pos, max_obstacles=max_observed_obstacles)  # (obs_dim,)
+            obs = obs.unsqueeze(0)  # (1, obs_dim) for batch dimension
             
-            logits, mu_t, sigma_t = actor(obs, rel_goal)
+            rel_goal = target_pos - current_pos 
+            
+            # Pass previous_velocity for G1 continuity enforcement (structural, not penalty)
+            logits, mu_t, sigma_t, knot_mask = actor(obs, rel_goal, previous_velocity=previous_velocity)
             
             # Selection (Categorical sampling for exploration)
             probs = F.softmax(logits, dim=-1)
@@ -675,6 +1093,7 @@ def train_actor(actor, episodes=50, plot_live=True):
             idx_int = idx.item() if isinstance(idx, torch.Tensor) else idx
             selected_tube = mu_t[0, idx_int].squeeze(0)  # Remove any extra dimensions
             selected_sigma = sigma_t[0, idx_int].squeeze(0)
+            selected_knot_mask = knot_mask[0, idx_int]  # (K,) - mask for selected port
             
             # Ensure shapes are correct
             if selected_tube.dim() > 2:
@@ -686,158 +1105,96 @@ def train_actor(actor, episodes=50, plot_live=True):
             # The world responds with actual_p
             actual_p = sim.execute(selected_tube, selected_sigma, current_pos)
             
-            # 2. Calculate Contradiction (Binding Loss)
+            # 2. Contradiction (Binding Loss) - Universal
             # Squared deviation makes hitting obstacles exponentially more painful
-            # than having a slightly wider tube
             expected_p = selected_tube + current_pos
-            # Align lengths for comparison
             min_len = min(len(actual_p), len(expected_p))
             deviation = torch.norm(actual_p[:min_len] - expected_p[:min_len], dim=-1, keepdim=True)
-            # Squared binding loss: makes large deviations much more expensive
             binding_loss = torch.mean((deviation**2) / (selected_sigma[:min_len] + 1e-6))
             
-            # 3. Calculate Agency Loss (Regularizer)
-            # Quadratic penalty: punishes large sigmas aggressively
-            # Prevents actor from "buying" its way out with uncertainty
-            agency_loss = torch.mean(selected_sigma**2)
-            
-            # 4. Path Smoothness (Curvature Penalty)
-            # Penalize sharp 'jerks' in the knots to prevent erratic jumping
-            # and encourage smooth, efficient splines
+            # 3. Unified Agency Metric - Principled Information Bottleneck
+            # Consolidates all complexity/energy penalties into a single cost
+            # "Reach the goal using the least amount of displacement and the thinnest tube possible"
             knots = selected_tube
-            if len(knots) > 2:
-                diffs = knots[1:] - knots[:-1]
-                if len(diffs) > 1:
-                    accel = diffs[1:] - diffs[:-1]
-                    smoothness_loss = torch.mean(accel**2)
-                else:
-                    smoothness_loss = torch.tensor(0.0, device=knots.device)
-            else:
-                smoothness_loss = torch.tensor(0.0, device=knots.device)
             
-            # 4b. Path Length Penalty (Energy Efficiency)
-            # Penalize total distance traveled - encourages shorter, more efficient paths
+            # Agency components:
+            # - Sigma volume (uncertainty cost)
+            sigma_volume = torch.mean(selected_sigma**2)
+            
+            # - Path complexity (displacement cost)
+            # Total path length normalized by straight-line distance
             if len(knots) > 1:
                 segment_lengths = torch.norm(knots[1:] - knots[:-1], dim=-1)
                 total_path_length = torch.sum(segment_lengths)
-                # Normalize by straight-line distance to goal for fairness
                 straight_line_dist = torch.norm(rel_goal)
-                path_length_loss = total_path_length / (straight_line_dist + 1e-6)  # Efficiency ratio
+                path_efficiency = total_path_length / (straight_line_dist + 1e-6)
             else:
-                path_length_loss = torch.tensor(0.0, device=knots.device)
+                path_efficiency = torch.tensor(1.0, device=knots.device)
             
-            # 4c. Curvature Penalty (Energy for Turning)
-            # Penalize how much the path deviates from a straight line
-            # Higher curvature = more energy needed to turn
-            if len(knots) > 2:
-                # Calculate angles between consecutive segments
-                # vec1[i] = segment from knots[i] to knots[i+1]
-                # vec2[i] = segment from knots[i+1] to knots[i+2]
-                # We want to compare vec1[i] with vec2[i] (angle at knots[i+1])
-                vec1 = knots[1:-1] - knots[:-2]  # (T-2, 3) segments ending at interior points
-                vec2 = knots[2:] - knots[1:-1]   # (T-2, 3) segments starting at interior points
-                # Normalize vectors
-                vec1_norm = vec1 / (torch.norm(vec1, dim=-1, keepdim=True) + 1e-6)
-                vec2_norm = vec2 / (torch.norm(vec2, dim=-1, keepdim=True) + 1e-6)
-                # Dot product gives cosine of angle (1 = straight, 0 = 90deg turn, -1 = 180deg)
-                cos_angles = torch.sum(vec1_norm * vec2_norm, dim=-1)
-                # Penalize deviation from straight (1 - cos_angle, so 0 for straight, 2 for 180deg)
-                curvature_penalty = torch.mean(1.0 - cos_angles)
-            else:
-                curvature_penalty = torch.tensor(0.0, device=knots.device)
+            # - Knot complexity (sparsity cost)
+            knot_complexity = torch.mean(selected_knot_mask)
             
-            # 4d. Path Directness Loss (CRITICAL: Prevents looping arcs)
-            # Penalize the interpolated tube for deviating from straight-line segments between knots
-            # This encourages the actor to place knots such that the spline creates direct paths
-            # Method: For each segment between consecutive knots, measure maximum deviation from straight line
-            if len(selected_tube) > 1 and len(knots) > 1:
-                directness_penalty = torch.tensor(0.0, device=selected_tube.device)
-                n_knots = len(knots)
-                n_interp = len(selected_tube)
-                
-                # Distribute interpolated points across knot segments
-                # Each knot segment should have approximately n_interp / (n_knots - 1) points
-                points_per_segment = max(1, n_interp // max(1, n_knots - 1))
-                
-                for i in range(n_knots - 1):
-                    k_start = knots[i]
-                    k_end = knots[i + 1]
-                    
-                    # Get interpolated points for this segment
-                    interp_start_idx = min(i * points_per_segment, n_interp - 1)
-                    interp_end_idx = min((i + 1) * points_per_segment, n_interp - 1)
-                    
-                    if interp_end_idx > interp_start_idx:
-                        interp_segment = selected_tube[interp_start_idx:interp_end_idx + 1]
-                        
-                        # Compute straight-line path between knots
-                        segment_vec = k_end - k_start
-                        segment_len = torch.norm(segment_vec) + 1e-6
-                        
-                        # For each interpolated point, compute distance to straight line
-                        deviations = []
-                        segment_len_scalar = segment_len.item()  # Convert to Python float for clamp
-                        for p in interp_segment:
-                            # Vector from k_start to p
-                            vec_to_p = p - k_start
-                            # Project onto segment direction (normalized)
-                            segment_dir = segment_vec / segment_len
-                            proj_len = torch.dot(vec_to_p, segment_dir)
-                            # Clamp to segment bounds [0, segment_len]
-                            proj_len = torch.clamp(proj_len, 0.0, segment_len_scalar)
-                            # Find closest point on straight line
-                            closest_on_line = k_start + proj_len * segment_dir
-                            # Distance from interpolated point to straight line
-                            deviation = torch.norm(p - closest_on_line)
-                            deviations.append(deviation)
-                        
-                        if len(deviations) > 0:
-                            # Use maximum deviation (catches looping arcs)
-                            max_deviation = torch.stack(deviations).max()
-                            directness_penalty += max_deviation
-                
-                # Normalize by number of segments
-                if n_knots > 1:
-                    directness_penalty = directness_penalty / (n_knots - 1)
-            else:
-                directness_penalty = torch.tensor(0.0, device=selected_tube.device)
+            # Unified Agency: Information Bottleneck
+            # Combines displacement, uncertainty, and sparsity into single metric
+            # Note: path_efficiency penalizes inefficient paths, but shouldn't prevent initial movement
+            # We scale it down to avoid over-penalizing exploration
+            agency_loss = sigma_volume + 0.2 * path_efficiency + 0.3 * knot_complexity
             
-            # 5. Intent Loss (CRITICAL: Direct supervision to fix drift)
-            # This is the "pull" that ensures tubes point toward the goal
-            # The tube's endpoint (in global coordinates) should be close to the target
-            tube_endpoint_global = (selected_tube[-1] + current_pos.squeeze()).unsqueeze(0)  # Ensure (1, 3) shape
-            target_pos_expanded = target_pos.unsqueeze(0)  # Ensure (1, 3) shape
+            # 4. Intent Loss (Objective) - Direct supervision
+            # The tube's endpoint should be close to the target
+            tube_endpoint_global = (selected_tube[-1] + current_pos.squeeze()).unsqueeze(0)
+            target_pos_expanded = target_pos.unsqueeze(0)
             intent_loss = F.mse_loss(tube_endpoint_global, target_pos_expanded)
             
-            # 6. Reward (Progress to goal)
-            # Distance-based progress: positive when moving closer
+            # 4b. Movement Encouragement - Prevent "staying still" local minimum
+            # Penalize tubes that don't extend toward the goal
+            # This ensures the actor has incentive to move even when agency cost is high
+            tube_length = torch.norm(selected_tube[-1] - selected_tube[0]) if len(selected_tube) > 1 else torch.tensor(0.0, device=selected_tube.device)
+            goal_distance = torch.norm(rel_goal)
+            # Encourage movement: tube should extend at least some fraction toward goal
+            # If goal is far, we want substantial movement; if close, small movement is fine
+            min_expected_movement = goal_distance * 0.1  # Expect at least 10% progress per step
+            movement_penalty = torch.clamp(min_expected_movement - tube_length, min=0.0)
+            
+            # 5. Reward (Progress to goal)
             current_dist = torch.norm(target_pos - current_pos)
             final_dist = torch.norm(target_pos - actual_p[-1])
-            progress = current_dist - final_dist  # Positive when moving closer
+            progress = current_dist - final_dist
+            initial_dist = torch.norm(target_pos)
+            progress_scaled = progress / (initial_dist + 1e-6)
             
-            # Scale progress reward to be comparable
-            initial_dist = torch.norm(target_pos)  # Distance from origin to goal
-            progress_scaled = progress / (initial_dist + 1e-6)  # Normalize to [0, 1] range
+            # Policy loss: negative log prob * reward
+            policy_loss = -m.log_prob(idx) * progress_scaled * 20.0
             
-            # Policy loss: negative log prob * reward (so we maximize reward)
-            policy_loss = -m.log_prob(idx) * progress_scaled * 20.0  # Scaled progress reward
-            
-            # Total TA Loss - Rebalanced weights
-            # Intent loss is critical to prevent drift - it directly supervises tube direction
-            loss = (0.5 * intent_loss          # Direct supervision: tubes must point to goal
-                   + policy_loss               # Progress reward for moving closer
-                   + 5.0 * binding_loss        # Binding: stay in the tube
-                   + 1.5 * agency_loss         # Agency: don't inflate sigma
-                   + 0.5 * smoothness_loss     # Smoothness: avoid jerky paths
-                   + 0.3 * path_length_loss    # Energy: minimize path length
-                   + 0.2 * curvature_penalty   # Energy: minimize turning
-                   + 2.0 * directness_penalty) # Directness: prevent looping arcs
+            # Elegant TA Loss: Binding + Agency + Intent
+            # All environment-specific penalties removed - handled by architecture (G1) and context (sight)
+            # Intent loss is CRITICAL: provides direct supervision to move toward goal
+            # Movement penalty prevents "staying still" local minimum
+            loss = (policy_loss                    # Intent: maximize progress reward
+                   + 3.0 * intent_loss             # Intent: direct supervision (tube endpoint -> goal)
+                   + 1.0 * movement_penalty        # Intent: encourage movement (prevent stagnation)
+                   + 5.0 * binding_loss            # Contradiction: stay in the tube
+                   + 1.5 * agency_loss)             # Agency: minimize complexity (unified metric)
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
+            # Update position and track velocity for G1 continuity
+            previous_pos = current_pos.clone()
             current_pos = actual_p[-1].view(1, 3).detach()
+            
+            # Track velocity: direction of actual path taken (for G1 continuity)
+            # Use the last segment of the actual path to capture real movement direction
+            if len(actual_p) > 1:
+                # Use last segment of actual path (what really happened)
+                previous_velocity = (actual_p[-1] - actual_p[-2]).detach()  # (3,)
+            elif len(actual_p) == 1 and previous_velocity is None:
+                # First step: no previous velocity, use a small default direction
+                # This will be updated on next step
+                previous_velocity = torch.zeros(3, device=current_pos.device)
+            # If path is only one point and we have previous velocity, keep it
+            
             ep_loss += loss.item()
             
             # Update live plot
@@ -848,31 +1205,42 @@ def train_actor(actor, episodes=50, plot_live=True):
             if torch.norm(current_pos - target_pos) < 1.0:
                 goals_reached += 1
                 
-                # Generate a new random goal (avoiding obstacles and current position)
-                # Place goal in a reasonable range: [2, 12] for x, y; [-2, 2] for z
+                # Mark the reached goal in visualization
+                if plotter is not None:
+                    plotter.mark_goal_reached(target_pos)
+                
+                # Generate a new random goal (avoiding obstacles, current position, and respecting boundaries)
+                # Use bounds with a small margin to ensure goals aren't right on the boundary
+                margin = 0.5
+                min_bounds = [b + margin for b in bounds['min']]
+                max_bounds = [b - margin for b in bounds['max']]
+                
                 new_goal = torch.tensor([
-                    random.uniform(2.0, 12.0),
-                    random.uniform(2.0, 12.0),
-                    random.uniform(-2.0, 2.0)
+                    random.uniform(min_bounds[0], max_bounds[0]),
+                    random.uniform(min_bounds[1], max_bounds[1]),
+                    random.uniform(min_bounds[2], max_bounds[2])
                 ])
                 
                 # Ensure new goal is not too close to current position or obstacles
                 min_dist = 3.0
+                max_attempts = 50  # Prevent infinite loop
+                attempts = 0
                 while (torch.norm(new_goal - current_pos.squeeze()) < min_dist or
                        any(torch.norm(new_goal - torch.tensor(obs[0])) < obs[1] + 1.0 
-                           for obs in obstacles)):
+                           for obs in obstacles)) and attempts < max_attempts:
                     new_goal = torch.tensor([
-                        random.uniform(2.0, 12.0),
-                        random.uniform(2.0, 12.0),
-                        random.uniform(-2.0, 2.0)
+                        random.uniform(min_bounds[0], max_bounds[0]),
+                        random.uniform(min_bounds[1], max_bounds[1]),
+                        random.uniform(min_bounds[2], max_bounds[2])
                     ])
+                    attempts += 1
                 
                 target_pos = new_goal
                 
-                # Update plotter with new goal
+                # Update plotter with new goal (keep old target marker, just update position)
                 if plotter is not None:
                     plotter.target_pos = target_pos.detach().numpy() if isinstance(target_pos, torch.Tensor) else target_pos
-                    # Re-draw target marker
+                    # Update target marker position
                     if plotter.target_marker is not None:
                         plotter.target_marker.remove()
                     plotter.target_marker = plotter.ax.scatter(
@@ -894,6 +1262,7 @@ def train_actor(actor, episodes=50, plot_live=True):
             "loss": float(ep_loss),
             "final_distance": float(final_dist),
             "goals_reached": goals_reached,
+            "total_steps": total_steps_taken,
             "final_position": current_pos.squeeze().tolist(),
             "final_target": target_pos.tolist()
         }
@@ -902,7 +1271,7 @@ def train_actor(actor, episodes=50, plot_live=True):
         # Print summary every 5 episodes
         if ep % 5 == 0 or ep == episodes - 1:
             print(f"Episode {ep}/{episodes-1} | Loss: {ep_loss:.4f} | "
-                  f"Final Dist: {final_dist:.2f} | Goals: {goals_reached}")
+                  f"Final Dist: {final_dist:.2f} | Goals: {goals_reached} | Steps: {total_steps_taken}")
     
     # Save training data to file
     with open(session_file, 'w') as f:
@@ -912,14 +1281,20 @@ def train_actor(actor, episodes=50, plot_live=True):
     if plotter is not None:
         print("Close the plot window to exit.")
         plt.ioff()
-        plt.show()
+    plt.show()
 
 # ==========================================
 # 5. MAIN & PLOTTING
 # ==========================================
 
 if __name__ == "__main__":
-    actor = Actor(obs_dim=10, intent_dim=3, n_knots=6, interp_res=40)
+    # Fixed observation dimension: independent of actual obstacle count
+    # Observation uses padding/truncation to handle variable obstacle counts
+    MAX_OBSERVED_OBSTACLES = 10  # Maximum obstacles in observation (can add/remove obstacles freely!)
+    obs_dim = 3 + MAX_OBSERVED_OBSTACLES * 4  # 3 + 10*4 = 43
+    
+    actor = Actor(obs_dim=obs_dim, intent_dim=3, n_knots=6, interp_res=40)
     
     # Train the actor with live plotting
-    train_actor(actor, episodes=50, plot_live=True)
+    # You can add/remove obstacles in train_actor without changing the actor architecture!
+    train_actor(actor, episodes=100, plot_live=True, max_observed_obstacles=MAX_OBSERVED_OBSTACLES)
