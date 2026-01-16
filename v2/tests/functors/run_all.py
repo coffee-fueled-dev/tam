@@ -17,18 +17,28 @@ def main():
                         help="Output directory (default: artifacts/functor_tests/run_TIMESTAMP)")
     parser.add_argument("--epochs", type=int, default=500,
                         help="Training epochs per actor")
-    parser.add_argument("--test", type=str, choices=["rank", "cycle", "composition", "triadic", "probe", "all"],
+    parser.add_argument("--test", type=str, choices=["rank", "cycle", "composition", "triadic", "probe", "collision", "rotation_control", "all"],
                         default="all", help="Which test to run")
     parser.add_argument("--functor-epochs", type=int, default=5000,
                         help="Training epochs for triadic functor alignment")
     parser.add_argument("--K", type=int, default=3,
-                        help="Number of modes/basins")
+                        help="Number of modes/basins (shared)")
     parser.add_argument("--z-dim", type=int, default=2,
-                        help="Latent dimension")
+                        help="Latent dimension (shared)")
     parser.add_argument("--d", type=int, default=None,
                         help="State dimension (default: z_dim + 1)")
     parser.add_argument("--n-probes", type=int, default=None,
-                        help="Number of probes (default: K+1)")
+                        help="Number of probes (default: min(K_A,K_B,K_C)+1)")
+    # Per-world overrides for asymmetric experiments
+    parser.add_argument("--K-A", type=int, default=None, help="K for world A")
+    parser.add_argument("--K-B", type=int, default=None, help="K for world B")
+    parser.add_argument("--K-C", type=int, default=None, help="K for world C")
+    parser.add_argument("--z-dim-A", type=int, default=None, help="z_dim for actor A")
+    parser.add_argument("--z-dim-B", type=int, default=None, help="z_dim for actor B")
+    parser.add_argument("--z-dim-C", type=int, default=None, help="z_dim for actor C")
+    parser.add_argument("--d-A", type=int, default=None, help="d for world A")
+    parser.add_argument("--d-B", type=int, default=None, help="d for world B")
+    parser.add_argument("--d-C", type=int, default=None, help="d for world C")
     args = parser.parse_args()
     
     # Create output directory
@@ -90,6 +100,47 @@ def main():
             z_dim=args.z_dim,
             d=args.d,
             n_probes=args.n_probes,
+            # Per-world overrides (None = use shared values)
+            K_A=args.K_A, K_B=args.K_B, K_C=args.K_C,
+            z_dim_A=args.z_dim_A, z_dim_B=args.z_dim_B, z_dim_C=args.z_dim_C,
+            d_A=args.d_A, d_B=args.d_B, d_C=args.d_C,
+        )
+    
+    if args.test == "collision":
+        print("\n" + "="*60)
+        print("TEST 6: Topological Collision")
+        print("="*60)
+        print("Testing functor behavior under topological collision:")
+        print("  World A: K=2 (two adjacent basins)")
+        print("  World B: K=3 (middle basin intervenes)")
+        print("  World C: K=2 (same as A)")
+        print()
+        from .test_reference_probe import run_reference_probe_test
+        # Use collision config: K_A=2, K_B=3, K_C=2
+        results["collision"] = run_reference_probe_test(
+            output_dir,
+            n_actor_epochs=args.epochs,
+            n_functor_epochs=args.functor_epochs,
+            K=2,  # Default for A and C
+            K_A=2, K_B=3, K_C=2,  # Collision topology
+            z_dim=args.z_dim,
+            d=args.d,
+            n_probes=3,  # Use min(K) + 1 = 3 probes
+        )
+    
+    if args.test == "rotation_control":
+        print("\n" + "="*60)
+        print("TEST 7: Rotation Control (MLP Architecture Check)")
+        print("="*60)
+        from .test_reference_probe import run_rotation_control_test
+        d = args.d if args.d else max(3, args.z_dim + 1)
+        results["rotation_control"] = run_rotation_control_test(
+            output_dir,
+            n_actor_epochs=args.epochs,
+            n_functor_epochs=args.functor_epochs,
+            z_dim=args.z_dim,
+            K=args.K,
+            d=d,
         )
     
     # Summary
@@ -170,6 +221,18 @@ def main():
             print("⚠️ WARNING: Degenerate null distribution. Test may be invalid.")
         
         print(f"Gauge fixed by probes: {gauge_fixed}")
+        
+        # Topological stress (sphere-aware: folds/condition in ambient space are not meaningful)
+        topo_health = probe_results.get('topo_health', 'N/A')
+        print(f"Topological health: {topo_health}")
+    
+    if "collision" in results:
+        print()
+        print("TOPOLOGICAL COLLISION RESULTS:")
+        col = results['collision']
+        print(f"  Composition: {col.get('comp_sim', 'N/A'):.3f}" if isinstance(col.get('comp_sim'), (int, float)) else f"  Composition: {col.get('comp_sim', 'N/A')}")
+        print(f"  Gauge fixed: {col.get('gauge_fixed', 'N/A')}")
+        print(f"  Topo health (sphere-aware): {col.get('topo_health', 'N/A')}")
     
     # Save summary
     import json

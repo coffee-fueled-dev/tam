@@ -258,6 +258,284 @@ def plot_energy_landscape(
     }
 
 
+def plot_tube_heatmap(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    output_path: Path,
+    sort_by: str = "mu_std",
+    title: str = "Tube heatmap",
+):
+    """
+    High-D tube visualization: heatmaps of mu and sigma over (time x dim).
+    
+    Args:
+        mu: (T, d) tube centerline
+        sigma: (T, d) tube width
+        output_path: Path to save plot
+        sort_by: "mu_std" | "mu_abs_mean" | "sigma_mean" - how to sort dimensions
+        title: Plot title
+    """
+    T, d = mu.shape
+
+    if sort_by == "mu_std":
+        order = np.argsort(mu.std(axis=0))[::-1]
+    elif sort_by == "mu_abs_mean":
+        order = np.argsort(np.abs(mu).mean(axis=0))[::-1]
+    elif sort_by == "sigma_mean":
+        order = np.argsort(sigma.mean(axis=0))[::-1]
+    else:
+        order = np.arange(d)
+
+    mu_s = mu[:, order].T        # (d, T)
+    sig_s = sigma[:, order].T    # (d, T)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+    im0 = axes[0].imshow(mu_s, aspect="auto", cmap='RdBu_r', interpolation='nearest')
+    axes[0].set_title("μ (Tube Centerline)\nBlue=negative, Red=positive, White=zero", fontsize=11)
+    axes[0].set_xlabel("Time step")
+    axes[0].set_ylabel("Dimension (sorted by variability)")
+    cbar0 = plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+    cbar0.set_label("μ value", rotation=270, labelpad=15)
+
+    im1 = axes[1].imshow(sig_s, aspect="auto", cmap='viridis', interpolation='nearest')
+    axes[1].set_title("σ (Tube Width)\nDark=tight, Yellow=wide (uncertainty)", fontsize=11)
+    axes[1].set_xlabel("Time step")
+    cbar1 = plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    cbar1.set_label("σ value", rotation=270, labelpad=15)
+    
+    # Add interpretation hints
+    fig.text(0.5, 0.02, 
+             "Look for: Clear patterns (not noise) | Different dims show different patterns | Smooth temporal transitions",
+             ha='center', fontsize=9, style='italic', color='gray')
+
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved tube heatmap to {output_path}")
+
+
+def plot_sliced_tube(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    output_path: Path,
+    K: int = 12,
+    seed: int = 0,
+    title: str = "Sliced tube projections",
+):
+    """
+    High-D tube visualization: random projection slices.
+    
+    Projects the tube onto K random unit vectors to see "how it looks from many viewpoints".
+    Scales cleanly to d=256+.
+    
+    Args:
+        mu: (T, d) tube centerline
+        sigma: (T, d) tube width (assumed diagonal)
+        output_path: Path to save plot
+        K: Number of random projection directions
+        seed: Random seed for projections
+        title: Plot title
+    """
+    rng = np.random.default_rng(seed)
+    T, d = mu.shape
+
+    U = rng.normal(size=(K, d))
+    U /= (np.linalg.norm(U, axis=1, keepdims=True) + 1e-8)  # (K,d)
+
+    # projections
+    m = mu @ U.T                         # (T,K)
+    w = np.sqrt((sigma**2) @ (U**2).T)   # (T,K)
+
+    fig, axes = plt.subplots(K, 1, figsize=(12, 2.2*K), sharex=True)
+    if K == 1:
+        axes = [axes]
+    t = np.arange(T)
+
+    for k in range(K):
+        ax = axes[k]
+        ax.plot(t, m[:, k], linewidth=1.8, color='steelblue')
+        ax.fill_between(t, m[:, k] - w[:, k], m[:, k] + w[:, k], alpha=0.2, color='steelblue')
+        ax.set_ylabel(f"slice {k}")
+        ax.grid(True, alpha=0.2)
+
+    axes[-1].set_xlabel("time")
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved sliced tube to {output_path}")
+
+
+def plot_knot_structure(
+    mu_knots: np.ndarray,
+    output_path: Path,
+    title: str = "Knot structure analysis",
+):
+    """
+    High-D knot visualization: heatmap + SVD analysis.
+    
+    Shows knot commitments as (n_knots × d) matrix and low-rank structure.
+    
+    Args:
+        mu_knots: (n_knots, d) knot positions
+        output_path: Path to save plot
+        title: Plot title
+    """
+    n_knots, d = mu_knots.shape
+    
+    # Sort dimensions by variability
+    order = np.argsort(mu_knots.std(axis=0))[::-1]
+    mu_sorted = mu_knots[:, order]
+    
+    # SVD analysis
+    U, S, Vt = np.linalg.svd(mu_knots, full_matrices=False)
+    n_components = min(3, n_knots, d)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Top left: Knot heatmap
+    ax1 = axes[0, 0]
+    im1 = ax1.imshow(mu_sorted.T, aspect="auto", cmap='RdBu_r', interpolation='nearest')
+    ax1.set_title(f"Knot matrix (sorted dims)")
+    ax1.set_xlabel("knot index")
+    ax1.set_ylabel("dimension (sorted)")
+    plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    
+    # Top right: Singular values
+    ax2 = axes[0, 1]
+    ax2.plot(S, 'o-', linewidth=2, markersize=8)
+    ax2.set_xlabel("Component")
+    ax2.set_ylabel("Singular value")
+    ax2.set_title(f"Singular values (rank={np.sum(S > 1e-6)})")
+    ax2.grid(True, alpha=0.3)
+    ax2.set_yscale('log')
+    
+    # Bottom left: First 3 components over knots
+    ax3 = axes[1, 0]
+    knot_indices = np.arange(n_knots)
+    for i in range(n_components):
+        ax3.plot(knot_indices, U[:, i] * S[i], 'o-', linewidth=2, label=f'Component {i+1} (σ={S[i]:.3f})')
+    ax3.set_xlabel("Knot index")
+    ax3.set_ylabel("Component value")
+    ax3.set_title("Low-rank structure (U @ diag(S))")
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Bottom right: Variance explained
+    ax4 = axes[1, 1]
+    variance_explained = S**2 / (S**2).sum()
+    cumsum = np.cumsum(variance_explained)
+    ax4.plot(range(1, min(10, len(S)) + 1), variance_explained[:10], 'o-', linewidth=2, label='Per component')
+    ax4.plot(range(1, min(10, len(S)) + 1), cumsum[:10], 's--', linewidth=2, label='Cumulative')
+    ax4.set_xlabel("Component")
+    ax4.set_ylabel("Variance explained")
+    ax4.set_title("Variance explained by components")
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    ax4.set_ylim(0, 1.1)
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved knot structure to {output_path}")
+
+
+def plot_commitment_summaries(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    output_path: Path,
+    title: str = "Commitment summaries",
+):
+    """
+    Scalar "commitment summaries" over time (stable and comparable in high-D).
+    
+    Args:
+        mu: (T, d) tube centerline
+        sigma: (T, d) tube width
+        output_path: Path to save plot
+        title: Plot title
+    """
+    T, d = mu.shape
+    t = np.arange(T)
+    
+    # Compute scalar summaries
+    center_speed = np.array([np.linalg.norm(mu[t+1] - mu[t]) if t < T-1 else 0 for t in range(T)])
+    tube_thickness_mean = sigma.mean(axis=1)
+    tube_thickness_norm = np.linalg.norm(sigma, axis=1)
+    mu_norm = np.linalg.norm(mu, axis=1)
+    relative_thickness = tube_thickness_norm / (mu_norm + 1e-8)
+    volume_proxy = np.mean(np.log(sigma + 1e-8), axis=1)
+    
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+    axes = axes.flatten()
+    
+    # Center speed
+    ax = axes[0]
+    ax.plot(t[:-1], center_speed[:-1], linewidth=2, color='steelblue')
+    ax.set_xlabel("time")
+    ax.set_ylabel("||μ[t+1] - μ[t]||₂")
+    ax.set_title("Center Speed")
+    ax.grid(True, alpha=0.3)
+    
+    # Tube thickness (mean)
+    ax = axes[1]
+    ax.plot(t, tube_thickness_mean, linewidth=2, color='green')
+    ax.set_xlabel("time")
+    ax.set_ylabel("mean(σ)")
+    ax.set_title("Tube Thickness (mean)")
+    ax.grid(True, alpha=0.3)
+    
+    # Tube thickness (norm)
+    ax = axes[2]
+    ax.plot(t, tube_thickness_norm, linewidth=2, color='orange')
+    ax.set_xlabel("time")
+    ax.set_ylabel("||σ||₂")
+    ax.set_title("Tube Thickness (norm)")
+    ax.grid(True, alpha=0.3)
+    
+    # Relative thickness
+    ax = axes[3]
+    ax.plot(t, relative_thickness, linewidth=2, color='purple')
+    ax.set_xlabel("time")
+    ax.set_ylabel("||σ||₂ / ||μ||₂")
+    ax.set_title("Relative Thickness")
+    ax.grid(True, alpha=0.3)
+    
+    # Volume proxy
+    ax = axes[4]
+    ax.plot(t, volume_proxy, linewidth=2, color='red')
+    ax.set_xlabel("time")
+    ax.set_ylabel("mean(log(σ + ε))")
+    ax.set_title("Volume Proxy (log-space)")
+    ax.grid(True, alpha=0.3)
+    
+    # Combined view
+    ax = axes[5]
+    ax2_twin = ax.twinx()
+    line1 = ax.plot(t, center_speed, linewidth=2, color='steelblue', label='Speed')
+    line2 = ax2_twin.plot(t, tube_thickness_mean, linewidth=2, color='green', label='Thickness')
+    ax.set_xlabel("time")
+    ax.set_ylabel("Speed", color='steelblue')
+    ax2_twin.set_ylabel("Thickness", color='green')
+    ax.set_title("Speed vs Thickness")
+    ax.tick_params(axis='y', labelcolor='steelblue')
+    ax2_twin.tick_params(axis='y', labelcolor='green')
+    ax.grid(True, alpha=0.3)
+    
+    # Combined legend
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax.legend(lines, labels, loc='upper left')
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved commitment summaries to {output_path}")
+
+
 def plot_trajectory_pca(
     spines: np.ndarray,  # (N, T*d) flattened tube centerlines
     output_path: Path,

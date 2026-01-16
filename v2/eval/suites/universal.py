@@ -8,12 +8,20 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from ..plots.latent import plot_latent_scatter, plot_pairwise_cosine_histogram
+from ..plots.latent import (
+    plot_latent_scatter,
+    plot_pairwise_cosine_histogram,
+    plot_cosine_similarity_matrix,
+)
 from ..plots.geometry import (
     plot_tube_overlay,
     plot_multi_start_tubes,
     plot_energy_landscape,
     plot_trajectory_pca,
+    plot_tube_heatmap,
+    plot_sliced_tube,
+    plot_knot_structure,
+    plot_commitment_summaries,
 )
 from ..metrics import compute_latent_metrics, compute_contract_metrics
 
@@ -301,6 +309,130 @@ class UniversalSuite:
             'avg_overlap': float(avg_overlap),
         }
     
+    def run_highd_tube_viz(
+        self,
+        actor,
+        env,
+    ):
+        """
+        Generate high-dimensional tube visualizations.
+        
+        Args:
+            actor: Actor instance
+            env: Environment instance
+        """
+        device = next(actor.parameters()).device
+        obs = env.reset()
+        s0 = torch.tensor(obs, dtype=torch.float32, device=device)
+        
+        # Select z
+        if hasattr(actor, 'select_z_geometric_multimodal'):
+            z_star = actor.select_z_geometric_multimodal(s0, trajectory_delta_hint=None)
+        elif hasattr(actor, 'select_z_geometric'):
+            z_star = actor.select_z_geometric(s0, trajectory_delta=None)
+        else:
+            z_star = torch.randn(actor.z_dim, device=device)
+            z_star = torch.nn.functional.normalize(z_star, p=2, dim=0)
+        
+        # Get tube
+        with torch.no_grad():
+            mu, sigma = actor.get_tube(s0, z_star)
+            mu_np = mu.squeeze(0).cpu().numpy()
+            sigma_np = sigma.squeeze(0).cpu().numpy()
+        
+        # Tube heatmap
+        plot_tube_heatmap(
+            mu_np,
+            sigma_np,
+            self.output_dir / "tube_heatmap.png",
+            sort_by="mu_std",
+            title="Tube Heatmap (time × dimension)",
+        )
+        
+        # Sliced tube projections
+        plot_sliced_tube(
+            mu_np,
+            sigma_np,
+            self.output_dir / "sliced_tube.png",
+            K=12,
+            title="Sliced Tube Projections (random directions)",
+        )
+        
+        # Commitment summaries
+        plot_commitment_summaries(
+            mu_np,
+            sigma_np,
+            self.output_dir / "commitment_summaries.png",
+            title="Commitment Summaries (scalar time series)",
+        )
+        
+        # Knot structure (if available)
+        if hasattr(actor, 'n_knots') and actor.n_knots > 1:
+            # Extract knots from mu_net (approximate by sampling)
+            # For now, we'll use the interpolated mu as proxy
+            # In practice, you'd extract actual knots from actor.mu_net
+            # This is a placeholder - actual implementation would need access to knots
+            pass
+    
+    def run_trajectory_pca(
+        self,
+        actor,
+        env,
+        n_samples: int = 20,
+    ):
+        """
+        Compute PCA on tube centerlines (trajectory-space analysis).
+        
+        Args:
+            actor: Actor instance
+            env: Environment instance
+            n_samples: Number of tubes to sample
+        """
+        device = next(actor.parameters()).device
+        
+        # Collect tube centerlines
+        spines = []
+        labels = []
+        
+        for i in range(n_samples):
+            obs = env.reset()
+            s0 = torch.tensor(obs, dtype=torch.float32, device=device)
+            
+            # Select z
+            if hasattr(actor, 'select_z_geometric_multimodal'):
+                z_star = actor.select_z_geometric_multimodal(s0, trajectory_delta_hint=None)
+            elif hasattr(actor, 'select_z_geometric'):
+                z_star = actor.select_z_geometric(s0, trajectory_delta=None)
+            else:
+                z_star = torch.randn(actor.z_dim, device=device)
+                z_star = torch.nn.functional.normalize(z_star, p=2, dim=0)
+            
+            # Get tube
+            with torch.no_grad():
+                mu, _ = actor.get_tube(s0, z_star)
+                mu_np = mu.squeeze(0).cpu().numpy()
+            
+            spines.append(mu_np.flatten())
+            
+            # Try to get mode label if available
+            if hasattr(env, 'base_env') and hasattr(env.base_env, 'k'):
+                labels.append(env.base_env.k)
+            elif hasattr(env, 'k'):
+                labels.append(env.k)
+        
+        spines_array = np.array(spines)
+        labels_array = np.array(labels) if len(labels) == n_samples else None
+        
+        # Plot PCA
+        pca_results = plot_trajectory_pca(
+            spines_array,
+            self.output_dir / "trajectory_pca.png",
+            labels=labels_array,
+            title=f"Trajectory-Space PCA (n={n_samples} tubes)",
+        )
+        
+        return pca_results
+    
     def run(
         self,
         actor,
@@ -332,10 +464,15 @@ class UniversalSuite:
             self.run_learning_curves(training_history)
             results['learning_curves'] = True
         
-        # 2. Episode rollouts
+        # 2. Episode rollouts (with high-D visualizations)
         print("\n2. Episode Rollouts...")
         self.run_episode_rollouts(actor, env, n_episodes=8)
         results['episode_rollouts'] = True
+        
+        # 2b. High-D tube visualizations
+        print("\n2b. High-D Tube Visualizations...")
+        self.run_highd_tube_viz(actor, env)
+        results['highd_tube_viz'] = True
         
         # 3. Tube overlap matrix
         print("\n3. Tube Overlap Matrix...")
@@ -353,7 +490,12 @@ class UniversalSuite:
         )
         results['energy_landscape'] = energy_results
         
-        # 5. Latent health
+        # 4b. Trajectory-space PCA
+        print("\n4b. Trajectory-Space PCA...")
+        self.run_trajectory_pca(actor, env, n_samples=20)
+        results['trajectory_pca'] = True
+        
+        # 5. Latent health (with high-D visualizations)
         print("\n5. Latent Health...")
         if eval_results and 'z_samples' in eval_results:
             z_array = eval_results['z_samples']
@@ -367,6 +509,15 @@ class UniversalSuite:
             plot_pairwise_cosine_histogram(
                 z_array,
                 self.output_dir / "pairwise_cosine.png",
+            )
+            
+            # High-D cosine similarity matrix
+            plot_cosine_similarity_matrix(
+                z_array,
+                self.output_dir / "cosine_similarity_matrix.png",
+                labels=labels if labels else None,
+                cluster=True,
+                title="Latent Space Cosine Similarity (clustered)",
             )
             
             latent_metrics = compute_latent_metrics(z_array, labels)

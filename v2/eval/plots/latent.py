@@ -214,3 +214,140 @@ def plot_pairwise_cosine_histogram(
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved pairwise cosine histogram to {output_path}")
+
+
+def plot_cosine_similarity_matrix(
+    z_array: np.ndarray,
+    output_path: Path,
+    labels: Optional[np.ndarray] = None,
+    cluster: bool = True,
+    title: Optional[str] = None,
+):
+    """
+    Plot cosine similarity matrix with hierarchical clustering (high-D friendly).
+    
+    Shows block-diagonal structure for distinct basins, uniform blocks for collapse.
+    
+    Args:
+        z_array: (N, z_dim) latent vectors (should be L2-normalized)
+        output_path: Path to save plot
+        labels: Optional (N,) labels for comparison
+        cluster: If True, reorder by hierarchical clustering
+        title: Optional plot title
+    """
+    z_norm = z_array / (np.linalg.norm(z_array, axis=1, keepdims=True) + 1e-8)
+    cos_sim = z_norm @ z_norm.T  # (N, N)
+    
+    # Reorder by clustering if requested
+    order = np.arange(len(z_array))
+    if cluster and len(z_array) > 1:
+        try:
+            from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
+            from scipy.spatial.distance import squareform
+            
+            # Convert similarity to distance (ensure non-negative)
+            dist_matrix = 1 - cos_sim
+            dist_matrix = np.clip(dist_matrix, 0, 2)  # Clamp to [0, 2]
+            np.fill_diagonal(dist_matrix, 0)
+            
+            # Hierarchical clustering (use 'average' instead of 'ward' for more robustness)
+            condensed_dist = squareform(dist_matrix, checks=False)
+            linkage_matrix = linkage(condensed_dist, method='average')
+            order = leaves_list(linkage_matrix)
+            
+            cos_sim_ordered = cos_sim[np.ix_(order, order)]
+        except (ImportError, ValueError) as e:
+            print(f"Clustering failed ({e}), using original order")
+            cos_sim_ordered = cos_sim
+    else:
+        cos_sim_ordered = cos_sim
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Left: Heatmap
+    ax1 = axes[0]
+    im1 = ax1.imshow(cos_sim_ordered, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto', interpolation='nearest')
+    ax1.set_xlabel("Sample index (clustered)" if cluster else "Sample index")
+    ax1.set_ylabel("Sample index (clustered)" if cluster else "Sample index")
+    title_str = "Cosine Similarity Matrix\nRed=similar (1.0), White=orthogonal (0.0), Blue=opposite (-1.0)"
+    if cluster:
+        title_str += "\n(Clustered: similar samples grouped together)"
+    ax1.set_title(title_str, fontsize=11)
+    cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    cbar1.set_label('Cosine Similarity', rotation=270, labelpad=15)
+    
+    # Add interpretation hint
+    ax1.text(0.02, 0.98, 
+             "Look for: Red blocks = modes\nDark between blocks = separation",
+             transform=ax1.transAxes, fontsize=9, style='italic', color='yellow',
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    
+    # Add label boundaries if provided
+    if labels is not None:
+        unique_labels = sorted(set(labels))
+        label_positions = {}
+        for label in unique_labels:
+            mask = np.array(labels)[order] == label
+            if np.any(mask):
+                indices = np.where(mask)[0]
+                label_positions[label] = (indices.min(), indices.max())
+        
+        for label, (start, end) in label_positions.items():
+            ax1.axhline(start - 0.5, color='yellow', linewidth=2, alpha=0.7)
+            ax1.axhline(end + 0.5, color='yellow', linewidth=2, alpha=0.7)
+            ax1.axvline(start - 0.5, color='yellow', linewidth=2, alpha=0.7)
+            ax1.axvline(end + 0.5, color='yellow', linewidth=2, alpha=0.7)
+    
+    # Right: Statistics
+    ax2 = axes[1]
+    mask = ~np.eye(len(cos_sim), dtype=bool)
+    pairwise_cos = cos_sim[mask]
+    
+    # Histogram
+    ax2.hist(pairwise_cos, bins=50, alpha=0.7, edgecolor='black', density=True)
+    ax2.axvline(pairwise_cos.mean(), color='red', linestyle='--', linewidth=2, 
+                label=f'Mean={pairwise_cos.mean():.3f}')
+    ax2.axvline(np.median(pairwise_cos), color='orange', linestyle='--', linewidth=2,
+                label=f'Median={np.median(pairwise_cos):.3f}')
+    ax2.set_xlabel('Cosine Similarity')
+    ax2.set_ylabel('Density')
+    ax2.set_title('Pairwise Similarity Distribution\nBimodal = good separation, Single peak = collapse')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Add interpretation hint
+    mean_sim = pairwise_cos.mean()
+    if mean_sim > 0.7:
+        hint = "⚠️ High mean: Possible mode collapse"
+        color = 'red'
+    elif mean_sim < 0.3:
+        hint = "⚠️ Low mean: May be over-dispersed"
+        color = 'orange'
+    else:
+        hint = "✓ Mean in good range"
+        color = 'green'
+    
+    ax2.text(0.02, 0.98, hint, transform=ax2.transAxes, fontsize=9, 
+             style='italic', color=color, weight='bold',
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Add text stats
+    stats_text = (
+        f"Min: {pairwise_cos.min():.3f}\n"
+        f"Max: {pairwise_cos.max():.3f}\n"
+        f"Std: {pairwise_cos.std():.3f}\n"
+        f"Q25: {np.percentile(pairwise_cos, 25):.3f}\n"
+        f"Q75: {np.percentile(pairwise_cos, 75):.3f}"
+    )
+    ax2.text(0.98, 0.98, stats_text, transform=ax2.transAxes,
+             verticalalignment='top', horizontalalignment='right',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+             fontsize=10, family='monospace')
+    
+    if title is None:
+        title = f'Cosine Similarity Matrix (n={len(z_array)})'
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved cosine similarity matrix to {output_path}")

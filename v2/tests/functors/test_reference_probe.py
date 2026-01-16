@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
-from .zmap import ZMap
+from .zmap import ZMap, jacobian_determinant_analysis, detect_topological_stress
 from .utils_energy import sample_z_sphere, compute_energy
 
 
@@ -217,6 +217,8 @@ class ReferenceProbeTrainer:
     
     The key addition over TriadicFunctorTrainer: probe consistency loss
     that encourages functors to agree on probe responses.
+    
+    Supports asymmetric configurations where actors have different z_dims.
     """
     
     def __init__(
@@ -229,6 +231,10 @@ class ReferenceProbeTrainer:
         env_C,
         config: ReferenceProbeConfig,
         device: torch.device,
+        # Per-actor z_dim overrides (for asymmetric experiments)
+        z_dim_A: int = None,
+        z_dim_B: int = None,
+        z_dim_C: int = None,
     ):
         self.actor_A = actor_A
         self.actor_B = actor_B
@@ -239,12 +245,19 @@ class ReferenceProbeTrainer:
         self.config = config
         self.device = device
         
+        # Resolve per-actor z_dims (fallback to config)
+        self.z_dim_A = z_dim_A if z_dim_A is not None else config.z_dim
+        self.z_dim_B = z_dim_B if z_dim_B is not None else config.z_dim
+        self.z_dim_C = z_dim_C if z_dim_C is not None else config.z_dim
+        
+        self.is_symmetric = (self.z_dim_A == self.z_dim_B == self.z_dim_C)
+        
         # Freeze actors
         for actor in [actor_A, actor_B, actor_C]:
             for param in actor.parameters():
                 param.requires_grad = False
         
-        # Generate probes from environment goals
+        # Generate probes from environment goals (use env with fewest goals)
         goals = get_goals_from_env(env_A)
         self.probe_positions = minimal_probe_set_from_goals(
             goals, seed=42, n_probes=config.n_probes
@@ -264,13 +277,13 @@ class ReferenceProbeTrainer:
             dtype=torch.float32, device=device
         )
         
-        # 6 functor maps
-        self.F_AB = ZMap(config.z_dim).to(device)
-        self.F_BA = ZMap(config.z_dim).to(device)
-        self.F_AC = ZMap(config.z_dim).to(device)
-        self.F_CA = ZMap(config.z_dim).to(device)
-        self.F_BC = ZMap(config.z_dim).to(device)
-        self.F_CB = ZMap(config.z_dim).to(device)
+        # 6 functor maps (now with cross-dimensional support)
+        self.F_AB = ZMap(z_dim_src=self.z_dim_A, z_dim_tgt=self.z_dim_B).to(device)
+        self.F_BA = ZMap(z_dim_src=self.z_dim_B, z_dim_tgt=self.z_dim_A).to(device)
+        self.F_AC = ZMap(z_dim_src=self.z_dim_A, z_dim_tgt=self.z_dim_C).to(device)
+        self.F_CA = ZMap(z_dim_src=self.z_dim_C, z_dim_tgt=self.z_dim_A).to(device)
+        self.F_BC = ZMap(z_dim_src=self.z_dim_B, z_dim_tgt=self.z_dim_C).to(device)
+        self.F_CB = ZMap(z_dim_src=self.z_dim_C, z_dim_tgt=self.z_dim_B).to(device)
         
         all_params = (
             list(self.F_AB.parameters()) +
@@ -292,14 +305,15 @@ class ReferenceProbeTrainer:
         """
         Get best z for each probe for each actor.
         
-        Returns dict with 'z_A', 'z_B', 'z_C' each of shape (n_probes, z_dim)
+        Returns dict with 'z_A', 'z_B', 'z_C' each of shape (n_probes, z_dim_X)
+        Note: z_dims may differ for asymmetric configurations.
         """
         n_probes = self.probes_A.shape[0]
-        z_dim = self.config.z_dim
         
-        z_A = torch.zeros(n_probes, z_dim, device=self.device)
-        z_B = torch.zeros(n_probes, z_dim, device=self.device)
-        z_C = torch.zeros(n_probes, z_dim, device=self.device)
+        # Use per-actor z_dims
+        z_A = torch.zeros(n_probes, self.z_dim_A, device=self.device)
+        z_B = torch.zeros(n_probes, self.z_dim_B, device=self.device)
+        z_C = torch.zeros(n_probes, self.z_dim_C, device=self.device)
         
         for i in range(n_probes):
             z_A[i] = get_best_z_for_obs(self.actor_A, self.probes_A[i])
@@ -360,11 +374,11 @@ class ReferenceProbeTrainer:
             self._probe_cache = self._get_probe_responses()
         self._cache_step += 1
         
-        # Sample random z for cycle/composition losses
+        # Sample random z for cycle/composition losses (per-actor dimensions)
         n_samples = 32
-        z_A = sample_z_sphere(n_samples, self.config.z_dim, self.device)
-        z_B = sample_z_sphere(n_samples, self.config.z_dim, self.device)
-        z_C = sample_z_sphere(n_samples, self.config.z_dim, self.device)
+        z_A = sample_z_sphere(n_samples, self.z_dim_A, self.device)
+        z_B = sample_z_sphere(n_samples, self.z_dim_B, self.device)
+        z_C = sample_z_sphere(n_samples, self.z_dim_C, self.device)
         
         # ========== CYCLE CONSISTENCY LOSS ==========
         z_ABA = self.F_BA(self.F_AB(z_A))
@@ -424,7 +438,7 @@ class ReferenceProbeTrainer:
         
         # Composition metric (for monitoring)
         with torch.no_grad():
-            z_test = sample_z_sphere(100, self.config.z_dim, self.device)
+            z_test = sample_z_sphere(100, self.z_dim_A, self.device)
             z_AC_test = self.F_AC(z_test)
             z_ABC_test = self.F_BC(self.F_AB(z_test))
             comp_sim = (F.normalize(z_AC_test, dim=-1) * F.normalize(z_ABC_test, dim=-1)).sum(dim=-1).mean()
@@ -548,6 +562,61 @@ class ReferenceProbeTrainer:
         q, _ = torch.linalg.qr(random_matrix)
         return q
     
+    def compute_topological_stress(self, n_samples: int = 500) -> Dict[str, any]:
+        """
+        Analyze Jacobian of functor maps to detect topological distortions.
+        
+        Returns dict with:
+        - Per-functor Jacobian statistics (determinant, condition number, etc.)
+        - Overall topological health assessment
+        - Detection of folds, tears, collapses
+        """
+        results = {}
+        
+        # Analyze each functor
+        functors = {
+            'F_AB': (self.F_AB, self.z_dim_A, self.z_dim_B),
+            'F_BA': (self.F_BA, self.z_dim_B, self.z_dim_A),
+            'F_AC': (self.F_AC, self.z_dim_A, self.z_dim_C),
+            'F_CA': (self.F_CA, self.z_dim_C, self.z_dim_A),
+            'F_BC': (self.F_BC, self.z_dim_B, self.z_dim_C),
+            'F_CB': (self.F_CB, self.z_dim_C, self.z_dim_B),
+        }
+        
+        all_issues = []
+        
+        for name, (func, z_src, z_tgt) in functors.items():
+            # Compute Jacobian stats
+            jac_stats = jacobian_determinant_analysis(
+                func, z_src, z_tgt, self.device, n_samples=n_samples
+            )
+            jac_stats['z_dim_src'] = z_src
+            jac_stats['z_dim_tgt'] = z_tgt
+            
+            # Detect issues (sphere-aware since we map sphere → sphere)
+            issues = detect_topological_stress(jac_stats, sphere_aware=True)
+            
+            results[name] = {
+                'jacobian': jac_stats,
+                'issues': issues,
+            }
+            all_issues.append(issues)
+        
+        # Aggregate health across all functors
+        health_scores = {'healthy': 0, 'minor_stress': 1, 'stressed': 2, 'critical': 3}
+        worst_health = max(all_issues, key=lambda x: health_scores.get(x.get('overall_health', 'healthy'), 0))
+        results['overall_health'] = worst_health.get('overall_health', 'healthy')
+        
+        # Count severe issues across all functors
+        results['total_folds'] = sum(
+            r['jacobian'].get('n_folds', 0) for r in results.values() if isinstance(r, dict) and 'jacobian' in r
+        )
+        results['max_condition'] = max(
+            r['jacobian'].get('condition_max', 1) for r in results.values() if isinstance(r, dict) and 'jacobian' in r
+        )
+        
+        return results
+    
     def compute_gauge_metrics(self, n_bootstrap: int = 100, n_null_samples: int = 1000) -> Dict[str, float]:
         """
         Compute dimension/mode-invariant gauge metrics using statistical comparison.
@@ -565,21 +634,25 @@ class ReferenceProbeTrainer:
             - probe_adv: Advantage over null (observed - null_mean)
             - gauge_fixed: True if comp_z > 5 AND probe_p < 0.001 AND null is valid
         """
-        z_dim = self.config.z_dim
+        # Use per-actor z_dims for asymmetric support
+        z_dim_A = self.z_dim_A
+        z_dim_B = self.z_dim_B
+        z_dim_C = self.z_dim_C
         
         # ========== COMPOSITION METRIC (z-score, works well) ==========
-        z_test = sample_z_sphere(200, z_dim, self.device)
+        # Sample z in A's space, map to C via direct and composed paths
+        z_test = sample_z_sphere(200, z_dim_A, self.device)
         with torch.no_grad():
             z_AC = self.F_AC(z_test)
             z_ABC = self.F_BC(self.F_AB(z_test))
             trained_comp = (F.normalize(z_AC, dim=-1) * F.normalize(z_ABC, dim=-1)).sum(dim=-1)
             trained_comp_mean = trained_comp.mean().item()
         
-        # Bootstrap random baseline for composition
+        # Bootstrap random baseline for composition (in target space C)
         random_comps = []
         for _ in range(n_bootstrap):
-            z_rand1 = sample_z_sphere(200, z_dim, self.device)
-            z_rand2 = sample_z_sphere(200, z_dim, self.device)
+            z_rand1 = sample_z_sphere(200, z_dim_C, self.device)
+            z_rand2 = sample_z_sphere(200, z_dim_C, self.device)
             sim = (F.normalize(z_rand1, dim=-1) * F.normalize(z_rand2, dim=-1)).sum(dim=-1)
             random_comps.append(sim.mean().item())
         
@@ -604,9 +677,9 @@ class ReferenceProbeTrainer:
         # This scrambles the gauge while preserving the geometry (unit sphere)
         null_probe_sims = []
         for _ in range(n_null_samples):
-            # Random rotation for each target space
-            R_B = self._random_orthogonal_matrix(z_dim)
-            R_C = self._random_orthogonal_matrix(z_dim)
+            # Random rotation for each target space (use per-actor dims)
+            R_B = self._random_orthogonal_matrix(z_dim_B)
+            R_C = self._random_orthogonal_matrix(z_dim_C)
             
             # Scrambled targets (still on unit sphere)
             z_B_scrambled = (z_B @ R_B.t())
@@ -830,35 +903,65 @@ def run_reference_probe_test(
     z_dim: int = 2,
     d: int = None,  # State dimension (default: z_dim + 1)
     n_probes: int = None,  # Number of probes (default: K+1)
+    # Per-world overrides (for asymmetric experiments)
+    K_A: int = None, K_B: int = None, K_C: int = None,
+    z_dim_A: int = None, z_dim_B: int = None, z_dim_C: int = None,
+    d_A: int = None, d_B: int = None, d_C: int = None,
 ) -> Dict:
     """
     Run the reference probe gauge alignment experiment.
+    
+    By default, all worlds share the same K, z_dim, d.
+    Use per-world overrides (K_A, z_dim_A, d_A, etc.) to test asymmetric configurations.
     """
     from v2.actors.actor import Actor
     from .world_variants import create_world_A, create_world_B, create_world_C, CMGWorldVariant
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Default state dimension
-    if d is None:
-        d = max(3, z_dim + 1)  # At least 3D for visualization
+    # Resolve per-world configs (fallback to shared values)
+    K_A = K_A if K_A is not None else K
+    K_B = K_B if K_B is not None else K
+    K_C = K_C if K_C is not None else K
     
-    # Default probe count
+    z_dim_A = z_dim_A if z_dim_A is not None else z_dim
+    z_dim_B = z_dim_B if z_dim_B is not None else z_dim
+    z_dim_C = z_dim_C if z_dim_C is not None else z_dim
+    
+    # Default state dimensions
+    if d is None:
+        d = max(3, z_dim + 1)
+    d_A = d_A if d_A is not None else d
+    d_B = d_B if d_B is not None else d
+    d_C = d_C if d_C is not None else d
+    
+    # Default probe count (based on minimum K for shared probes)
+    K_min = min(K_A, K_B, K_C)
     if n_probes is None:
-        n_probes = K + 1
+        n_probes = K_min + 1
+    
+    # Check for asymmetry
+    is_symmetric = (K_A == K_B == K_C) and (z_dim_A == z_dim_B == z_dim_C) and (d_A == d_B == d_C)
     
     print("============================================================")
     print("REFERENCE PROBE GAUGE ALIGNMENT")
     print("============================================================")
-    print(f"K={K} basins, z_dim={z_dim}, d={d}, probes={n_probes}")
+    if is_symmetric:
+        print(f"K={K_A} basins, z_dim={z_dim_A}, d={d_A}, probes={n_probes}")
+    else:
+        print(f"ASYMMETRIC CONFIGURATION:")
+        print(f"  World A: K={K_A}, z_dim={z_dim_A}, d={d_A}")
+        print(f"  World B: K={K_B}, z_dim={z_dim_B}, d={d_B}")
+        print(f"  World C: K={K_C}, z_dim={z_dim_C}, d={d_C}")
+        print(f"  Shared probes: {n_probes}")
     print(f"Actor epochs: {n_actor_epochs}, Functor epochs: {n_functor_epochs}")
     print()
     
     # Phase 0: Create environments
     print("Phase 0: Creating environments...")
-    config_A = create_world_A(K=K, d=d)
-    config_B = create_world_B(K=K, d=d)
-    config_C = create_world_C(K=K, d=d)
+    config_A = create_world_A(K=K_A, d=d_A)
+    config_B = create_world_B(K=K_B, d=d_B)
+    config_C = create_world_C(K=K_C, d=d_C)
     
     env_A = CMGWorldVariant(config_A)
     env_B = CMGWorldVariant(config_B)
@@ -867,13 +970,13 @@ def run_reference_probe_test(
     # Phase 0: Train actors independently
     print("Phase 0: Training actors...")
     
-    def train_actor(env, name):
-        print(f"  Training actor {name}...")
+    def train_actor(env, actor_z_dim, name):
+        print(f"  Training actor {name} (z_dim={actor_z_dim})...")
         actor = Actor(
             obs_dim=env.obs_dim,
             pred_dim=env.state_dim,
             T=env.T,
-            z_dim=z_dim,
+            z_dim=actor_z_dim,
             n_knots=5,
         ).to(device)
         
@@ -902,17 +1005,18 @@ def run_reference_probe_test(
         
         return actor
     
-    actor_A = train_actor(env_A, "A")
-    actor_B = train_actor(env_B, "B")
-    actor_C = train_actor(env_C, "C")
+    actor_A = train_actor(env_A, z_dim_A, "A")
+    actor_B = train_actor(env_B, z_dim_B, "B")
+    actor_C = train_actor(env_C, z_dim_C, "C")
     
     # Phase 1: Generate probes and train functors
     print()
     print("Phase 1: Training functors with reference probes...")
     
+    # For asymmetric case, use minimum K for probe generation
     config = ReferenceProbeConfig(
-        z_dim=z_dim,
-        K=K,
+        z_dim=z_dim_A,  # Base z_dim (will be overridden by per-actor dims)
+        K=K_min,  # Use minimum K for shared probe structure
         n_probes=n_probes,
         tau=0.05,
         lambda_cyc=1.0,
@@ -925,6 +1029,7 @@ def run_reference_probe_test(
         actor_A, actor_B, actor_C,
         env_A, env_B, env_C,
         config, device,
+        z_dim_A=z_dim_A, z_dim_B=z_dim_B, z_dim_C=z_dim_C,  # Pass per-actor z_dims
     )
     
     print(f"  Generated {trainer.probe_positions.shape[0]} probes")
@@ -943,6 +1048,10 @@ def run_reference_probe_test(
     
     # Final probe loss (from last 100 epochs of history)
     final_probe_loss = np.mean([h['L_probe'] for h in history[-100:]]) if len(history) >= 100 else np.mean([h['L_probe'] for h in history])
+    
+    # Compute topological stress analysis
+    print("Computing topological stress analysis...")
+    topo_stress = trainer.compute_topological_stress(n_samples=500)
     
     results = {
         # Raw metrics
@@ -971,13 +1080,22 @@ def run_reference_probe_test(
         'probe_p_threshold': gauge_metrics.get('probe_p_threshold', 0.001),
         'probe_adv_threshold': gauge_metrics.get('probe_adv_threshold', 0.05),
         
-        # Config
+        # Config (per-world for asymmetric support)
         'n_probes': trainer.probe_positions.shape[0],
-        'K': K,
-        'z_dim': z_dim,
-        'd': d,
+        'K': K_min,
+        'K_A': K_A, 'K_B': K_B, 'K_C': K_C,
+        'z_dim': z_dim_A,  # For backward compatibility
+        'z_dim_A': z_dim_A, 'z_dim_B': z_dim_B, 'z_dim_C': z_dim_C,
+        'd': d_A,  # For backward compatibility
+        'd_A': d_A, 'd_B': d_B, 'd_C': d_C,
+        'is_symmetric': is_symmetric,
         'n_actor_epochs': n_actor_epochs,
         'n_functor_epochs': n_functor_epochs,
+        
+        # Topological stress analysis
+        'topo_health': topo_stress['overall_health'],
+        'topo_total_folds': topo_stress['total_folds'],
+        'topo_max_condition': topo_stress['max_condition'],
     }
     
     print()
@@ -996,6 +1114,12 @@ def run_reference_probe_test(
     null_std = gauge_metrics['probe_baseline_std']
     print(f"Probe agreement: {gauge_metrics['probe_sim']:.3f} (null mean: {gauge_metrics['probe_baseline_mean']:.3f}, std: {null_std:.3f})")
     print(f"Probe advantage: {probe_adv:+.3f}, p-value: {p_str}")
+    
+    # Topological stress (sphere-aware)
+    print()
+    print(f"Topological Health (sphere-aware): {topo_stress['overall_health'].upper()}")
+    if topo_stress['overall_health'] in ('stressed', 'critical'):
+        print("  ⚠️ Functor maps show dimension collapse (effective rank < expected)")
     
     if not gauge_metrics['null_is_valid']:
         print(f"⚠️ WARNING: Degenerate null (std={null_std:.2e}). Test may be invalid.")
@@ -1034,3 +1158,235 @@ if __name__ == "__main__":
         K=args.K,
         z_dim=args.z_dim,
     )
+
+
+def run_rotation_control_test(
+    output_dir: Path,
+    n_actor_epochs: int = 500,
+    n_functor_epochs: int = 2000,
+    z_dim: int = 2,
+    K: int = 3,
+    d: int = 3,
+) -> Dict:
+    """
+    CONTROL TEST: Is topological stress inherent to MLP→sphere or semantic friction?
+    
+    Procedure:
+    1. Train Actor A normally
+    2. Actor B = Actor A's z-space rotated by a known matrix R
+    3. Train functor F_AB to learn this rotation
+    4. Check Jacobian health
+    
+    If HEALTHY: MLP can represent rotations cleanly → stress in main tests is real semantic friction
+    If CRITICAL: MLP architecture is bad at spherical maps → stress is architectural artifact
+    """
+    from v2.actors.actor import Actor
+    from .world_variants import create_world_A, CMGWorldVariant
+    from .zmap import ZMap, jacobian_determinant_analysis, detect_topological_stress
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    print("=" * 60)
+    print("ROTATION CONTROL TEST")
+    print("=" * 60)
+    print("Testing if MLP can represent known spherical rotation cleanly")
+    print(f"z_dim={z_dim}, K={K}, d={d}")
+    print()
+    
+    # Create environment and train Actor A
+    print("Phase 1: Training Actor A...")
+    config_A = create_world_A(K=K, d=d)
+    env_A = CMGWorldVariant(config_A)
+    
+    actor_A = Actor(
+        obs_dim=env_A.obs_dim,
+        pred_dim=env_A.state_dim,
+        T=env_A.T,
+        z_dim=z_dim,
+        n_knots=5,
+    ).to(device)
+    
+    optimizer_A = torch.optim.Adam(actor_A.parameters(), lr=1e-3)
+    
+    for epoch in range(n_actor_epochs):
+        obs = env_A.reset()
+        traj = [obs]
+        done = False
+        while not done:
+            action = np.random.randn(env_A.state_dim).astype(np.float32) * 0.3
+            obs, _, done, _ = env_A.step(action)
+            traj.append(obs)
+        
+        traj_array = np.array(traj)
+        traj_delta = torch.tensor(
+            traj_array[1:, :env_A.state_dim] - traj_array[0, :env_A.state_dim],
+            dtype=torch.float32, device=device
+        )
+        s0 = torch.tensor(traj[0], dtype=torch.float32, device=device)
+        actor_A.train_step_wta(s0, traj_delta, optimizer_A)
+        
+        if (epoch + 1) % max(1, n_actor_epochs // 5) == 0:
+            print(f"  Epoch {epoch+1}/{n_actor_epochs}")
+    
+    actor_A.eval()
+    for param in actor_A.parameters():
+        param.requires_grad = False
+    
+    # Define known rotation matrix R
+    print()
+    print("Phase 2: Defining known rotation R...")
+    torch.manual_seed(42)
+    # Random orthogonal matrix via QR decomposition
+    random_matrix = torch.randn(z_dim, z_dim, device=device)
+    R, _ = torch.linalg.qr(random_matrix)
+    print(f"  Rotation matrix R ({z_dim}x{z_dim}) defined")
+    print(f"  det(R) = {torch.linalg.det(R).item():.4f} (should be ±1)")
+    
+    # Actor B is just Actor A with rotated z-space
+    # F_AB should learn to be R (a rotation)
+    # The "target" for training: F_AB(z) should equal R @ z
+    
+    # Train functor to learn R - test both standard and residual architectures
+    print()
+    print("Phase 3: Training functors to learn rotation R...")
+    print("  Testing both standard MLP and residual architectures...")
+    
+    # Standard MLP
+    F_standard = ZMap(z_dim=z_dim, residual=False).to(device)
+    optimizer_std = torch.optim.Adam(F_standard.parameters(), lr=1e-3)
+    
+    # Residual MLP
+    F_residual = ZMap(z_dim=z_dim, residual=True).to(device)
+    optimizer_res = torch.optim.Adam(F_residual.parameters(), lr=1e-3)
+    
+    history_std = []
+    history_res = []
+    for epoch in range(n_functor_epochs):
+        # Sample random z on sphere
+        z = torch.randn(64, z_dim, device=device)
+        z = F.normalize(z, p=2, dim=-1)
+        
+        # Target: z rotated by R
+        z_target = (z @ R.t())  # R @ z for each sample
+        z_target = F.normalize(z_target, p=2, dim=-1)  # Keep on sphere
+        
+        # Train standard MLP
+        z_pred_std = F_standard(z)
+        sim_std = (z_pred_std * z_target).sum(dim=-1)
+        loss_std = (1.0 - sim_std).mean()
+        optimizer_std.zero_grad()
+        loss_std.backward()
+        optimizer_std.step()
+        history_std.append({'loss': loss_std.item(), 'sim': sim_std.mean().item()})
+        
+        # Train residual MLP
+        z_pred_res = F_residual(z)
+        sim_res = (z_pred_res * z_target).sum(dim=-1)
+        loss_res = (1.0 - sim_res).mean()
+        optimizer_res.zero_grad()
+        loss_res.backward()
+        optimizer_res.step()
+        history_res.append({'loss': loss_res.item(), 'sim': sim_res.mean().item()})
+        
+        if (epoch + 1) % max(1, n_functor_epochs // 4) == 0:
+            print(f"  Epoch {epoch+1}/{n_functor_epochs}:")
+            print(f"    Standard: loss={loss_std.item():.6f}, sim={sim_std.mean().item():.4f}")
+            print(f"    Residual: loss={loss_res.item():.6f}, sim={sim_res.mean().item():.4f}")
+    
+    # Evaluate Jacobian for both architectures
+    print()
+    print("Phase 4: Jacobian analysis...")
+    print("  (Using SPHERE-AWARE metrics - ambient det is always ~0 for sphere maps)")
+    
+    print()
+    print("  STANDARD MLP:")
+    jac_stats_std = jacobian_determinant_analysis(F_standard, z_dim, z_dim, device, n_samples=500)
+    issues_std = detect_topological_stress(jac_stats_std, sphere_aware=True)
+    print(f"    Singular values: min={jac_stats_std['sv_min']:.4f}, max={jac_stats_std['sv_max']:.4f}")
+    print(f"    SV ratio (anisotropy): {jac_stats_std['sv_max']/(jac_stats_std['sv_min']+1e-8):.1f}")
+    print(f"    Effective rank: {jac_stats_std['effective_rank_mean']:.2f} (expected: {z_dim-1})")
+    print(f"    HEALTH: {issues_std['overall_health'].upper()}")
+    
+    print()
+    print("  RESIDUAL MLP:")
+    jac_stats_res = jacobian_determinant_analysis(F_residual, z_dim, z_dim, device, n_samples=500)
+    issues_res = detect_topological_stress(jac_stats_res, sphere_aware=True)
+    print(f"    Singular values: min={jac_stats_res['sv_min']:.4f}, max={jac_stats_res['sv_max']:.4f}")
+    print(f"    SV ratio (anisotropy): {jac_stats_res['sv_max']/(jac_stats_res['sv_min']+1e-8):.1f}")
+    print(f"    Effective rank: {jac_stats_res['effective_rank_mean']:.2f} (expected: {z_dim-1})")
+    print(f"    HEALTH: {issues_res['overall_health'].upper()}")
+    
+    # Check how close each architecture is to the true rotation R
+    print()
+    print("Phase 5: Rotation accuracy check...")
+    z_test = torch.randn(1000, z_dim, device=device)
+    z_test = F.normalize(z_test, p=2, dim=-1)
+    z_true = F.normalize(z_test @ R.t(), p=2, dim=-1)
+    
+    with torch.no_grad():
+        z_pred_std = F_standard(z_test)
+        final_sim_std = (z_pred_std * z_true).sum(dim=-1).mean().item()
+        
+        z_pred_res = F_residual(z_test)
+        final_sim_res = (z_pred_res * z_true).sum(dim=-1).mean().item()
+    
+    print(f"  Standard MLP accuracy: {final_sim_std:.6f}")
+    print(f"  Residual MLP accuracy: {final_sim_res:.6f}")
+    
+    # Verdict
+    print()
+    print("=" * 60)
+    print("VERDICT")
+    print("=" * 60)
+    
+    residual_helps = issues_res['overall_health'] in ('healthy', 'minor_stress')
+    standard_bad = issues_std['overall_health'] in ('stressed', 'critical')
+    
+    if residual_helps and standard_bad:
+        print("✅ RESIDUAL ARCHITECTURE FIXES TOPOLOGICAL HEALTH!")
+        print("   → Standard MLP: degenerate Jacobian (architectural)")
+        print("   → Residual MLP: clean Jacobian")
+        print("   → Recommendation: Use residual=True for ZMap")
+    elif not residual_helps:
+        print("⚠️ Even residual architecture shows stress.")
+        print("   → Issue may be deeper than architecture")
+        print("   → Consider manifold-aware layers")
+    else:
+        print("✅ Standard MLP is already healthy.")
+        print("   → Stress in main tests is TRUE SEMANTIC FRICTION")
+    
+    results = {
+        'standard': {
+            'final_sim': final_sim_std,
+            'topo_health': issues_std['overall_health'],
+            'det_mean': jac_stats_std['det_mean'],
+            'det_std': jac_stats_std['det_std'],
+            'n_folds': jac_stats_std['n_folds'],
+            'fold_fraction': jac_stats_std['fold_fraction'],
+            'condition_mean': jac_stats_std['condition_mean'],
+            'condition_max': jac_stats_std['condition_max'],
+            'effective_rank': jac_stats_std['effective_rank_mean'],
+        },
+        'residual': {
+            'final_sim': final_sim_res,
+            'topo_health': issues_res['overall_health'],
+            'det_mean': jac_stats_res['det_mean'],
+            'det_std': jac_stats_res['det_std'],
+            'n_folds': jac_stats_res['n_folds'],
+            'fold_fraction': jac_stats_res['fold_fraction'],
+            'condition_mean': jac_stats_res['condition_mean'],
+            'condition_max': jac_stats_res['condition_max'],
+            'effective_rank': jac_stats_res['effective_rank_mean'],
+        },
+        'residual_helps': residual_helps,
+    }
+    
+    # Save results
+    output_dir.mkdir(parents=True, exist_ok=True)
+    import json
+    with open(output_dir / "rotation_control_results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"\nResults saved to {output_dir}")
+    
+    return results

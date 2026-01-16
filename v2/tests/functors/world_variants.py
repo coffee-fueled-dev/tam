@@ -295,3 +295,96 @@ def create_paired_envs(
     """
     config_A, config_B = create_world_pair(variant, seed)
     return CMGWorldVariant(config_A), CMGWorldVariant(config_B)
+
+
+def create_topological_collision_config(
+    seed: int = 42,
+    d: int = 3,
+) -> Tuple[WorldVariantConfig, WorldVariantConfig, WorldVariantConfig]:
+    """
+    Create a "Topological Collision" scenario.
+    
+    This tests the fundamental limit of functorial transfer:
+    - Actor A sees K=2 basins as ADJACENT (no intervening structure)
+    - Actor B sees K=3 basins where the MIDDLE basin sits between A's two
+    - Actor C sees K=2 basins (same as A, for composition testing)
+    
+    The question: Can the functor F_AB handle mapping an "edge" in A's 
+    topology to a "path through a vertex" in B's topology?
+    
+    This is where we expect:
+    - Jacobian determinant spikes (topological tearing)
+    - Composition violations (F_AC ≠ F_BC ∘ F_AB)
+    - High condition numbers in the transition region
+    
+    Returns:
+        (config_A, config_B, config_C) with collision topology
+    """
+    np.random.seed(seed)
+    
+    # World A: 2 basins, diametrically opposed
+    # Goals at "north" and "south" poles
+    config_A = WorldVariantConfig(
+        d=d,
+        K=2,
+        T=20,
+        t_gate=5,
+        noise_x=0.01,
+        noise_obs=0.01,
+        action_scale=1.0,
+        goal_spread=1.0,  # Maximum separation
+        early_divergence=True,
+        divergence_strength=1.0,
+    )
+    
+    # World B: 3 basins, the MIDDLE one sits between A's two
+    # Goals at "north", "equator", and "south"
+    # The equator goal creates the collision
+    config_B = WorldVariantConfig(
+        d=d,
+        K=3,
+        T=20,
+        t_gate=5,
+        noise_x=0.01,
+        noise_obs=0.01,
+        action_scale=1.0,
+        goal_spread=0.7,  # Tighter packing to ensure middle basin matters
+        early_divergence=True,
+        divergence_strength=1.0,
+    )
+    
+    # World C: Same as A (2 basins) for composition test
+    rot_C = random_rotation_matrix(d, seed + 200)
+    config_C = WorldVariantConfig(
+        d=d,
+        K=2,
+        T=20,
+        t_gate=5,
+        noise_x=0.02,
+        noise_obs=0.02,
+        action_scale=1.0,
+        goal_spread=1.0,
+        obs_rotation=rot_C,
+        early_divergence=True,
+        divergence_strength=1.0,
+    )
+    
+    return config_A, config_B, config_C
+
+
+def create_topological_collision_envs(
+    seed: int = 42,
+    d: int = 3,
+) -> Tuple['CMGWorldVariant', 'CMGWorldVariant', 'CMGWorldVariant']:
+    """
+    Create environments for the topological collision test.
+    
+    Returns:
+        (env_A, env_B, env_C) where A and C have K=2, B has K=3
+    """
+    config_A, config_B, config_C = create_topological_collision_config(seed, d)
+    return (
+        CMGWorldVariant(config_A),
+        CMGWorldVariant(config_B),
+        CMGWorldVariant(config_C),
+    )

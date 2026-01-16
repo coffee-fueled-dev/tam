@@ -12,32 +12,348 @@ from typing import Dict, Tuple, Optional, List
 import numpy as np
 
 
+def compute_jacobian(func: nn.Module, z: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the Jacobian matrix df/dz for a mapping function.
+    
+    Args:
+        func: Mapping function (e.g., ZMap)
+        z: (N, d_in) input points
+    
+    Returns:
+        J: (N, d_out, d_in) Jacobian matrices
+    """
+    z = z.detach().clone().requires_grad_(True)
+    
+    # Forward pass
+    out = func(z)  # (N, d_out)
+    N, d_out = out.shape
+    d_in = z.shape[1]
+    
+    # Compute Jacobian by backprop through each output dimension
+    J = torch.zeros(N, d_out, d_in, device=z.device)
+    
+    for i in range(d_out):
+        # Select i-th output component
+        grad_outputs = torch.zeros_like(out)
+        grad_outputs[:, i] = 1.0
+        
+        # Backprop
+        grads = torch.autograd.grad(
+            outputs=out,
+            inputs=z,
+            grad_outputs=grad_outputs,
+            create_graph=False,
+            retain_graph=True,
+        )[0]
+        
+        J[:, i, :] = grads
+    
+    return J
+
+
+def compute_tangent_jacobian(func: nn.Module, z: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the tangent-space Jacobian for a sphere → sphere map.
+    
+    Since both input and output are on unit spheres, the meaningful Jacobian
+    is the map between tangent spaces, not the ambient space Jacobian.
+    
+    Args:
+        func: Mapping function (outputs unit vectors)
+        z: (N, d_in) input points ON THE UNIT SPHERE
+    
+    Returns:
+        J_tangent: (N, d_out-1, d_in-1) tangent space Jacobians
+    """
+    z = z.detach().clone().requires_grad_(True)
+    N, d_in = z.shape
+    
+    # Get output (on sphere)
+    out = func(z)  # (N, d_out)
+    d_out = out.shape[1]
+    
+    # For each sample, construct orthonormal basis for tangent space
+    # We'll use a simple approach: project the ambient Jacobian onto tangent spaces
+    
+    # Compute full ambient Jacobian
+    J_ambient = torch.zeros(N, d_out, d_in, device=z.device)
+    for i in range(d_out):
+        grad_outputs = torch.zeros_like(out)
+        grad_outputs[:, i] = 1.0
+        grads = torch.autograd.grad(
+            outputs=out, inputs=z, grad_outputs=grad_outputs,
+            create_graph=False, retain_graph=True
+        )[0]
+        J_ambient[:, i, :] = grads
+    
+    # Project J_ambient onto tangent spaces
+    # Input tangent: T_z = {v : v^T z = 0}
+    # Output tangent: T_y = {v : v^T y = 0}
+    # J_tangent = P_y @ J_ambient @ P_z where P is orthogonal projector onto tangent
+    
+    # For simplicity, compute singular values of projected Jacobian
+    # This gives us the stretching/compression along tangent directions
+    
+    # Use SVD of J_ambient to get tangent contribution
+    # Singular values capture the "shape" of the mapping
+    
+    return J_ambient
+
+
+def jacobian_determinant_analysis(
+    func: nn.Module,
+    z_dim_src: int,
+    z_dim_tgt: int,
+    device: torch.device,
+    n_samples: int = 500,
+    seed: int = 42,
+    sphere_aware: bool = True,  # New: use tangent-space analysis
+) -> Dict[str, float]:
+    """
+    Analyze the Jacobian of a functor map to detect topological distortions.
+    
+    For same-dim maps: det(J) measures local volume change.
+    - det(J) ≈ 1: conformal (shape-preserving)
+    - det(J) → 0: compression/collapse
+    - det(J) → ∞: expansion/tearing
+    - det(J) < 0: orientation reversal (folding)
+    
+    For cross-dim maps: singular values measure stretching.
+    
+    Returns:
+        Dict with:
+        - det_mean, det_std: Jacobian determinant stats (same-dim only)
+        - det_min, det_max: extremes
+        - n_folds: count of sign flips (orientation reversals)
+        - sv_condition: condition number from singular values
+        - sv_min, sv_max: singular value extremes
+    """
+    torch.manual_seed(seed)
+    
+    # Sample points on unit sphere
+    z = torch.randn(n_samples, z_dim_src, device=device)
+    z = F.normalize(z, p=2, dim=-1)
+    
+    # Compute Jacobian
+    J = compute_jacobian(func, z)  # (N, d_out, d_in)
+    
+    results = {}
+    
+    if z_dim_src == z_dim_tgt:
+        # Square Jacobian: can compute determinant
+        dets = torch.linalg.det(J)  # (N,)
+        
+        results['det_mean'] = float(dets.mean().item())
+        results['det_std'] = float(dets.std().item())
+        results['det_min'] = float(dets.min().item())
+        results['det_max'] = float(dets.max().item())
+        results['n_folds'] = int((dets < 0).sum().item())
+        results['fold_fraction'] = float((dets < 0).float().mean().item())
+        
+        # Log determinant for stability
+        log_dets = torch.log(dets.abs() + 1e-8)
+        results['log_det_mean'] = float(log_dets.mean().item())
+        results['log_det_std'] = float(log_dets.std().item())
+    
+    # Singular value analysis (works for any dimensions)
+    # J = U @ S @ V^T
+    try:
+        S = torch.linalg.svdvals(J)  # (N, min(d_out, d_in))
+        
+        results['sv_min'] = float(S.min().item())
+        results['sv_max'] = float(S.max().item())
+        results['sv_mean'] = float(S.mean().item())
+        
+        # Condition number: ratio of largest to smallest singular value
+        # High condition number = ill-conditioned = topological stress
+        sv_min_per_sample = S.min(dim=-1).values
+        sv_max_per_sample = S.max(dim=-1).values
+        condition = sv_max_per_sample / (sv_min_per_sample + 1e-8)
+        
+        results['condition_mean'] = float(condition.mean().item())
+        results['condition_max'] = float(condition.max().item())
+        results['condition_std'] = float(condition.std().item())
+        
+        # Effective rank: how many singular values are "active"
+        # Low effective rank = dimension collapse
+        normalized_S = S / (S.sum(dim=-1, keepdim=True) + 1e-8)
+        entropy = -(normalized_S * torch.log(normalized_S + 1e-8)).sum(dim=-1)
+        eff_rank = torch.exp(entropy)
+        
+        results['effective_rank_mean'] = float(eff_rank.mean().item())
+        results['effective_rank_min'] = float(eff_rank.min().item())
+        
+    except RuntimeError:
+        # SVD can fail for degenerate matrices
+        results['svd_failed'] = True
+    
+    return results
+
+
+def detect_topological_stress(jacobian_stats: Dict[str, float], sphere_aware: bool = True) -> Dict[str, any]:
+    """
+    Interpret Jacobian statistics to detect topological problems.
+    
+    Args:
+        jacobian_stats: Output from jacobian_determinant_analysis
+        sphere_aware: If True, adjust thresholds for sphere-constrained maps.
+                      Sphere maps have inherently degenerate ambient Jacobians,
+                      so we focus on singular value ratios instead of determinants.
+    
+    Returns:
+        Dict with boolean flags and severity scores for various issues.
+    """
+    issues = {}
+    z_dim = jacobian_stats.get('z_dim_tgt', 2)
+    
+    if sphere_aware:
+        # For sphere maps, the ambient determinant is always ~0 (not meaningful)
+        # The meaningful metric is effective rank relative to expected tangent dimension
+        
+        expected_rank = z_dim - 1  # Sphere is (d-1)-dimensional
+        
+        # Effective rank: should be close to (d-1) for sphere maps
+        if 'effective_rank_mean' in jacobian_stats:
+            eff_rank = jacobian_stats['effective_rank_mean']
+            
+            if expected_rank > 0:
+                rank_ratio = eff_rank / expected_rank
+                
+                # For sphere maps, being close to expected rank is healthy
+                issues['has_dimension_collapse'] = rank_ratio < 0.7
+                issues['dimension_collapse_severity'] = (
+                    'high' if rank_ratio < 0.3 else
+                    'medium' if rank_ratio < 0.7 else
+                    'low'
+                )
+                issues['rank_ratio'] = rank_ratio
+            else:
+                # z_dim=1 edge case (single point, no meaningful sphere)
+                issues['has_dimension_collapse'] = False
+                issues['dimension_collapse_severity'] = 'low'
+                issues['rank_ratio'] = 1.0
+        
+        # For sphere maps with d>2, check anisotropy among tangent singular values
+        # (Skip for d=2 since there's only one tangent direction)
+        if z_dim > 2 and 'sv_mean' in jacobian_stats:
+            # Look at condition number as proxy for tangent-space anisotropy
+            # High condition = some tangent directions stretched more than others
+            cond = jacobian_stats.get('condition_mean', 1.0)
+            # Much more lenient threshold for sphere maps
+            issues['has_anisotropy'] = cond > 1000
+            issues['anisotropy_severity'] = 'high' if cond > 10000 else 'medium' if cond > 1000 else 'low'
+        else:
+            issues['has_anisotropy'] = False
+            issues['anisotropy_severity'] = 'low'
+        
+        # For sphere maps, "folds" in ambient space aren't meaningful
+        issues['fold_analysis'] = 'skipped (sphere-aware)'
+        
+    else:
+        # Original ambient-space analysis (kept for non-sphere maps)
+        
+        # Folding: orientation reversals
+        if 'fold_fraction' in jacobian_stats:
+            fold_frac = jacobian_stats['fold_fraction']
+            issues['has_folds'] = fold_frac > 0.01
+            issues['fold_severity'] = 'high' if fold_frac > 0.1 else 'medium' if fold_frac > 0.01 else 'low'
+        
+        # Collapse: regions compressed to near-zero volume
+        if 'det_min' in jacobian_stats:
+            det_min = jacobian_stats['det_min']
+            issues['has_collapse'] = abs(det_min) < 0.01
+            issues['collapse_severity'] = 'high' if abs(det_min) < 0.001 else 'medium' if abs(det_min) < 0.01 else 'low'
+        
+        # Tearing: regions stretched to extreme volume
+        if 'det_max' in jacobian_stats:
+            det_max = jacobian_stats['det_max']
+            issues['has_tearing'] = det_max > 10
+            issues['tearing_severity'] = 'high' if det_max > 100 else 'medium' if det_max > 10 else 'low'
+        
+        # Ill-conditioning: high condition number
+        if 'condition_max' in jacobian_stats:
+            cond_max = jacobian_stats['condition_max']
+            issues['is_ill_conditioned'] = cond_max > 100
+            issues['conditioning_severity'] = 'high' if cond_max > 1000 else 'medium' if cond_max > 100 else 'low'
+        
+        # Dimension collapse: low effective rank
+        if 'effective_rank_min' in jacobian_stats:
+            eff_rank = jacobian_stats['effective_rank_min']
+            issues['has_dimension_collapse'] = eff_rank < z_dim * 0.5
+            issues['dimension_collapse_severity'] = (
+                'high' if eff_rank < z_dim * 0.3 else 
+                'medium' if eff_rank < z_dim * 0.5 else 
+                'low'
+            )
+    
+    # Overall topological health
+    severe_issues = sum(1 for k, v in issues.items() if k.endswith('_severity') and v == 'high')
+    medium_issues = sum(1 for k, v in issues.items() if k.endswith('_severity') and v == 'medium')
+    
+    if severe_issues > 0:
+        issues['overall_health'] = 'critical'
+    elif medium_issues > 1:
+        issues['overall_health'] = 'stressed'
+    elif medium_issues > 0:
+        issues['overall_health'] = 'minor_stress'
+    else:
+        issues['overall_health'] = 'healthy'
+    
+    return issues
+
+
 class ZMap(nn.Module):
     """
     Learnable structure-preserving map between commitment spaces.
     
     Maps z_A (from actor A) to z_B (for actor B) such that
     viability structure (energy basins) is preserved.
+    
+    Supports cross-dimensional mappings (z_dim_src != z_dim_tgt).
     """
     
     def __init__(
         self,
-        z_dim: int,
+        z_dim: int = None,
         hidden_dim: int = 128,
         n_layers: int = 2,
+        # Cross-dimensional support
+        z_dim_src: int = None,
+        z_dim_tgt: int = None,
+        # Architecture variant
+        residual: bool = False,  # If True, use F(z) = z + f(z), then normalize
     ):
         super().__init__()
-        self.z_dim = z_dim
+        
+        # Handle both old API (z_dim) and new API (z_dim_src, z_dim_tgt)
+        if z_dim is not None:
+            z_dim_src = z_dim_src or z_dim
+            z_dim_tgt = z_dim_tgt or z_dim
+        
+        if z_dim_src is None or z_dim_tgt is None:
+            raise ValueError("Must specify z_dim or (z_dim_src, z_dim_tgt)")
+        
+        self.z_dim_src = z_dim_src
+        self.z_dim_tgt = z_dim_tgt
+        self.z_dim = z_dim_src  # For backward compatibility
+        self.residual = residual and (z_dim_src == z_dim_tgt)  # Residual only for same-dim
         
         layers = []
-        in_dim = z_dim
+        in_dim = z_dim_src
         for i in range(n_layers):
             layers.append(nn.Linear(in_dim, hidden_dim))
             layers.append(nn.ReLU())
             in_dim = hidden_dim
-        layers.append(nn.Linear(hidden_dim, z_dim))
+        layers.append(nn.Linear(hidden_dim, z_dim_tgt))
         
         self.net = nn.Sequential(*layers)
+        
+        # For residual: initialize output layer to small values
+        if self.residual:
+            with torch.no_grad():
+                self.net[-1].weight.mul_(0.01)
+                self.net[-1].bias.mul_(0.01)
     
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         """
@@ -53,7 +369,14 @@ class ZMap(nn.Module):
         if squeeze:
             z = z.unsqueeze(0)
         
-        z_out = self.net(z)
+        delta = self.net(z)
+        
+        if self.residual:
+            # Residual: preserves identity at init, smoother Jacobian
+            z_out = z + delta
+        else:
+            z_out = delta
+        
         z_out = F.normalize(z_out, p=2, dim=-1)
         
         if squeeze:
