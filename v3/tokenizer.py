@@ -157,26 +157,44 @@ class InvariantLattice:
 
 class TknProcessor:
     """
-    Multi-head processor for quantizing geometric data into higher-level motifs.
+    Dimension-agnostic multi-head processor for quantizing geometric data into higher-level motifs.
     
-    Manages parallel heads for:
-    - X, Y, Z delta quantization (movement direction)
-    - Proximity quantization (distance to nearest obstacle)
-    - Goal direction quantization (X, Y, Z components)
+    Dynamically creates heads based on state_dim:
+    - One delta head per dimension (movement direction)
+    - One proximity head (distance to nearest obstacle)
+    - One goal direction head per dimension
+    
+    This allows the system to work with any N-dimensional state space.
     """
-    def __init__(self, quantization_bins=11, quant_range=(-2.0, 2.0), vocab_size=65536):
+    def __init__(self, state_dim=3, quantization_bins=11, quant_range=(-2.0, 2.0), vocab_size=65536):
+        """
+        Args:
+            state_dim: Dimension of state space (e.g., 3 for 3D, 6 for 6D robotic arm)
+            quantization_bins: Number of quantization bins per head
+            quant_range: Default quantization range (min, max)
+            vocab_size: Token vocabulary size
+        """
+        self.state_dim = state_dim
         self.quantization_bins = quantization_bins
         self.quant_range = quant_range
         self.vocab_size = vocab_size
-        self.heads = {
-            "delta_x": TknHead("delta_x", quantization_bins, quant_range, vocab_size),
-            "delta_y": TknHead("delta_y", quantization_bins, quant_range, vocab_size),
-            "delta_z": TknHead("delta_z", quantization_bins, quant_range, vocab_size),
-            "proximity": TknHead("proximity", quantization_bins, quant_range=(-5.0, 10.0), vocab_size=vocab_size),
-            "goal_dir_x": TknHead("goal_dir_x", quantization_bins, quant_range, vocab_size),
-            "goal_dir_y": TknHead("goal_dir_y", quantization_bins, quant_range, vocab_size),
-            "goal_dir_z": TknHead("goal_dir_z", quantization_bins, quant_range, vocab_size),
-        }
+        
+        # Dynamically create heads based on state_dim
+        self.heads = {}
+        
+        # Delta heads: one per dimension (movement direction)
+        for i in range(state_dim):
+            head_name = f"delta_{i}"
+            self.heads[head_name] = TknHead(head_name, quantization_bins, quant_range, vocab_size)
+        
+        # Proximity head: distance to nearest obstacle
+        self.heads["proximity"] = TknHead("proximity", quantization_bins, quant_range=(-5.0, 10.0), vocab_size=vocab_size)
+        
+        # Goal direction heads: one per dimension
+        for i in range(state_dim):
+            head_name = f"goal_dir_{i}"
+            self.heads[head_name] = TknHead(head_name, quantization_bins, quant_range, vocab_size)
+        
         self.head_names = list(self.heads.keys())
         self.previous_pos = None
         self.previous_rel_goal = None
@@ -189,9 +207,9 @@ class TknProcessor:
         Process a raw observation through tkn heads and update invariant lattice.
         
         Args:
-            current_pos: Current position (3,) tensor
+            current_pos: Current position (state_dim,) tensor
             raw_obs: Raw observation tensor (raw_ctx_dim,)
-            obstacles: List of (position, radius) tuples
+            obstacles: List of (position, radius) tuples where position is (state_dim,) array
             
         Returns:
             dict with:
@@ -203,29 +221,54 @@ class TknProcessor:
         """
         current_pos_np = current_pos.squeeze().cpu().numpy() if isinstance(current_pos, torch.Tensor) else current_pos
         
-        # Extract relative goal from raw_obs (first 3 elements)
-        rel_goal = raw_obs[:3].cpu().numpy() if isinstance(raw_obs, torch.Tensor) else raw_obs[:3]
+        # Ensure current_pos_np is the right shape
+        if current_pos_np.ndim == 0:
+            current_pos_np = np.array([current_pos_np])
+        elif current_pos_np.ndim > 1:
+            current_pos_np = current_pos_np.flatten()
+        
+        # Extract relative goal from raw_obs (first state_dim elements)
+        rel_goal = raw_obs[:self.state_dim].cpu().numpy() if isinstance(raw_obs, torch.Tensor) else raw_obs[:self.state_dim]
+        
+        # Ensure rel_goal is the right shape
+        if rel_goal.ndim == 0:
+            rel_goal = np.array([rel_goal])
+        elif rel_goal.ndim > 1:
+            rel_goal = rel_goal.flatten()
         
         # Calculate deltas (change in position)
         if self.previous_pos is not None:
             delta = current_pos_np - self.previous_pos
         else:
-            delta = np.zeros(3)
+            delta = np.zeros(self.state_dim)
         
-        # Quantize and process deltas
-        delta_x_q = self.heads["delta_x"].quantize(delta[0])
-        delta_y_q = self.heads["delta_y"].quantize(delta[1])
-        delta_z_q = self.heads["delta_z"].quantize(delta[2])
+        # Quantize and process deltas (one head per dimension)
+        head_emissions = {}
+        quantized_values = {}
         
-        delta_x_pattern, delta_x_novel = self.heads["delta_x"].process(delta_x_q)
-        delta_y_pattern, delta_y_novel = self.heads["delta_y"].process(delta_y_q)
-        delta_z_pattern, delta_z_novel = self.heads["delta_z"].process(delta_z_q)
+        for i in range(self.state_dim):
+            head_name = f"delta_{i}"
+            delta_q = self.heads[head_name].quantize(delta[i])
+            delta_pattern, delta_novel = self.heads[head_name].process(delta_q)
+            head_emissions[head_name] = (delta_pattern, delta_novel) if delta_pattern is not None else None
+            quantized_values[head_name] = int(delta_q)
         
         # Calculate proximity to nearest obstacle
         min_proximity = float('inf')
         if obstacles:
             for obs_p, obs_r in obstacles:
                 obs_pos = np.array(obs_p)
+                # Ensure obs_pos matches state_dim
+                if obs_pos.ndim == 0:
+                    obs_pos = np.array([obs_pos])
+                elif obs_pos.ndim > 1:
+                    obs_pos = obs_pos.flatten()
+                # Pad or truncate to match state_dim
+                if len(obs_pos) < self.state_dim:
+                    obs_pos = np.pad(obs_pos, (0, self.state_dim - len(obs_pos)), mode='constant')
+                elif len(obs_pos) > self.state_dim:
+                    obs_pos = obs_pos[:self.state_dim]
+                
                 distance = np.linalg.norm(current_pos_np - obs_pos) - obs_r
                 min_proximity = min(min_proximity, distance)
         else:
@@ -234,26 +277,16 @@ class TknProcessor:
         # Quantize and process proximity
         proximity_q = self.heads["proximity"].quantize(min_proximity)
         proximity_pattern, proximity_novel = self.heads["proximity"].process(proximity_q)
+        head_emissions["proximity"] = (proximity_pattern, proximity_novel) if proximity_pattern is not None else None
+        quantized_values["proximity"] = int(proximity_q)
         
-        # Quantize and process goal direction
-        goal_dir_x_q = self.heads["goal_dir_x"].quantize(rel_goal[0])
-        goal_dir_y_q = self.heads["goal_dir_y"].quantize(rel_goal[1])
-        goal_dir_z_q = self.heads["goal_dir_z"].quantize(rel_goal[2])
-        
-        goal_dir_x_pattern, goal_dir_x_novel = self.heads["goal_dir_x"].process(goal_dir_x_q)
-        goal_dir_y_pattern, goal_dir_y_novel = self.heads["goal_dir_y"].process(goal_dir_y_q)
-        goal_dir_z_pattern, goal_dir_z_novel = self.heads["goal_dir_z"].process(goal_dir_z_q)
-        
-        # Collect all emissions with novelty flags
-        head_emissions = {
-            "delta_x": (delta_x_pattern, delta_x_novel) if delta_x_pattern is not None else None,
-            "delta_y": (delta_y_pattern, delta_y_novel) if delta_y_pattern is not None else None,
-            "delta_z": (delta_z_pattern, delta_z_novel) if delta_z_pattern is not None else None,
-            "proximity": (proximity_pattern, proximity_novel) if proximity_pattern is not None else None,
-            "goal_dir_x": (goal_dir_x_pattern, goal_dir_x_novel) if goal_dir_x_pattern is not None else None,
-            "goal_dir_y": (goal_dir_y_pattern, goal_dir_y_novel) if goal_dir_y_pattern is not None else None,
-            "goal_dir_z": (goal_dir_z_pattern, goal_dir_z_novel) if goal_dir_z_pattern is not None else None,
-        }
+        # Quantize and process goal direction (one head per dimension)
+        for i in range(self.state_dim):
+            head_name = f"goal_dir_{i}"
+            goal_dir_q = self.heads[head_name].quantize(rel_goal[i] if i < len(rel_goal) else 0.0)
+            goal_dir_pattern, goal_dir_novel = self.heads[head_name].process(goal_dir_q)
+            head_emissions[head_name] = (goal_dir_pattern, goal_dir_novel) if goal_dir_pattern is not None else None
+            quantized_values[head_name] = int(goal_dir_q)
         
         # Update invariant lattice
         lattice_tokens, surprise_mask = self.lattice.update(head_emissions)
@@ -286,22 +319,14 @@ class TknProcessor:
             "surprise_mask": surprise_mask,  # (num_heads,) bool tensor
             "lattice_traits": lattice_traits,  # (num_heads, 2) tensor [hub_count, surprise]
             "buffer_hashes": buffer_hashes_tensor,  # (num_heads,) tensor of buffer hash IDs
-            "rel_goal": torch.tensor(rel_goal, dtype=torch.float32),  # (3,) high-fidelity intent
+            "rel_goal": torch.tensor(rel_goal, dtype=torch.float32),  # (state_dim,) high-fidelity intent
             "metadata": {
                 "timestamp": datetime.now().isoformat(),
                 "current_pos": current_pos_np.tolist(),
                 "rel_goal": rel_goal.tolist(),
                 "delta": delta.tolist(),
                 "min_proximity": float(min_proximity),
-                "quantized": {
-                    "delta_x": int(delta_x_q),
-                    "delta_y": int(delta_y_q),
-                    "delta_z": int(delta_z_q),
-                    "proximity": int(proximity_q),
-                    "goal_dir_x": int(goal_dir_x_q),
-                    "goal_dir_y": int(goal_dir_y_q),
-                    "goal_dir_z": int(goal_dir_z_q),
-                },
+                "quantized": quantized_values,
                 "emissions": {k: (v[0] if v is not None else None) 
                              for k, v in head_emissions.items()},
                 "has_emissions": any(v is not None for v in head_emissions.values()),

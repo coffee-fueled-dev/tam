@@ -3,7 +3,7 @@ import torch.nn as nn
 
 class HybridInferenceEngine(nn.Module):
     """
-    Hybrid Inference Engine that processes:
+    Dimension-agnostic Hybrid Inference Engine that processes:
     1. Discrete tokens (what) - geometric pattern IDs
     2. Lattice traits (epistemic status) - hub-ness, surprise, buffer state
     3. High-fidelity intent (where) - raw rel_goal vector
@@ -12,10 +12,21 @@ class HybridInferenceEngine(nn.Module):
     - Semantic meaning (token embeddings)
     - Epistemic confidence (lattice topology)
     - Spatial precision (direct goal vector)
+    
+    The intent dimension is configurable to support any state space dimensionality.
     """
-    def __init__(self, num_heads, vocab_size=65536, token_embed_dim=16, latent_dim=128):
+    def __init__(self, num_heads, intent_dim, vocab_size=65536, token_embed_dim=16, latent_dim=128):
+        """
+        Args:
+            num_heads: Number of tkn heads (determined by state_dim and other features)
+            intent_dim: Dimension of intent/state space (e.g., 3 for 3D, 6 for 6D)
+            vocab_size: Token vocabulary size
+            token_embed_dim: Embedding dimension per token
+            latent_dim: Dimension of latent situation space
+        """
         super().__init__()
         self.num_heads = num_heads
+        self.intent_dim = intent_dim  # Dimension-agnostic intent
         self.vocab_size = vocab_size
         self.token_embed_dim = token_embed_dim
         self.latent_dim = latent_dim
@@ -31,9 +42,9 @@ class HybridInferenceEngine(nn.Module):
             nn.LayerNorm(32)
         )
         
-        # Intent Stream: High-fidelity rel_goal (3,) -> Features
+        # Intent Stream: High-fidelity rel_goal (intent_dim,) -> Features
         self.intent_fc = nn.Sequential(
-            nn.Linear(3, 32),
+            nn.Linear(intent_dim, 32),
             nn.ReLU(),
             nn.LayerNorm(32)
         )
@@ -51,7 +62,7 @@ class HybridInferenceEngine(nn.Module):
         Args:
             lattice_tokens: (B, num_heads) tensor of token IDs
             lattice_traits: (B, num_heads, 2) tensor of [hub_count, surprise] per head
-            rel_goal: (B, 3) tensor of high-fidelity relative goal vector
+            rel_goal: (B, intent_dim) tensor of high-fidelity relative goal vector
             h_prev: (B, latent_dim) previous hidden state (situation from last step)
         
         Returns:

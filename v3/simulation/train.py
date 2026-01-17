@@ -13,8 +13,10 @@ from v3.simulation.plotter import LivePlotter
 from v3.simulation.wrapper import SimulationWrapper
 from v3.tokenizer import TknProcessor
 from v3.simulation.analysis import plot_training_progress, generate_training_summary
+from v3.simulation.environment import generate_obstacles
 
-def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_observed_obstacles=10, latent_dim=64):
+def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_observed_obstacles=10, 
+                latent_dim=64, state_dim=3, max_visualization_history=5):
     """
     Train the InferenceEngine and Actor together in the environment.
     
@@ -23,7 +25,7 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
     - Actor learns to use that representation to propose tubes
     
     Training runs for a fixed number of moves, continuously generating new goals when reached.
-    Visualization shows only the last 10 moves for clarity.
+    Visualization shows only the last N moves (configurable via max_visualization_history).
     
     Args:
         inference_engine: HybridInferenceEngine model (GRU-based World Model with tokenized inputs)
@@ -32,36 +34,46 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
         plot_live: Whether to show live visualization
         max_observed_obstacles: Maximum number of obstacles in observation (fixed size)
         latent_dim: Dimension of latent situation space
+        max_visualization_history: Maximum number of moves to display in visualization (default: 5)
     """
     # Combine parameters for joint optimization
     optimizer = optim.Adam(
         list(inference_engine.parameters()) + list(actor.parameters()), 
         lr=1e-3
     )
-    # Multiple obstacles creating a more challenging navigation environment
-    # You can freely add/remove obstacles here - the observation will pad/truncate automatically
-    obstacles = [
-        ([5.0, 5.0, 0.0], 2.5),      # Central obstacle
-        ([3.0, 8.0, 0.0], 1.5),      # Upper left
-        # ([8.0, 3.0, 0.0], 1.5),      # Lower right
-        # ([7.0, 7.0, 0.0], 1.8),      # Upper right cluster
-        # ([2.0, 2.0, 0.0], 1.2),      # Lower left
-        # ([9.0, 6.0, 0.0], 1.3),      # Right side
-        # ([4.0, 9.0, 0.0], 1.4),      # Top area
-    ]
-    
     # Define environment boundaries
     bounds = {
-        'min': [-2.0, -2.0, -2.0],
-        'max': [12.0, 12.0, 2.0]
+        'min': [-2.0] * state_dim,
+        'max': [12.0] * state_dim
     }
     
-    sim = SimulationWrapper(obstacles, bounds=bounds)
-    target_pos = torch.tensor([10.0, 10.0, 0.0])
+    # Generate deterministic obstacle layout
+    # Parameters can be tuned for difficulty:
+    # - num_obstacles: More = harder
+    # - packing_threshold: Higher = more spread out (easier navigation)
+    # - min_open_path_width: Higher = wider corridors (easier navigation)
+    # - seed: Change for different layouts (but same seed = same layout)
+    obstacle_seed = 42
+    obstacles = generate_obstacles(
+        state_dim=state_dim,
+        bounds=bounds,
+        num_obstacles=12,  # More obstacles for challenge
+        min_radius=0.8,
+        max_radius=2.2,
+        packing_threshold=0.5,  # 50% gap between obstacles (ensures spacing)
+        min_open_path_width=2.5,  # Minimum 2.5 unit wide corridors
+        seed=obstacle_seed
+    )
     
-    # Calculate raw context dimension: 3 (rel_goal) + max_observed_obstacles * 4
+    print(f"Generated {len(obstacles)} obstacles (seed={obstacle_seed}, deterministic)")
+    
+    sim = SimulationWrapper(obstacles, state_dim=state_dim, bounds=bounds)
+    # Initialize target position with state_dim dimensions
+    target_pos = torch.tensor([10.0] * state_dim)
+    
+    # Calculate raw context dimension: state_dim (rel_goal) + max_observed_obstacles * (state_dim + 1)
     # This is FIXED regardless of actual obstacle count (uses padding/truncation)
-    raw_ctx_dim = 3 + max_observed_obstacles * 4
+    raw_ctx_dim = state_dim + max_observed_obstacles * (state_dim + 1)
     
     # Create session directory and file
     artifacts_dir = "/Users/zach/Documents/dev/cfd/tam/artifacts"
@@ -77,7 +89,7 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
     
     # Initialize tkn processor (required for HybridInferenceEngine)
     vocab_size = inference_engine.vocab_size
-    tkn_processor = TknProcessor(quantization_bins=11, quant_range=(-2.0, 2.0), vocab_size=vocab_size)
+    tkn_processor = TknProcessor(state_dim=state_dim, quantization_bins=11, quant_range=(-2.0, 2.0), vocab_size=vocab_size)
     tkn_log_file = os.path.join(run_dir, f"tkn_patterns_{session_timestamp}.jsonl")
     print(f"TKN enabled: Pattern discovery logging to {tkn_log_file}")
     print(f"  - {len(tkn_processor.head_names)} heads: {', '.join(tkn_processor.head_names)}")
@@ -98,7 +110,7 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
         # Check the first layer input size (should be latent_dim + intent_dim)
         first_layer = list(actor.encoder.children())[0]
         if isinstance(first_layer, nn.Linear):
-            expected_input = first_layer.in_features - 3  # Subtract intent_dim
+            expected_input = first_layer.in_features - state_dim  # Subtract intent_dim (which equals state_dim)
             if expected_input != latent_dim:
                 raise ValueError(f"Actor latent_dim mismatch: expected {latent_dim}, "
                                f"but actor expects {expected_input}. "
@@ -109,9 +121,11 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
         "session_timestamp": session_timestamp,
         "total_moves": total_moves,
         "obstacles": obstacles,
+        "obstacle_seed": obstacle_seed,  # Save seed for reproducibility
         "bounds": bounds,
         "raw_ctx_dim": raw_ctx_dim,
         "latent_dim": latent_dim,
+        "state_dim": state_dim,
         "max_observed_obstacles": max_observed_obstacles,
         "initial_target": target_pos.tolist(),
         "use_tokenized": True,  # Always using tokenized system
@@ -120,17 +134,19 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
     # Initialize live plotter
     plotter = None
     if plot_live:
-        plotter = LivePlotter(obstacles, target_pos.numpy(), bounds=bounds)
+        plotter = LivePlotter(obstacles, target_pos.numpy(), bounds=bounds, max_history=max_visualization_history)
     
     print(f"Training for {total_moves} moves... (Session: {session_timestamp})")
     print(f"Run directory: {run_dir}")
-    print(f"Raw context dimension: {raw_ctx_dim} (3 goal + {max_observed_obstacles} max obstacles * 4)")
+    print(f"Raw context dimension: {raw_ctx_dim} ({state_dim} goal + {max_observed_obstacles} max obstacles * {state_dim + 1})")
     print(f"Latent dimension: {latent_dim}")
-    print(f"Actual obstacles in environment: {len(obstacles)}")
-    print(f"Visualization will show last 10 moves only")
+    print(f"State dimension: {state_dim}")
+    print(f"Obstacles: {len(obstacles)} (seed={obstacle_seed}, deterministic)")
+    print(f"Bounds: {bounds['min']} to {bounds['max']}")
+    print(f"Visualization will show last {max_visualization_history} moves only")
 
     # Initialize training state
-    current_pos = torch.zeros((1, 3))
+    current_pos = torch.zeros((1, state_dim))
     previous_velocity = None  # Track previous path direction for G1 continuity
     move_count = 0  # Total moves executed
     
@@ -154,8 +170,8 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
     # 4. Optimized tensor operations: Avoid unnecessary copies, use efficient numpy conversions
     # 5. Optimized statistics: Use float32 arrays, compute stats efficiently
     tkn_log_buffer = []  # Buffer tkn logs to write in batches
-    tkn_log_batch_size = 10  # Write tkn logs every N moves
-    plot_update_frequency = 1  # Update plot every N moves (1 = every move, 2 = every other move, etc.)
+    tkn_log_batch_size = 20  # Write tkn logs every N moves
+    plot_update_frequency = 1  # Update plot every N moves (1 = every move for better visualization)
     
     # Track loss history for analysis
     loss_history = []  # Track loss values over time
@@ -173,7 +189,7 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
         lattice_tokens = tkn_output["lattice_tokens"].unsqueeze(0)  # (1, num_heads)
         surprise_mask = tkn_output["surprise_mask"]  # (num_heads,)
         lattice_traits = tkn_output["lattice_traits"].unsqueeze(0)  # (1, num_heads, 2)
-        rel_goal_tensor = tkn_output["rel_goal"].unsqueeze(0)  # (1, 3) high-fidelity intent
+        rel_goal_tensor = tkn_output["rel_goal"].unsqueeze(0)  # (1, state_dim) high-fidelity intent
         
         # Buffer tkn logs for batch writing (much faster than writing every move)
         log_entry = {
@@ -203,26 +219,27 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
         
         # 2. ACT: Propose affordances based on latent situation x_n
         # Actor operates on latent representation, not raw spatial features
-        logits, mu_t, sigma_t, knot_mask, knot_steps = actor(x_n, rel_goal, previous_velocity=previous_velocity)
+        # New: Actor returns basis_weights instead of knot_steps, and per-dimension sigma
+        logits, mu_t, sigma_t, knot_mask, basis_weights = actor(x_n, rel_goal, previous_velocity=previous_velocity)
         
         # Selection (Categorical sampling for exploration)
         probs = F.softmax(logits, dim=-1)
         m = torch.distributions.Categorical(probs)
         idx = m.sample()
         
-        # Extract selected tube - ensure we get (T, 3) shape, not (1, T, 3)
+        # Extract selected tube - ensure we get (T, state_dim) shape
         idx_int = idx.item() if isinstance(idx, torch.Tensor) else idx
-        selected_tube = mu_t[0, idx_int].squeeze(0)  # Remove any extra dimensions
-        selected_sigma = sigma_t[0, idx_int].squeeze(0)
+        selected_tube = mu_t[0, idx_int].squeeze(0)  # (T, state_dim)
+        selected_sigma = sigma_t[0, idx_int].squeeze(0)  # (T, state_dim) - per-dimension precision
         
         # Ensure shapes are correct
         if selected_tube.dim() > 2:
-            selected_tube = selected_tube.view(-1, 3)
+            selected_tube = selected_tube.view(-1, state_dim)
         if selected_sigma.dim() > 2:
-            selected_sigma = selected_sigma.view(-1, 1)
+            selected_sigma = selected_sigma.view(-1, state_dim)
             
-        # Track agency (sigma) values for current goal (optimized: single item() call)
-        agency_values.append(float(selected_sigma.mean()))
+        # Track agency (sigma) values for current goal - use mean across dimensions
+        agency_values.append(float(selected_sigma.mean().detach().item()))
         
         # Track segment lengths (distances between consecutive points in the tube)
         # Only calculate if we have multiple points (optimization)
@@ -233,34 +250,44 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
             segment_lengths.extend(segment_lengths_for_move.tolist())
         
         # Execute the tube
-        actual_p = sim.execute(selected_tube, selected_sigma, current_pos)
+        # selected_sigma is now (T, state_dim) - need to convert to scalar for execute()
+        # Use mean sigma across dimensions for execution (or max for conservative)
+        selected_sigma_scalar = selected_sigma.mean(dim=-1, keepdim=True)  # (T, 1)
+        actual_p = sim.execute(selected_tube, selected_sigma_scalar, current_pos)
         
-        # 3. SIMPLIFIED PRINCIPLED LOSS: Agency vs. Contradiction
-        # With GRU and Residual Knots, we can use a cleaner formulation
+        # 3. KNOT-THEORETIC BINDING LOSS: Topological binding with per-dimension precision
+        # This implements the "fibration binding" concept: verify the section stays within the fiber
         
-        # A) CONTRADICTION: Did we stay in the tube?
-        # Squared deviation makes hitting obstacles exponentially more painful
-        # Optimized: avoid creating full expected_p if not needed
+        # A) CONTRADICTION: Did we stay in the tube? (Topological Binding)
+        # Use per-dimension sigmas for anisotropic affordance tubes
         min_len = min(len(actual_p), len(selected_tube))
         if min_len > 0:
-            # Compute deviation efficiently
-            expected_p_slice = selected_tube[:min_len] + current_pos
-            actual_p_slice = actual_p[:min_len]
-            deviation = torch.norm(actual_p_slice - expected_p_slice, dim=-1, keepdim=True)
-            binding_loss = torch.mean((deviation**2) / (selected_sigma[:min_len] + 1e-6))
+            expected_p_slice = selected_tube[:min_len] + current_pos.squeeze()  # (T, state_dim)
+            actual_p_slice = actual_p[:min_len]  # (T, state_dim)
+            
+            # Per-dimension deviation
+            deviation_per_dim = (actual_p_slice - expected_p_slice)  # (T, state_dim)
+            
+            # Weight by per-dimension precision (sigma)
+            # Higher sigma = more tolerance in that dimension
+            # Binding loss: weighted squared deviation per dimension
+            sigma_slice = selected_sigma[:min_len]  # (T, state_dim)
+            weighted_deviation = (deviation_per_dim**2) / (sigma_slice + 1e-6)  # (T, state_dim)
+            
+            # Sum across dimensions, then average over time
+            binding_loss = torch.mean(weighted_deviation.sum(dim=-1))
         else:
             binding_loss = torch.tensor(0.0, device=selected_tube.device)
             
         # B) AGENCY COST: How 'expensive' was this path?
-        # Extract selected knot_steps for this port
-        selected_knot_steps = knot_steps[0, idx_int]  # (K, 3) - residual offsets
-        
-        # Penalize the sum of squared offsets (shorter, straighter paths are cheaper)
-        path_cost = torch.mean(selected_knot_steps**2)
+        # Penalize basis function weights (complexity of the section)
+        selected_basis_weights = basis_weights[0, idx_int]  # (n_basis,)
+        path_cost = torch.mean(selected_basis_weights**2)  # Penalize large basis weights
         
         # Penalize uncertainty (narrower tubes are better)
         # MODULATE WITH SURPRISE: Novel patterns increase sigma (expand tube, move cautiously)
-        base_uncertainty_cost = torch.mean(selected_sigma**2)
+        # Per-dimension uncertainty cost
+        base_uncertainty_cost = torch.mean(selected_sigma**2)  # Mean across all dimensions
         
         if surprise_mask is not None:
             # Surprise mechanism: Novel patterns -> higher sigma -> more cautious
@@ -289,7 +316,7 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
         loss_history.append(float(loss.item()))
         
         # Update position and track velocity for G1 continuity
-        current_pos = actual_p[-1].view(1, 3).detach()
+        current_pos = actual_p[-1].view(1, state_dim).detach()
         move_count += 1
         moves_to_current_goal += 1
         
@@ -297,18 +324,18 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
         # Use the last segment of the actual path to capture real movement direction
         if len(actual_p) > 1:
             # Use last segment of actual path (what really happened)
-            previous_velocity = (actual_p[-1] - actual_p[-2]).detach()  # (3,)
+            previous_velocity = (actual_p[-1] - actual_p[-2]).detach()  # (state_dim,)
         elif len(actual_p) == 1 and previous_velocity is None:
             # First step: no previous velocity, use a small default direction
             # This will be updated on next step
-            previous_velocity = torch.zeros(3, device=current_pos.device)
+            previous_velocity = torch.zeros(state_dim, device=current_pos.device)
         # If path is only one point and we have previous velocity, keep it
             
-        # Update live plot (only show last 10 moves)
+        # Update live plot (only show last N moves)
         # Reduce update frequency for performance (update every N moves)
         if plotter is not None and move_count % plot_update_frequency == 0:
             # Use a fixed episode number (0) so we don't clear on every move
-            # The max_history logic in LivePlotter will keep only the last 10 moves
+            # The max_history logic in LivePlotter will keep only the last N moves
             plotter.update(selected_tube, selected_sigma, actual_p, current_pos, 
                          episode=0, step=move_count)
         
@@ -377,9 +404,7 @@ def train_actor(inference_engine, actor, total_moves=500, plot_live=True, max_ob
             max_bounds = [b - margin for b in bounds['max']]
             
             new_goal = torch.tensor([
-                random.uniform(min_bounds[0], max_bounds[0]),
-                random.uniform(min_bounds[1], max_bounds[1]),
-                random.uniform(min_bounds[2], max_bounds[2])
+                random.uniform(min_bounds[i], max_bounds[i]) for i in range(state_dim)
             ])
             
             # Ensure new goal is not too close to current position or obstacles

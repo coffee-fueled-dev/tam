@@ -24,18 +24,22 @@ class LivePlotter:
         'boundary': 0.8,  # Thin boundary lines
     }
     
-    def __init__(self, obstacles, target_pos, bounds=None):
+    def __init__(self, obstacles, target_pos, bounds=None, max_history=5):
         """
         Args:
             obstacles: List of (position, radius) tuples
             target_pos: Initial target position
             bounds: Optional dict with 'min' and 'max' keys for bounding box
+            max_history: Maximum number of moves to display in visualization (default: 5)
         """
         plt.ion()
         self.fig = plt.figure(figsize=(12, 8))
         self.ax = self.fig.add_subplot(111, projection='3d')
+        # Performance optimization: Set aspect ratio once (avoids recalculation)
+        self.ax.set_box_aspect([1, 1, 1])
         self.obstacles = obstacles
         self.target_pos = target_pos
+        self.max_history = max_history  # Maximum number of moves to display
         
         # Set default bounds if not provided
         if bounds is None:
@@ -50,14 +54,20 @@ class LivePlotter:
         self._plot_bounding_box()
         
         # Plot obstacles with consistent color
+        # OPTIMIZATION: Reduce resolution for better performance with many obstacles
+        # Use lower resolution (10x10 instead of 20x20) - 4x fewer points
+        obstacle_resolution = max(8, min(12, 20 // max(1, len(obstacles) // 4)))  # Adaptive resolution
+        u = np.linspace(0, 2 * np.pi, obstacle_resolution)
+        v = np.linspace(0, np.pi, obstacle_resolution)
+        
         for obs_p, obs_r in obstacles:
-            u = np.linspace(0, 2 * np.pi, 20)
-            v = np.linspace(0, np.pi, 20)
+            # Reuse u, v arrays for all obstacles (more efficient)
             x = obs_p[0] + obs_r * np.outer(np.cos(u), np.sin(v))
             y = obs_p[1] + obs_r * np.outer(np.sin(u), np.sin(v))
             z = obs_p[2] + obs_r * np.outer(np.ones(np.size(u)), np.cos(v))
             self.ax.plot_surface(x, y, z, color=self.COLORS['obstacle'], 
-                               alpha=self.COLORS['obstacle_alpha'], edgecolor='none')
+                               alpha=self.COLORS['obstacle_alpha'], edgecolor='none',
+                               antialiased=False)  # Disable antialiasing for speed
         
         # Plot target (store marker for updates)
         self.target_marker = self.ax.scatter(target_pos[0], target_pos[1], target_pos[2], 
@@ -150,22 +160,21 @@ class LivePlotter:
         
         # Keep only last few steps for clarity within current episode
         # Optimized: only clean up when we exceed limit (avoid unnecessary work)
-        max_history = 10
-        if len(self.tube_lines) > max_history:
+        if len(self.tube_lines) > self.max_history:
             # Remove old items efficiently
-            to_remove = len(self.tube_lines) - max_history
+            to_remove = len(self.tube_lines) - self.max_history
             for line in self.tube_lines[:to_remove]:
                 line.remove()
             self.tube_lines = self.tube_lines[to_remove:]
         
-        if len(self.path_lines) > max_history:
-            to_remove = len(self.path_lines) - max_history
+        if len(self.path_lines) > self.max_history:
+            to_remove = len(self.path_lines) - self.max_history
             for line in self.path_lines[:to_remove]:
                 line.remove()
             self.path_lines = self.path_lines[to_remove:]
         
         # Clean up old markers (optimized: batch removal)
-        max_markers = max_history * 2
+        max_markers = self.max_history * 2
         if len(self.tube_markers) > max_markers:
             to_remove = len(self.tube_markers) - max_markers
             for marker in self.tube_markers[:to_remove]:
@@ -179,7 +188,7 @@ class LivePlotter:
             self.path_markers = self.path_markers[to_remove:]
         
         # Spheres are disabled, but keep cleanup code for compatibility
-        max_spheres = max_history * 5
+        max_spheres = self.max_history * 5
         if len(self.tube_spheres) > max_spheres:
             to_remove = len(self.tube_spheres) - max_spheres
             for sphere in self.tube_spheres[:to_remove]:
@@ -193,15 +202,20 @@ class LivePlotter:
         mu_np = mu_global.detach().cpu().numpy()
         sigma_np = sigma_t.detach().cpu().numpy()
         
-        # Ensure mu_np is 2D (T, 3)
+        # Ensure mu_np is 2D (T, state_dim)
         if mu_np.ndim > 2:
-            mu_np = mu_np.reshape(-1, 3)
+            mu_np = mu_np.reshape(-1, mu_np.shape[-1])
         elif mu_np.ndim == 1:
             mu_np = mu_np.reshape(1, -1)
         
-        # Ensure sigma_np is 1D and matches mu_np length
+        # Handle per-dimension sigmas: sigma_np is now (T, state_dim) instead of (T, 1)
+        # For visualization, we'll use the mean sigma across dimensions
         if sigma_np.ndim > 1:
-            sigma_np = sigma_np.squeeze()
+            # If it's (T, state_dim), take mean across dimensions
+            if sigma_np.shape[-1] > 1:
+                sigma_np = sigma_np.mean(axis=-1)  # (T,)
+            else:
+                sigma_np = sigma_np.squeeze(-1)  # (T,)
         if sigma_np.ndim == 0:
             sigma_np = np.array([sigma_np.item()])
         
@@ -223,12 +237,18 @@ class LivePlotter:
         # Normalize sigma values for colormap (0 = low uncertainty, 1 = high uncertainty)
         # Use a fixed range for consistent visualization across moves
         # Typical sigma range: 0.1 to 2.0, but we'll use dynamic normalization per tube
-        sigma_min, sigma_max = sigma_np.min(), sigma_np.max()
+        # Ensure sigma_np is 1D
+        if sigma_np.ndim > 1:
+            sigma_np = sigma_np.flatten()
+        sigma_min, sigma_max = float(sigma_np.min()), float(sigma_np.max())
         if sigma_max > sigma_min:
             sigma_normalized = (sigma_np - sigma_min) / (sigma_max - sigma_min)
         else:
             # All values are the same - use middle of colormap
             sigma_normalized = np.full_like(sigma_np, 0.5)
+        
+        # Ensure sigma_normalized is 1D numpy array
+        sigma_normalized = np.atleast_1d(sigma_normalized).flatten()
         
         # Plot tube centerline with gradient coloring based on agency (sigma)
         # Low sigma (confident) = darker purple, High sigma (uncertain) = bright yellow
@@ -241,7 +261,7 @@ class LivePlotter:
             
             # Compute segment colors (average of endpoints)
             for i in range(len(mu_np) - 1):
-                seg_sigma = (sigma_normalized[i] + sigma_normalized[i + 1]) / 2.0
+                seg_sigma = float((sigma_normalized[i] + sigma_normalized[i + 1]) / 2.0)
                 color = self.agency_cmap(seg_sigma)
                 segment_colors.append(color)
                 segment_points.append((mu_np[i], mu_np[i + 1]))
@@ -252,10 +272,11 @@ class LivePlotter:
                 segment_line, = self.ax.plot(
                     [start_pt[0], end_pt[0]],
                     [start_pt[1], end_pt[1]],
-                    [start_pt[2], end_pt[2]],
+                    [start_pt[2] if len(start_pt) > 2 else 0.0, end_pt[2] if len(end_pt) > 2 else 0.0],
                     color=segment_colors[i], alpha=0.85, linestyle='--', 
                     linewidth=self.LINE_WIDTHS['tube'],
-                    label='Planned Tube (σ gradient)' if len(self.tube_lines) == 0 and i == 0 else ''
+                    label='Planned Tube (σ gradient)' if len(self.tube_lines) == 0 and i == 0 else '',
+                    antialiased=False  # Disable antialiasing for better performance
                 )
                 self.tube_lines.append(segment_line)
         else:
@@ -269,7 +290,8 @@ class LivePlotter:
         
         # Plot starting point of tube (colored by sigma at start)
         start_point = mu_np[0]
-        start_sigma_color = self.agency_cmap(sigma_normalized[0] if len(sigma_normalized) > 0 else 0.5)
+        start_sigma_val = float(sigma_normalized[0]) if len(sigma_normalized) > 0 else 0.5
+        start_sigma_color = self.agency_cmap(start_sigma_val)
         start_marker = self.ax.scatter(start_point[0], start_point[1], start_point[2], 
                                       color=start_sigma_color, s=20, alpha=0.85, marker='o',
                                       edgecolors='white', linewidths=0.5)
@@ -277,7 +299,8 @@ class LivePlotter:
         
         # Plot end point of tube (colored by sigma at end)
         end_point = mu_np[-1]
-        end_sigma_color = self.agency_cmap(sigma_normalized[-1] if len(sigma_normalized) > 0 else 0.5)
+        end_sigma_val = float(sigma_normalized[-1]) if len(sigma_normalized) > 0 else 0.5
+        end_sigma_color = self.agency_cmap(end_sigma_val)
         end_marker = self.ax.scatter(end_point[0], end_point[1], end_point[2], 
                                      color=end_sigma_color, s=35, alpha=0.9, marker='x', 
                                      linewidths=1.5, edgecolors='white')
@@ -318,11 +341,14 @@ class LivePlotter:
             
             # Plot this step's actual path with cool grey color
             if len(path_np) > 1:
-                path_line, = self.ax.plot(path_np[:, 0], path_np[:, 1], path_np[:, 2],
+                # Ensure we have 3D coordinates
+                z_coords = path_np[:, 2] if path_np.shape[1] > 2 else np.zeros(len(path_np))
+                path_line, = self.ax.plot(path_np[:, 0], path_np[:, 1], z_coords,
                                          color=self.COLORS['trajectory'], 
                                          linewidth=self.LINE_WIDTHS['trajectory'], 
                                          alpha=0.9, linestyle='-',
-                                         label='Actual Path' if len(self.path_lines) == 0 else '')
+                                         label='Actual Path' if len(self.path_lines) == 0 else '',
+                                         antialiased=False)  # Disable antialiasing for better performance
                 self.path_lines.append(path_line)
                 
                 # Plot path endpoints (reuse path_np array slicing)
@@ -367,9 +393,17 @@ class LivePlotter:
         goals_reached_count = len(self.reached_goal_markers)
         self.ax.set_title(f'Move {step} | Avg σ: {avg_sigma:.3f} | Goals: {goals_reached_count}')
         
-        # Refresh plot (reduced pause for better performance)
-        plt.draw()
-        plt.pause(0.01)  # Reduced pause time for better performance
+        # Refresh plot (optimized for performance)
+        # Only do full redraw every N updates, otherwise just flush events
+        if step % 5 == 0:  # Full redraw every 5 steps
+            plt.draw()
+        else:
+            # Just flush events for faster updates
+            self.fig.canvas.flush_events()
+        
+        # Reduced pause time - only pause on full redraws
+        if step % 5 == 0:
+            plt.pause(0.005)  # Very short pause on full redraws
     
     def _clear_episode(self):
         """Clear all visualization elements from the previous episode."""

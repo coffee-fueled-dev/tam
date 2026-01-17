@@ -2,27 +2,40 @@ import torch
 import numpy as np
 
 class CausalSpline:
+    """
+    Dimension-agnostic Catmull-Rom spline interpolator.
+    
+    Works with any state dimension - the spline logic is naturally dimension-agnostic.
+    """
     @staticmethod
     def interpolate(knots, sigmas, resolution=40):
         """
-        knots: (B, K, 3)
-        sigmas: (B, K, 1) - Learned radius at each knot
+        Interpolate knots into a continuous trajectory using Catmull-Rom splines.
+        
+        Args:
+            knots: (B, K, state_dim) - Knot positions in state space
+            sigmas: (B, K, 1) - Learned radius/precision at each knot
+            resolution: Number of interpolation points per segment
+            
+        Returns:
+            trajectory: (B, T, state_dim) - Interpolated trajectory
+            sigma_traj: (B, T, 1) - Interpolated sigma values
         """
-        B, K, D = knots.shape
+        B, K, state_dim = knots.shape
         device = knots.device
         
         # Safety check: need at least 2 knots for interpolation
         if K < 2:
             # Return just the start and end points
-            start = knots[:, 0:1, :]  # (B, 1, 3)
+            start = knots[:, 0:1, :]  # (B, 1, state_dim)
             end = knots[:, -1:, :] if K > 1 else knots[:, 0:1, :]
             trajectory = torch.cat([start, end], dim=1)
             sigma_traj = torch.cat([sigmas[:, 0:1, :], sigmas[:, -1:, :] if K > 1 else sigmas[:, 0:1, :]], dim=1)
             return trajectory, sigma_traj
         
         # We concatenate knots and sigmas to interpolate them together
-        # Combined state: [x, y, z, sigma]
-        combined = torch.cat([knots, sigmas], dim=-1) # (B, K, 4)
+        # Combined state: [state_dim components..., sigma]
+        combined = torch.cat([knots, sigmas], dim=-1)  # (B, K, state_dim + 1)
 
         # Ghost knots for C-R Spline
         p0 = 2 * combined[:, 0:1] - combined[:, 1:2]
@@ -43,8 +56,9 @@ class CausalSpline:
             all_segments.append(seg)
 
         # Add endpoint
-        all_segments.append(combined[:, -1:].view(B, 1, 4))
+        all_segments.append(combined[:, -1:].view(B, 1, state_dim + 1))
         full_trajectory = torch.cat(all_segments, dim=1)
         
-        return full_trajectory[:, :, :3], full_trajectory[:, :, 3:]
+        # Split back into state and sigma
+        return full_trajectory[:, :, :state_dim], full_trajectory[:, :, state_dim:]
 
