@@ -1,3 +1,0 @@
-"""
-Environment interfaces and implementations.
-"""
