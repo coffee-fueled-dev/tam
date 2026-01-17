@@ -8,10 +8,52 @@ import random
 import json
 import os
 from datetime import datetime
+from collections import defaultdict
 
 
 # ==========================================
-# 1. GEOMETRY UTILITIES: CATMULL-ROM SPLINE
+# 1. INFERENCE ENGINE: GRU-BASED WORLD MODEL
+# ==========================================
+
+class InferenceEngine(nn.Module):
+    """
+    The learned Infer() function that converts raw context to latent situation.
+    
+    This implements temporal compression: takes raw, messy context from the world
+    and maintains a "hidden state" that represents the agent's internal understanding.
+    
+    The hidden state IS the situation x_n - a latent representation that the Actor
+    uses to propose affordance tubes without directly accessing spatial features.
+    """
+    def __init__(self, raw_ctx_dim, latent_dim=64):
+        super().__init__()
+        self.raw_ctx_dim = raw_ctx_dim
+        self.latent_dim = latent_dim
+        # The core Infer() mechanism: GRU for temporal compression
+        self.gru = nn.GRUCell(raw_ctx_dim, latent_dim)
+        # LayerNorm to keep latent values stable for the Actor
+        self.ln = nn.LayerNorm(latent_dim)
+        
+    def forward(self, raw_ctx, h_prev):
+        """
+        Convert raw context to latent situation.
+        
+        Args:
+            raw_ctx: (B, raw_ctx_dim) raw context from world (e.g., 43-dim observation)
+            h_prev: (B, latent_dim) previous hidden state (situation from last step)
+        
+        Returns:
+            h_next: (B, latent_dim) new hidden state (current situation x_n)
+        """
+        # GRU processes raw context and updates hidden state
+        h_next = self.gru(raw_ctx, h_prev)
+        # Normalize to keep latent values stable
+        h_next = self.ln(h_next)
+        return h_next  # This hidden state IS the situation x_n
+
+
+# ==========================================
+# 2. GEOMETRY UTILITIES: CATMULL-ROM SPLINE
 # ==========================================
 
 class CausalSpline:
@@ -63,19 +105,28 @@ class CausalSpline:
 
 
 # ==========================================
-# 2. THE ACTOR: CAUSAL KNOT ENGINE
+# 3. THE ACTOR: CAUSAL KNOT ENGINE (LATENT-AGNOSTIC)
 # ==========================================
 
 class Actor(nn.Module):
-    def __init__(self, obs_dim, intent_dim, n_ports=4, n_knots=6, interp_res=40):
+    """
+    Actor operates on latent situations from InferenceEngine.
+    
+    The Actor no longer cares where its input comes from - it's agnostic to
+    whether the latent representation encodes spatial features, temporal patterns,
+    or any other world structure. It simply proposes affordance tubes based on
+    the latent situation and intent.
+    """
+    def __init__(self, latent_dim, intent_dim, n_ports=4, n_knots=6, interp_res=40):
         super().__init__()
         self.n_ports = n_ports
         self.n_knots = n_knots
         self.interp_res = interp_res
         
-        # Encoder
+        # Encoder: processes latent situation + intent
+        # Actor doesn't perform spatial calculations - it operates in latent space
         self.encoder = nn.Sequential(
-            nn.Linear(obs_dim + intent_dim, 256),
+            nn.Linear(latent_dim + intent_dim, 256),
             nn.LayerNorm(256),
             nn.ELU(),
             nn.Linear(256, 256)
@@ -83,12 +134,13 @@ class Actor(nn.Module):
         
         # Port Proposer
         # Output size: M * (Logit + K*3 + K*1 + K*1) where last K*1 is knot existence logits
+        # Note: K*3 are now RESIDUAL OFFSETS, not absolute positions
         self.port_head = nn.Linear(256, n_ports * (1 + n_knots * 5))
         
-    def forward(self, obs, intent, previous_velocity=None):
+    def forward(self, latent_situation, intent, previous_velocity=None):
         """
         Args:
-            obs: (B, obs_dim) observation tensor
+            latent_situation: (B, latent_dim) latent situation from InferenceEngine
             intent: (B, 3) intent/target direction tensor
             previous_velocity: Optional (B, 3) or (3,) tensor of previous path velocity for G1 continuity
                               If provided, enforces that first knot direction matches this velocity
@@ -98,16 +150,21 @@ class Actor(nn.Module):
             mu_t:   (B, M, T, 3) - Interpolated Tube
             sigma_t:(B, M, T, 1) - Interpolated Radius
             knot_mask: (B, M, K) - Knot existence mask (0.0 = inactive, 1.0 = active)
+            knot_steps: (B, M, K, 3) - Residual offsets (for loss calculation)
         """
-        B = obs.size(0)
-        situation = self.encoder(torch.cat([obs, intent], dim=-1))
+        B = latent_situation.size(0)
+        situation = self.encoder(torch.cat([latent_situation, intent], dim=-1))
         
         raw_out = self.port_head(situation).view(B, self.n_ports, -1)
         logits = raw_out[:, :, 0]
         
-        # Extract Knots, Sigmas, and Knot Existence Logits
+        # Extract Knot Steps (RESIDUAL OFFSETS), Sigmas, and Knot Existence Logits
         geo_params = raw_out[:, :, 1:].view(B, self.n_ports, self.n_knots, 5)
-        knots_raw = geo_params[..., :3]
+        
+        # RESIDUAL KNOT LOGIC: Predict relative offsets instead of absolute positions
+        # Use tanh to bound the step size of each knot (prevents erratic snapping)
+        knot_steps = torch.tanh(geo_params[..., :3]) * 2.0  # (B, M, K, 3) bounded to [-2, 2]
+        
         sigmas_raw = F.softplus(geo_params[..., 3:4]) + 0.1
         knot_existence_logits = geo_params[..., 4:5]  # (B, M, K, 1)
         
@@ -120,8 +177,11 @@ class Actor(nn.Module):
         ones_last = torch.ones(B, self.n_ports, 1, device=device)
         knot_mask = torch.cat([ones_first, knot_mask_raw[:, :, 1:-1], ones_last], dim=-1)
         
-        # Causal Anchoring: Knot 0 is always (0,0,0) relative to actor
-        knots_rel = knots_raw - knots_raw[:, :, 0:1, :]
+        # RESIDUAL KNOT CONSTRUCTION: The spline 'grows' from the origin (0,0,0)
+        # Use cumsum to make each knot relative to the one before it
+        knots_rel = torch.cumsum(knot_steps, dim=2)  # (B, M, K, 3)
+        # Causal Anchoring: Ensure the first knot is always exactly at the start
+        knots_rel = knots_rel - knots_rel[:, :, 0:1, :]
         
         # G1 CONTINUITY: Enforce by construction (not penalty)
         # If previous_velocity is provided, ensure first knot direction matches it
@@ -239,92 +299,18 @@ class Actor(nn.Module):
         mu_t = torch.stack(mu_t_padded).view(B, self.n_ports, max_T, 3)
         sigma_t = torch.stack(sigma_t_padded).view(B, self.n_ports, max_T, 1)
         
-        return logits, mu_t, sigma_t, knot_mask
+        return logits, mu_t, sigma_t, knot_mask, knot_steps
 
     def select_port(self, logits, mu_t, intent_target):
-        # Heuristic: Closest tube end-point to target, weighted by logits
+        """Select port based on closest tube endpoint to target, weighted by logits."""
         end_points = mu_t[:, :, -1, :] 
         dist = torch.norm(end_points - intent_target.unsqueeze(1), dim=-1)
         score = F.log_softmax(logits, dim=-1) - dist
         return torch.argmax(score, dim=-1)
 
-    def train_step(self, obs, intent, optimizer, sim_wrapper, current_pos=None):
-        # 1. Propose Tube
-        logits, mu_t, sigma_t = self(obs, intent)
-        
-        # 2. Select and Bind
-        dist = torch.distributions.Categorical(F.softmax(logits, dim=-1))
-        idx = dist.sample()
-        
-        # 3. World Interaction (The Simulation)
-        # returns actual path taken after potential collisions
-        if current_pos is None:
-            current_pos = torch.zeros((1, 3), device=mu_t.device)
-        actual_path = sim_wrapper.execute(mu_t[0, idx], sigma_t[0, idx], current_pos)
-        
-        # 4. Calculate TA Losses with improved formulation
-        expected_p = mu_t[0, idx] + current_pos
-        min_len = min(len(actual_path), len(expected_p))
-        deviation = torch.norm(actual_path[:min_len] - expected_p[:min_len], dim=-1, keepdim=True)
-        
-        # A) Squared Binding Loss: Makes hitting obstacles exponentially more painful
-        binding_loss = torch.mean((deviation**2) / (sigma_t[0, idx, :min_len] + 1e-6))
-        
-        # B) Quadratic Agency Loss: Punishes large sigmas aggressively
-        agency_loss = torch.mean(sigma_t[0, idx]**2)
-        
-        # C) Path Smoothness (Curvature Penalty)
-        knots = mu_t[0, idx]
-        if len(knots) > 2:
-            diffs = knots[1:] - knots[:-1]
-            if len(diffs) > 1:
-                accel = diffs[1:] - diffs[:-1]
-                smoothness_loss = torch.mean(accel**2)
-            else:
-                smoothness_loss = torch.tensor(0.0, device=knots.device)
-        else:
-            smoothness_loss = torch.tensor(0.0, device=knots.device)
-        
-        # Cb) Path Length Penalty (Energy Efficiency)
-        if len(knots) > 1:
-            segment_lengths = torch.norm(knots[1:] - knots[:-1], dim=-1)
-            total_path_length = torch.sum(segment_lengths)
-            straight_line_dist = torch.norm(intent)
-            path_length_loss = total_path_length / (straight_line_dist + 1e-6)
-        else:
-            path_length_loss = torch.tensor(0.0, device=knots.device)
-        
-        # Cc) Curvature Penalty (Energy for Turning)
-        if len(knots) > 2:
-            vec1 = knots[1:-1] - knots[:-2]  # Segments ending at interior points
-            vec2 = knots[2:] - knots[1:-1]   # Segments starting at interior points
-            vec1_norm = vec1 / (torch.norm(vec1, dim=-1, keepdim=True) + 1e-6)
-            vec2_norm = vec2 / (torch.norm(vec2, dim=-1, keepdim=True) + 1e-6)
-            cos_angles = torch.sum(vec1_norm * vec2_norm, dim=-1)
-            curvature_penalty = torch.mean(1.0 - cos_angles)
-        else:
-            curvature_penalty = torch.tensor(0.0, device=knots.device)
-        
-        # D) Goal Progress
-        progress_reward = torch.norm(intent) - torch.norm(intent - (actual_path[-1] - current_pos.squeeze()))
-        
-        # Rebalanced Total Loss with complexity penalties
-        total_loss = (-dist.log_prob(idx) * progress_reward 
-                     + 5.0 * binding_loss 
-                     + 1.5 * agency_loss 
-                     + 0.5 * smoothness_loss
-                     + 0.3 * path_length_loss
-                     + 0.2 * curvature_penalty)
-        
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
-        
-        return total_loss.item()
-
 
 # ==========================================
-# 3. SIMULATION WRAPPER (FIXED)
+# 4. SIMULATION WRAPPER (FIXED)
 # ==========================================
 
 class SimulationWrapper:
@@ -335,8 +321,7 @@ class SimulationWrapper:
             bounds: Optional dict with 'min' and 'max' keys, each a list of 3 floats [x, y, z]
                    If None, defaults to [-2, -2, -2] to [12, 12, 2]
         """
-        self.obstacles = obstacles
-        self.debug_tubes = [] 
+        self.obstacles = obstacles 
         
         # Set default bounds if not provided
         if bounds is None:
@@ -351,14 +336,12 @@ class SimulationWrapper:
         self.bounds_min = torch.tensor(self.bounds['min'], dtype=torch.float32)
         self.bounds_max = torch.tensor(self.bounds['max'], dtype=torch.float32)
     
-    def get_observation(self, current_pos, target_pos, max_obstacles=10):
+    def get_raw_observation(self, current_pos, target_pos, max_obstacles=10):
         """
-        Get observation with spatial context ("sight") including obstacle information.
+        Get RAW context observation (for InferenceEngine).
         
-        This provides the Actor with predictive context, allowing it to learn
-        geometric rules rather than memorizing specific coordinates.
-        
-        Uses a fixed-size observation with padding to decouple from exact obstacle count.
+        This is the raw, messy context from the world that the InferenceEngine
+        will compress into a latent situation. The Actor never sees this directly.
         
         Args:
             current_pos: (1, 3) or (3,) current position tensor
@@ -367,8 +350,8 @@ class SimulationWrapper:
                           Observation is always this size, padded with zeros if fewer obstacles
         
         Returns:
-            observation: torch.Tensor of shape (obs_dim,)
-            obs_dim = 3 (rel_goal) + max_obstacles * 4 (rel_obs_pos + obs_radius)
+            raw_ctx: torch.Tensor of shape (raw_ctx_dim,)
+            raw_ctx_dim = 3 (rel_goal) + max_obstacles * 4 (rel_obs_pos + obs_radius)
         """
         # Ensure current_pos is (3,)
         if current_pos.dim() > 1:
@@ -419,38 +402,9 @@ class SimulationWrapper:
                 obs_parts.append(zeros_1d)  # Zero radius (indicates no obstacle - actor learns to ignore)
         
         # Concatenate all parts
-        observation = torch.cat(obs_parts, dim=0)  # (3 + max_obstacles*4,)
+        raw_ctx = torch.cat(obs_parts, dim=0)  # (3 + max_obstacles*4,)
         
-        return observation
-    
-    def enforce_boundaries(self, position):
-        """
-        Clamp position to stay within boundaries.
-        
-        NOTE: In execute() and run_episode(), boundaries are handled inline
-        to create deviation (like obstacles) that surfaces through binding failure.
-        This method is kept for utility purposes but boundaries should generally
-        be handled as physics that creates deviation.
-        
-        Args:
-            position: torch.Tensor of shape (3,) or (1, 3)
-        
-        Returns:
-            clamped position: torch.Tensor of same shape
-        """
-        # Ensure bounds are on the same device as position
-        device = position.device
-        bounds_min = self.bounds_min.to(device)
-        bounds_max = self.bounds_max.to(device)
-        
-        if position.dim() == 2:
-            # (1, 3) -> (3,)
-            pos_flat = position.squeeze(0)
-            clamped = torch.clamp(pos_flat, bounds_min, bounds_max)
-            return clamped.unsqueeze(0)
-        else:
-            # (3,)
-            return torch.clamp(position, bounds_min, bounds_max)
+        return raw_ctx
     
     def execute(self, mu_t, sigma_t, current_pos):
         """
@@ -483,10 +437,6 @@ class SimulationWrapper:
         elif sigma_t.dim() == 0:
             sigma_t = sigma_t.unsqueeze(0)
         
-        # Ensure sigma_t is 1D
-        if sigma_t.dim() == 0:
-            sigma_t = sigma_t.unsqueeze(0)
-        
         # Transform relative tube to global coordinates
         mu_global = mu_t + current_pos
         
@@ -503,10 +453,7 @@ class SimulationWrapper:
             
             # Handle sigma_t indexing - ensure we get a scalar
             t_idx = min(t, len(sigma_t) - 1)
-            if sigma_t.dim() == 0:
-                affordance_r = sigma_t.item()
-            else:
-                affordance_r = sigma_t[t_idx].item() if hasattr(sigma_t[t_idx], 'item') else float(sigma_t[t_idx])
+            affordance_r = sigma_t[t_idx].item() if hasattr(sigma_t[t_idx], 'item') else float(sigma_t[t_idx])
             
             # Start with expected position
             actual_p = expected_p.clone()
@@ -555,14 +502,17 @@ class SimulationWrapper:
         
         return torch.stack(actual_path) 
         
-    def run_episode(self, actor, start_pos, target_pos):
+    def run_episode(self, inference_engine, actor, start_pos, target_pos, max_observed_obstacles=10, latent_dim=64):
         """
-        Run a full episode using the actor for evaluation.
+        Run a full episode using the InferenceEngine and Actor for evaluation.
         
         Args:
+            inference_engine: The InferenceEngine model to use
             actor: The Actor model to use
             start_pos: Starting position [x, y, z]
             target_pos: Target position [x, y, z]
+            max_observed_obstacles: Maximum obstacles in observation
+            latent_dim: Dimension of latent situation space
         
         Returns:
             path: numpy array of actual path taken
@@ -574,29 +524,30 @@ class SimulationWrapper:
         steps = 0
         max_steps = 40
         
+        # Reset InferenceEngine hidden state at start of episode
+        h_state = torch.zeros(1, latent_dim)
+        
         while steps < max_steps:
             rel_goal = target - current_pos
             
-            # Get observation with spatial context ("sight")
-            obs = self.get_observation(current_pos, target)  # (obs_dim,)
-            obs = obs.unsqueeze(0)  # (1, obs_dim) for batch dimension
+            # Get raw observation (for InferenceEngine)
+            raw_obs = self.get_raw_observation(current_pos, target, max_obstacles=max_observed_obstacles)  # (raw_ctx_dim,)
+            raw_obs = raw_obs.unsqueeze(0)  # (1, raw_ctx_dim) for batch dimension
             
             with torch.no_grad():
-                # run_episode doesn't track previous_velocity, so pass None
-                logits, mu_t, sigma_t, knot_mask = actor(obs, rel_goal, previous_velocity=None)
+                # INFER: Convert raw context to latent situation
+                x_n = inference_engine(raw_obs, h_state)  # (1, latent_dim)
+                h_state = x_n  # Update hidden state
                 
-                # FIX: Use .item() to get a python integer, not a Tensor
-                best_idx_tensor = actor.select_port(logits, mu_t, rel_goal)
-                best_idx = best_idx_tensor.item()
+                # ACT: Propose affordances based on latent situation
+                logits, mu_t, sigma_t, knot_mask, _ = actor(x_n, rel_goal, previous_velocity=None)
+                
+                best_idx = actor.select_port(logits, mu_t, rel_goal).item()
                 
                 # Get the committed tube (T, 3)
                 # We add current_pos to transform from relative -> global
                 committed_mu = mu_t[0, best_idx] + current_pos
                 committed_sigma = sigma_t[0, best_idx]
-                
-                # Save for plotting (take every 5th step to save memory)
-                if steps % 5 == 0:
-                    self.debug_tubes.append(committed_mu.numpy())
 
             pts = len(committed_mu)
             
@@ -604,8 +555,6 @@ class SimulationWrapper:
                 break
 
             # EXECUTE COMMITMENT (Bind -> Contradict)
-            binding_broken = False
-            
             # Start from t=1 because t=0 is our current position
             for t in range(1, pts):
                 expected_p = committed_mu[t]
@@ -649,8 +598,7 @@ class SimulationWrapper:
                     # This is the exception position - where binding failed
                     current_pos = actual_p.view(1, 3)
                     path_history.append(current_pos.squeeze().numpy())
-                    binding_broken = True
-                    break # Break inner loop to Re-plan
+                    break  # Break inner loop to Re-plan
                 
                 # If valid, commit to this step
                 current_pos = actual_p.view(1, 3)
@@ -664,7 +612,7 @@ class SimulationWrapper:
         return np.array(path_history)
 
 # ==========================================
-# 4. TRAINING & LIVE PLOTTING
+# 5. TRAINING & LIVE PLOTTING
 # ==========================================
 
 class LivePlotter:
@@ -988,18 +936,27 @@ class LivePlotter:
         plt.close(self.fig)
 
 
-def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
+def train_actor(inference_engine, actor, episodes=50, plot_live=True, max_observed_obstacles=10, latent_dim=64):
     """
-    Train the actor in the environment.
+    Train the InferenceEngine and Actor together in the environment.
+    
+    This implements dual-optimization: both models learn simultaneously.
+    - InferenceEngine learns to represent context such that Actor can successfully bind
+    - Actor learns to use that representation to propose tubes
     
     Args:
-        actor: Actor model to train
+        inference_engine: InferenceEngine model (GRU-based World Model)
+        actor: Actor model (operates on latent situations)
         episodes: Number of training episodes
         plot_live: Whether to show live visualization
         max_observed_obstacles: Maximum number of obstacles in observation (fixed size)
-                                You can add/remove obstacles without changing this!
+        latent_dim: Dimension of latent situation space
     """
-    optimizer = optim.Adam(actor.parameters(), lr=1e-3)
+    # Combine parameters for joint optimization
+    optimizer = optim.Adam(
+        list(inference_engine.parameters()) + list(actor.parameters()), 
+        lr=1e-3
+    )
     # Multiple obstacles creating a more challenging navigation environment
     # You can freely add/remove obstacles here - the observation will pad/truncate automatically
     obstacles = [
@@ -1021,20 +978,28 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
     sim = SimulationWrapper(obstacles, bounds=bounds)
     target_pos = torch.tensor([10.0, 10.0, 0.0])
     
-    # Calculate observation dimension: 3 (rel_goal) + max_observed_obstacles * 4
+    # Calculate raw context dimension: 3 (rel_goal) + max_observed_obstacles * 4
     # This is FIXED regardless of actual obstacle count (uses padding/truncation)
-    obs_dim = 3 + max_observed_obstacles * 4
+    raw_ctx_dim = 3 + max_observed_obstacles * 4
     
-    # Verify actor's obs_dim matches (will raise error if mismatch)
+    # Verify models are compatible
+    if inference_engine.raw_ctx_dim != raw_ctx_dim:
+        raise ValueError(f"InferenceEngine raw_ctx_dim mismatch: expected {raw_ctx_dim}, "
+                        f"but model has {inference_engine.raw_ctx_dim}")
+    
+    if inference_engine.latent_dim != latent_dim:
+        raise ValueError(f"InferenceEngine latent_dim mismatch: expected {latent_dim}, "
+                        f"but model has {inference_engine.latent_dim}")
+    
     if hasattr(actor, 'encoder'):
-        # Check the first layer input size
+        # Check the first layer input size (should be latent_dim + intent_dim)
         first_layer = list(actor.encoder.children())[0]
         if isinstance(first_layer, nn.Linear):
             expected_input = first_layer.in_features - 3  # Subtract intent_dim
-            if expected_input != obs_dim:
-                raise ValueError(f"Actor obs_dim mismatch: expected {obs_dim} (3 + {max_observed_obstacles}*4), "
+            if expected_input != latent_dim:
+                raise ValueError(f"Actor latent_dim mismatch: expected {latent_dim}, "
                                f"but actor expects {expected_input}. "
-                               f"Initialize Actor with obs_dim={obs_dim}")
+                               f"Initialize Actor with latent_dim={latent_dim}")
     
     # Create session directory and file
     artifacts_dir = "/Users/zach/Documents/dev/cfd/tam/artifacts"
@@ -1048,7 +1013,8 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
         "episodes": episodes,
         "obstacles": obstacles,
         "bounds": bounds,
-        "obs_dim": obs_dim,
+        "raw_ctx_dim": raw_ctx_dim,
+        "latent_dim": latent_dim,
         "max_observed_obstacles": max_observed_obstacles,
         "initial_target": target_pos.tolist(),
         "episodes_data": []
@@ -1060,7 +1026,8 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
         plotter = LivePlotter(obstacles, target_pos.numpy(), bounds=bounds)
     
     print(f"Training {episodes} episodes... (Session: {session_timestamp})")
-    print(f"Observation dimension: {obs_dim} (3 goal + {max_observed_obstacles} max obstacles * 4)")
+    print(f"Raw context dimension: {raw_ctx_dim} (3 goal + {max_observed_obstacles} max obstacles * 4)")
+    print(f"Latent dimension: {latent_dim}")
     print(f"Actual obstacles in environment: {len(obstacles)}")
 
     for ep in range(episodes):
@@ -1070,19 +1037,26 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
         previous_velocity = None  # Track previous path direction for G1 continuity
         total_steps_taken = 0  # Track actual steps taken in this episode
         
+        # Reset InferenceEngine hidden state at start of episode
+        h_state = torch.zeros(1, latent_dim)  # (1, latent_dim) - initial situation
+        
         # Each episode is a sequence of situations
         for step in range(10):
             total_steps_taken += 1  # Count this step
-            # Get observation with spatial context ("sight")
-            # This provides predictive affordance: actor can see obstacles before hitting them
-            # Observation is fixed-size: nearest max_observed_obstacles obstacles (padded if fewer)
-            obs = sim.get_observation(current_pos, target_pos, max_obstacles=max_observed_obstacles)  # (obs_dim,)
-            obs = obs.unsqueeze(0)  # (1, obs_dim) for batch dimension
+            
+            # 1. INFER: Convert raw world data to latent situation
+            raw_obs = sim.get_raw_observation(current_pos, target_pos, max_obstacles=max_observed_obstacles)  # (raw_ctx_dim,)
+            raw_obs = raw_obs.unsqueeze(0)  # (1, raw_ctx_dim) for batch dimension
+            
+            # InferenceEngine compresses raw context into latent situation
+            x_n = inference_engine(raw_obs, h_state)  # (1, latent_dim) - current situation
+            h_state = x_n.detach()  # Pass memory forward (detach to prevent backprop through time)
             
             rel_goal = target_pos - current_pos 
             
-            # Pass previous_velocity for G1 continuity enforcement (structural, not penalty)
-            logits, mu_t, sigma_t, knot_mask = actor(obs, rel_goal, previous_velocity=previous_velocity)
+            # 2. ACT: Propose affordances based on latent situation x_n
+            # Actor operates on latent representation, not raw spatial features
+            logits, mu_t, sigma_t, knot_mask, knot_steps = actor(x_n, rel_goal, previous_velocity=previous_velocity)
             
             # Selection (Categorical sampling for exploration)
             probs = F.softmax(logits, dim=-1)
@@ -1093,7 +1067,6 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
             idx_int = idx.item() if isinstance(idx, torch.Tensor) else idx
             selected_tube = mu_t[0, idx_int].squeeze(0)  # Remove any extra dimensions
             selected_sigma = sigma_t[0, idx_int].squeeze(0)
-            selected_knot_mask = knot_mask[0, idx_int]  # (K,) - mask for selected port
             
             # Ensure shapes are correct
             if selected_tube.dim() > 2:
@@ -1105,83 +1078,42 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
             # The world responds with actual_p
             actual_p = sim.execute(selected_tube, selected_sigma, current_pos)
             
-            # 2. Contradiction (Binding Loss) - Universal
+            # 3. SIMPLIFIED PRINCIPLED LOSS: Agency vs. Contradiction
+            # With GRU and Residual Knots, we can use a cleaner formulation
+            
+            # A) CONTRADICTION: Did we stay in the tube?
             # Squared deviation makes hitting obstacles exponentially more painful
             expected_p = selected_tube + current_pos
             min_len = min(len(actual_p), len(expected_p))
             deviation = torch.norm(actual_p[:min_len] - expected_p[:min_len], dim=-1, keepdim=True)
             binding_loss = torch.mean((deviation**2) / (selected_sigma[:min_len] + 1e-6))
             
-            # 3. Unified Agency Metric - Principled Information Bottleneck
-            # Consolidates all complexity/energy penalties into a single cost
-            # "Reach the goal using the least amount of displacement and the thinnest tube possible"
-            knots = selected_tube
+            # B) AGENCY COST: How 'expensive' was this path?
+            # Extract selected knot_steps for this port
+            selected_knot_steps = knot_steps[0, idx_int]  # (K, 3) - residual offsets
             
-            # Agency components:
-            # - Sigma volume (uncertainty cost)
-            sigma_volume = torch.mean(selected_sigma**2)
+            # Penalize the sum of squared offsets (shorter, straighter paths are cheaper)
+            path_cost = torch.mean(selected_knot_steps**2)
             
-            # - Path complexity (displacement cost)
-            # Total path length normalized by straight-line distance
-            if len(knots) > 1:
-                segment_lengths = torch.norm(knots[1:] - knots[:-1], dim=-1)
-                total_path_length = torch.sum(segment_lengths)
-                straight_line_dist = torch.norm(rel_goal)
-                path_efficiency = total_path_length / (straight_line_dist + 1e-6)
-            else:
-                path_efficiency = torch.tensor(1.0, device=knots.device)
+            # Penalize uncertainty (narrower tubes are better)
+            uncertainty_cost = torch.mean(selected_sigma**2)
             
-            # - Knot complexity (sparsity cost)
-            knot_complexity = torch.mean(selected_knot_mask)
-            
-            # Unified Agency: Information Bottleneck
-            # Combines displacement, uncertainty, and sparsity into single metric
-            # Note: path_efficiency penalizes inefficient paths, but shouldn't prevent initial movement
-            # We scale it down to avoid over-penalizing exploration
-            agency_loss = sigma_volume + 0.2 * path_efficiency + 0.3 * knot_complexity
-            
-            # 4. Intent Loss (Objective) - Direct supervision
-            # The tube's endpoint should be close to the target
+            # C) INTENT LOSS: Direct supervision to move toward goal
             tube_endpoint_global = (selected_tube[-1] + current_pos.squeeze()).unsqueeze(0)
             target_pos_expanded = target_pos.unsqueeze(0)
             intent_loss = F.mse_loss(tube_endpoint_global, target_pos_expanded)
             
-            # 4b. Movement Encouragement - Prevent "staying still" local minimum
-            # Penalize tubes that don't extend toward the goal
-            # This ensures the actor has incentive to move even when agency cost is high
-            tube_length = torch.norm(selected_tube[-1] - selected_tube[0]) if len(selected_tube) > 1 else torch.tensor(0.0, device=selected_tube.device)
-            goal_distance = torch.norm(rel_goal)
-            # Encourage movement: tube should extend at least some fraction toward goal
-            # If goal is far, we want substantial movement; if close, small movement is fine
-            min_expected_movement = goal_distance * 0.1  # Expect at least 10% progress per step
-            movement_penalty = torch.clamp(min_expected_movement - tube_length, min=0.0)
-            
-            # 5. Reward (Progress to goal)
-            current_dist = torch.norm(target_pos - current_pos)
-            final_dist = torch.norm(target_pos - actual_p[-1])
-            progress = current_dist - final_dist
-            initial_dist = torch.norm(target_pos)
-            progress_scaled = progress / (initial_dist + 1e-6)
-            
-            # Policy loss: negative log prob * reward
-            policy_loss = -m.log_prob(idx) * progress_scaled * 20.0
-            
-            # Elegant TA Loss: Binding + Agency + Intent
-            # All environment-specific penalties removed - handled by architecture (G1) and context (sight)
-            # Intent loss is CRITICAL: provides direct supervision to move toward goal
-            # Movement penalty prevents "staying still" local minimum
-            loss = (policy_loss                    # Intent: maximize progress reward
-                   + 3.0 * intent_loss             # Intent: direct supervision (tube endpoint -> goal)
-                   + 1.0 * movement_penalty        # Intent: encourage movement (prevent stagnation)
-                   + 5.0 * binding_loss            # Contradiction: stay in the tube
-                   + 1.5 * agency_loss)             # Agency: minimize complexity (unified metric)
+            # Simplified Principled Loss
+            loss = (1.0 * binding_loss          # Contradiction: stay in the tube
+                   + 0.1 * path_cost            # Agency: minimize displacement (residual offsets)
+                   + 0.05 * uncertainty_cost    # Agency: minimize uncertainty (narrower tubes)
+                   + 0.5 * intent_loss)         # Intent: move toward goal
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
             # Update position and track velocity for G1 continuity
-            previous_pos = current_pos.clone()
             current_pos = actual_p[-1].view(1, 3).detach()
             
             # Track velocity: direction of actual path taken (for G1 continuity)
@@ -1252,8 +1184,6 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
                     plt.draw()
                 
                 # Continue with new goal (don't break - keep learning!)
-                # Optionally, you can break here if you want to end episode after each goal
-                # break
                 
         # Save episode data
         final_dist = torch.norm(target_pos - current_pos).item()
@@ -1284,17 +1214,29 @@ def train_actor(actor, episodes=50, plot_live=True, max_observed_obstacles=10):
     plt.show()
 
 # ==========================================
-# 5. MAIN & PLOTTING
+# 6. MAIN & PLOTTING
 # ==========================================
 
 if __name__ == "__main__":
-    # Fixed observation dimension: independent of actual obstacle count
-    # Observation uses padding/truncation to handle variable obstacle counts
+    # Fixed raw context dimension: independent of actual obstacle count
+    # Raw context uses padding/truncation to handle variable obstacle counts
     MAX_OBSERVED_OBSTACLES = 10  # Maximum obstacles in observation (can add/remove obstacles freely!)
-    obs_dim = 3 + MAX_OBSERVED_OBSTACLES * 4  # 3 + 10*4 = 43
+    raw_ctx_dim = 3 + MAX_OBSERVED_OBSTACLES * 4  # 3 + 10*4 = 43
+    LATENT_DIM = 64  # Dimension of latent situation space
     
-    actor = Actor(obs_dim=obs_dim, intent_dim=3, n_knots=6, interp_res=40)
+    # Initialize InferenceEngine (learns Infer() function)
+    inference_engine = InferenceEngine(raw_ctx_dim=raw_ctx_dim, latent_dim=LATENT_DIM)
     
-    # Train the actor with live plotting
-    # You can add/remove obstacles in train_actor without changing the actor architecture!
-    train_actor(actor, episodes=100, plot_live=True, max_observed_obstacles=MAX_OBSERVED_OBSTACLES)
+    # Initialize Actor (operates on latent situations)
+    actor = Actor(latent_dim=LATENT_DIM, intent_dim=3, n_knots=6, interp_res=40)
+    
+    # Train both models together with live plotting
+    # You can add/remove obstacles in train_actor without changing the models!
+    train_actor(
+        inference_engine=inference_engine,
+        actor=actor,
+        episodes=100,
+        plot_live=True,
+        max_observed_obstacles=MAX_OBSERVED_OBSTACLES,
+        latent_dim=LATENT_DIM
+    )
