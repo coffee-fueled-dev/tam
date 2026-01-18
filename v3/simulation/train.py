@@ -52,6 +52,13 @@ def train_actor(inference_engine, actor, config=None):
     goal_reached_threshold = env_config.get("goal_reached_threshold", 0.5)
     initial_target = env_config.get("initial_target", [10.0] * state_dim)
     
+    # Extract energy configuration
+    energy_config = env_config.get("energy", {})
+    max_energy = energy_config.get("max_energy", 100.0)
+    initial_energy = energy_config.get("initial_energy", max_energy)
+    energy_per_unit_distance = energy_config.get("energy_per_unit_distance", 1.0)
+    energy_replenish_amount = energy_config.get("energy_replenish_amount", 20.0)
+    
     # Extract training configuration
     total_moves = training_config.get("total_moves", 500)
     learning_rate = training_config.get("learning_rate", 1e-3)
@@ -112,7 +119,17 @@ def train_actor(inference_engine, actor, config=None):
     else:
         print(f"✓ Generated {num_obstacles_generated} obstacles (seed={obstacle_seed}, deterministic)")
     
-    sim = SimulationWrapper(obstacles, state_dim=state_dim, bounds=bounds)
+    # Initialize simulation with energy config
+    sim = SimulationWrapper(
+        obstacles, 
+        state_dim=state_dim, 
+        bounds=bounds,
+        energy_config={
+            "max_energy": max_energy,
+            "initial_energy": initial_energy,
+            "energy_per_unit_distance": energy_per_unit_distance
+        }
+    )
     # Initialize target position
     target_pos = torch.tensor(initial_target)
     
@@ -120,8 +137,9 @@ def train_actor(inference_engine, actor, config=None):
     # - state_dim (rel_goal) 
     # + max_observed_obstacles * (state_dim + 1) (rel_obs_pos + obs_radius)
     # + 2 * state_dim (boundary distances: min and max per dimension)
+    # + 2 (energy_value, energy_normalized)
     # This is FIXED regardless of actual obstacle count (uses padding/truncation)
-    raw_ctx_dim = state_dim + max_observed_obstacles * (state_dim + 1) + 2 * state_dim
+    raw_ctx_dim = state_dim + max_observed_obstacles * (state_dim + 1) + 2 * state_dim + 2
     
     # Create session directory and file
     os.makedirs(artifacts_dir, exist_ok=True)
@@ -340,6 +358,10 @@ def train_actor(inference_engine, actor, config=None):
         # 3. PRINCIPLED TAM LOSS: Computed by Actor based on binding outcomes
         # The Actor computes its own loss from binding failure, agency, and geometry
         # This is dimension-agnostic and principled based on the TAM framework
+        # Binding failure naturally captures all contradictions, including energy depletion:
+        # - If energy runs out, actual_path is shorter than proposed_tube
+        # - The binding loss automatically penalizes the unexecuted portion
+        # - No special "death" concept needed - binding failure is universal
         
         # Get knot mask for selected port (if available)
         selected_knot_mask = knot_mask[0, idx_int] if knot_mask is not None else None
@@ -412,6 +434,29 @@ def train_actor(inference_engine, actor, config=None):
         memory_context = new_memory_context.detach()
         h_state = h_state.detach()
         
+        # Handle energy depletion: if energy depleted, reset episode
+        # Binding failure already captured the contradiction - no special "death" concept needed
+        if sim.is_dead or sim.current_energy <= 0:
+            print(f"Move {move_count}/{total_moves} | Energy depleted! Episode ended.")
+            # Reset energy for next episode
+            sim.reset_energy()
+            # Reset position to origin
+            current_pos = torch.zeros((1, state_dim))
+            # Generate new goal
+            new_goal = torch.tensor([
+                random.uniform(bounds['min'][i] + 0.5, bounds['max'][i] - 0.5) 
+                for i in range(state_dim)
+            ])
+            target_pos = new_goal
+            goal_start_pos = current_pos.clone()
+            goal_start_move = move_count
+            moves_to_current_goal = 0
+            segment_lengths = []
+            agency_values = []
+            # Reset tkn processor
+            tkn_processor.reset_episode()
+            # Continue training (don't break - just reset and continue)
+        
         # Update position
         current_pos = actual_p[-1].view(1, state_dim).detach()
         move_count += 1
@@ -425,12 +470,20 @@ def train_actor(inference_engine, actor, config=None):
         if plotter is not None and move_count % plot_update_frequency == 0:
             # Record mode: just collects data, no rendering
             plotter.update(selected_tube, selected_sigma, actual_p, current_pos, 
-                         episode=0, step=move_count, goal_pos=target_pos)
+                         episode=0, step=move_count, goal_pos=target_pos,
+                         energy=sim.current_energy, max_energy=sim.max_energy)
         
         # Check if goal is reached - if so, log goal statistics and generate new goal
         # Optimized: compute distance once and reuse
         goal_distance = torch.norm(current_pos.squeeze() - target_pos).item()
-        if goal_distance < 1.0:
+        if goal_distance < goal_reached_threshold:
+            # Replenish energy when goal is reached
+            sim.replenish_energy(energy_replenish_amount)
+            
+            # Mark goal as reached in plotter (increments goal counter)
+            if plotter is not None:
+                plotter.mark_goal_reached(target_pos)
+            
             # Calculate statistics for this goal (optimized: compute all stats in one pass)
             if len(segment_lengths) > 0:
                 seg_array = np.asarray(segment_lengths, dtype=np.float32)  # Use float32 for speed

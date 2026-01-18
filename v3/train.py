@@ -76,7 +76,15 @@ if __name__ == "__main__":
         "goal_reached_threshold": 0.5,  # Consider goal "reached" if within this distance
         
         # Observation configuration
-        "max_observed_obstacles": 10  # Maximum obstacles in observation (can add/remove obstacles freely!)
+        "max_observed_obstacles": 10,  # Maximum obstacles in observation (can add/remove obstacles freely!)
+        
+        # Energy/resource mechanics
+        "energy": {
+            "max_energy": 100.0,  # Maximum energy capacity
+            "initial_energy": 100.0,  # Starting energy (default: max_energy)
+            "energy_per_unit_distance": 2.5,  # Energy cost per unit distance traveled (increased for faster depletion)
+            "energy_replenish_amount": 20.0  # Energy restored when goal reached
+        }
     }
     
     # ============================================================================

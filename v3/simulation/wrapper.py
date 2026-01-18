@@ -8,13 +8,17 @@ class SimulationWrapper:
     Works with any N-dimensional state space. Obstacles and bounds are
     automatically handled for the specified state dimension.
     """
-    def __init__(self, obstacles, state_dim=3, bounds=None):
+    def __init__(self, obstacles, state_dim=3, bounds=None, energy_config=None):
         """
         Args:
             obstacles: List of (position, radius) tuples where position is (state_dim,) array/list
             state_dim: Dimension of state space (e.g., 3 for 3D, 6 for 6D)
             bounds: Optional dict with 'min' and 'max' keys, each a list of state_dim floats
                    If None, defaults to [-2, -2, ...] to [12, 12, ...] for each dimension
+            energy_config: Optional dict with energy parameters:
+                          - max_energy: Maximum energy (default: 100.0)
+                          - initial_energy: Starting energy (default: max_energy)
+                          - energy_per_unit_distance: Energy cost per unit distance (default: 1.0)
         """
         self.state_dim = state_dim
         self.obstacles = obstacles
@@ -43,6 +47,15 @@ class SimulationWrapper:
         # Convert to tensors for easier computation
         self.bounds_min = torch.tensor(self.bounds['min'], dtype=torch.float32)
         self.bounds_max = torch.tensor(self.bounds['max'], dtype=torch.float32)
+        
+        # Initialize energy system
+        if energy_config is None:
+            energy_config = {}
+        self.max_energy = energy_config.get('max_energy', 100.0)
+        self.initial_energy = energy_config.get('initial_energy', self.max_energy)
+        self.energy_per_unit_distance = energy_config.get('energy_per_unit_distance', 1.0)
+        self.current_energy = self.initial_energy
+        self.is_dead = False  # Track death state
     
     def get_raw_observation(self, current_pos, target_pos, max_obstacles=10):
         """
@@ -149,9 +162,13 @@ class SimulationWrapper:
         
         boundary_tensor = torch.stack(boundary_distances)  # (2 * state_dim,)
         
-        # Concatenate all parts: [rel_goal, obstacles..., boundaries]
-        raw_ctx = torch.cat([torch.cat(obs_parts, dim=0), boundary_tensor], dim=0)
-        # Shape: (state_dim + max_obstacles*(state_dim+1) + 2*state_dim,)
+        # Add energy information: raw value and normalized (0-1)
+        energy_value = torch.tensor([self.current_energy], dtype=torch.float32, device=device)
+        energy_normalized = torch.tensor([self.current_energy / self.max_energy], dtype=torch.float32, device=device)
+        
+        # Concatenate all parts: [rel_goal, obstacles..., boundaries, energy_value, energy_normalized]
+        raw_ctx = torch.cat([torch.cat(obs_parts, dim=0), boundary_tensor, energy_value, energy_normalized], dim=0)
+        # Shape: (state_dim + max_obstacles*(state_dim+1) + 2*state_dim + 2,)
         
         return raw_ctx
     
@@ -205,8 +222,18 @@ class SimulationWrapper:
         if len(mu_global) <= 1:
             return torch.stack(actual_path)
         
+        # Calculate maximum distance that can be traveled with current energy
+        # This limits movement capability as energy depletes
+        max_travel_distance = self.current_energy / self.energy_per_unit_distance if self.current_energy > 0 else 0.0
+        
         # Execute step by step
         for t in range(1, len(mu_global)):
+            # Check if dead (energy depleted)
+            if self.is_dead or self.current_energy <= 0:
+                # Can't move - return partial path (creates binding failure)
+                self.is_dead = True
+                break
+            
             expected_p = mu_global[t]
             
             # Handle sigma_t indexing - ensure we get a scalar
@@ -216,9 +243,40 @@ class SimulationWrapper:
             # Start with expected position
             actual_p = expected_p.clone()
             
+            # Calculate distance traveled from previous position
+            prev_pos = actual_path[-1] if len(actual_path) > 0 else current_pos_squeezed
+            intended_dist = torch.norm(actual_p - prev_pos).item()
+            
+            # Limit movement based on available energy
+            # If intended distance exceeds what we can afford, scale it down
+            if intended_dist > max_travel_distance and max_travel_distance > 0:
+                # Scale down the movement to stay within energy budget
+                direction = (actual_p - prev_pos) / (intended_dist + 1e-6)
+                actual_p = prev_pos + direction * max_travel_distance
+                dist_traveled = max_travel_distance
+            else:
+                dist_traveled = intended_dist
+            
+            # Consume energy based on distance traveled
+            energy_consumed = dist_traveled * self.energy_per_unit_distance
+            self.current_energy -= energy_consumed
+            
+            # Update max travel distance for next segment
+            max_travel_distance = self.current_energy / self.energy_per_unit_distance if self.current_energy > 0 else 0.0
+            
+            # Check if energy depleted during this segment
+            if self.current_energy <= 0:
+                # Energy depleted - stop execution early
+                # Partial path creates binding failure (planned path longer than actual)
+                self.is_dead = True
+                # Add current position before death
+                actual_path.append(actual_p.clone())
+                break
+            
             # Check for obstacles (physics that creates deviation)
+            device = actual_p.device
             for obs_p, obs_r in self.obstacles:
-                obs_pos = torch.tensor(obs_p, dtype=torch.float32, device=actual_p.device)
+                obs_pos = torch.tensor(obs_p, dtype=torch.float32, device=device)
                 # Ensure obstacle position matches state_dim
                 if obs_pos.shape[0] != self.state_dim:
                     if obs_pos.shape[0] < self.state_dim:
@@ -241,7 +299,6 @@ class SimulationWrapper:
             
             # Check boundaries (physics that creates deviation - same as obstacles)
             # Boundaries should push back, creating deviation that can trigger binding failure
-            device = actual_p.device
             bounds_min = self.bounds_min.to(device)
             bounds_max = self.bounds_max.to(device)
             
@@ -268,5 +325,19 @@ class SimulationWrapper:
             
             actual_path.append(actual_p.clone())
         
-        return torch.stack(actual_path) 
+        return torch.stack(actual_path)
+    
+    def replenish_energy(self, amount):
+        """
+        Replenish energy by a fixed amount (called when goal is reached).
+        
+        Args:
+            amount: Energy amount to add
+        """
+        self.current_energy = min(self.max_energy, self.current_energy + amount)
+    
+    def reset_energy(self):
+        """Reset energy to initial value (for episode resets)."""
+        self.current_energy = self.initial_energy
+        self.is_dead = False
       

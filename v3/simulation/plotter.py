@@ -49,6 +49,12 @@ class LivePlotter:
         else:
             self.bounds = bounds
         
+        # Initialize goal counter and energy tracking (needed in both modes)
+        self.goal_counter = 0  # Track total goals reached
+        self.energy_bar = None  # Store energy bar text annotation
+        self.current_energy = None  # Track current energy for display
+        self.max_energy = None  # Track max energy for display
+        
         # In record mode, just collect data - no plotting setup
         if record_mode:
             self.recorded_data = []  # List of (mu_t, sigma_t, actual_path, current_pos, step, goal_positions)
@@ -319,7 +325,7 @@ class LivePlotter:
                           linewidth=self.LINE_WIDTHS['boundary'], alpha=0.4, 
                           label='Boundary' if edge == edges[0] else '')
         
-    def update(self, mu_t, sigma_t, actual_path, current_pos, episode, step, goal_pos=None):
+    def update(self, mu_t, sigma_t, actual_path, current_pos, episode, step, goal_pos=None, energy=None, max_energy=None):
         """
         Update the plot with new tube and path information.
         
@@ -334,6 +340,8 @@ class LivePlotter:
             episode: current episode number
             step: current step number
             goal_pos: Optional current goal position (for recording)
+            energy: Optional current energy value (for energy bar)
+            max_energy: Optional maximum energy value (for energy bar)
         """
         # Record mode: just collect data, no rendering
         if self.record_mode:
@@ -350,11 +358,15 @@ class LivePlotter:
                 'actual_path': actual_path_np.copy(),
                 'current_pos': current_pos_np.copy(),
                 'step': step,
-                'goal_pos': goal_pos_np.copy() if goal_pos_np is not None else None
+                'goal_pos': goal_pos_np.copy() if goal_pos_np is not None else None,
+                'energy': energy,
+                'max_energy': max_energy
             })
             return
         
         # Live mode: render immediately
+        self.current_energy = energy
+        self.max_energy = max_energy
         self._render_frame(mu_t, sigma_t, actual_path, current_pos, episode, step)
     
     def _render_frame(self, mu_t, sigma_t, actual_path, current_pos, episode, step):
@@ -622,10 +634,25 @@ class LivePlotter:
                                                   linewidths=2, alpha=0.9,
                                                   label='Current Position', zorder=10)
         
+        # Update energy bar
+        if self.energy_bar is not None:
+            self.energy_bar.remove()
+        
+        if self.current_energy is not None and self.max_energy is not None:
+            energy_percent = (self.current_energy / self.max_energy) * 100
+            # Create energy bar as text annotation in upper right
+            energy_text = f'Energy: {self.current_energy:.1f}/{self.max_energy:.1f} ({energy_percent:.0f}%)'
+            self.energy_bar = self.ax.text2D(0.98, 0.98, energy_text,
+                                            transform=self.ax.transAxes,
+                                            fontsize=10,
+                                            verticalalignment='top',
+                                            horizontalalignment='right',
+                                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='#3B82F6', linewidth=1.5),
+                                            color='#1F2937')
+        
         # Update title with episode/step info and key metrics
         avg_sigma = float(sigma_np.mean()) if len(sigma_np) > 0 else 0.0
-        goals_reached_count = len(self.reached_goal_markers)
-        self.ax.set_title(f'Move {step} | Avg σ: {avg_sigma:.3f} | Goals: {goals_reached_count}')
+        self.ax.set_title(f'Move {step} | Avg σ: {avg_sigma:.3f} | Goals: {self.goal_counter}')
     
     def _clear_episode(self):
         """Clear all visualization elements from the previous episode."""
@@ -667,10 +694,15 @@ class LivePlotter:
             self.current_pos_marker.remove()
             self.current_pos_marker = None
         
-        # Remove reached goal markers
+        # Remove reached goal markers (but keep goal counter - it persists across episodes)
         for marker in self.reached_goal_markers:
             marker.remove()
         self.reached_goal_markers = []
+        
+        # Remove energy bar
+        if self.energy_bar is not None:
+            self.energy_bar.remove()
+            self.energy_bar = None
     
     def mark_goal_reached(self, goal_pos):
         """
@@ -679,6 +711,21 @@ class LivePlotter:
         Args:
             goal_pos: (3,) numpy array or tensor with goal position
         """
+        # Increment goal counter (works in both record and live modes)
+        self.goal_counter += 1
+        
+        # In record mode, just track the goal position - no visualization
+        if self.record_mode:
+            if isinstance(goal_pos, torch.Tensor):
+                goal_np = goal_pos.detach().cpu().numpy() if goal_pos.requires_grad else goal_pos.cpu().numpy()
+            else:
+                goal_np = np.array(goal_pos)
+            if goal_np.ndim > 1:
+                goal_np = goal_np.squeeze()
+            self.goal_positions.append(goal_np.copy())
+            return
+        
+        # Live mode: add visualization marker
         # Convert to numpy if needed
         if isinstance(goal_pos, torch.Tensor):
             goal_np = goal_pos.detach().cpu().numpy() if goal_pos.requires_grad else goal_pos.cpu().numpy()
@@ -689,14 +736,18 @@ class LivePlotter:
         if goal_np.ndim > 1:
             goal_np = goal_np.squeeze()
         
-        # Add a marker for the reached goal (hollow outline only for contrast with active goal)
-        reached_marker = self.ax.scatter(
-            goal_np[0], goal_np[1], goal_np[2],
-            facecolors='none', s=200, marker='*', 
-            edgecolors='#D97706', linewidths=0.8, alpha=0.7, 
+        # Add a marker for the reached goal (dashed border, no fill)
+        # Use plot instead of scatter to get dashed border
+        reached_marker = self.ax.plot(
+            [goal_np[0]], [goal_np[1]], [goal_np[2]],
+            marker='*', markersize=15, 
+            markeredgecolor='#D97706', markeredgewidth=1.5,
+            markerfacecolor='none',  # No fill
+            linestyle='',  # No line, just marker
+            alpha=0.8,
             label='Reached Goal' if len(self.reached_goal_markers) == 0 else '',
             zorder=9
-        )
+        )[0]
         self.reached_goal_markers.append(reached_marker)
         self.ax.legend()
     
@@ -796,6 +847,11 @@ class LivePlotter:
             sigma_t = torch.from_numpy(frame_data['sigma_t'])
             actual_path = torch.from_numpy(frame_data['actual_path'])
             current_pos = torch.from_numpy(frame_data['current_pos']).unsqueeze(0)
+            
+            # Update energy if available
+            if 'energy' in frame_data and 'max_energy' in frame_data:
+                self.current_energy = frame_data['energy']
+                self.max_energy = frame_data['max_energy']
             
             # Render this frame
             self._render_frame(mu_t, sigma_t, actual_path, current_pos, 

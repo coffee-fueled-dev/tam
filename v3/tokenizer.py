@@ -461,8 +461,8 @@ class UnifiedTknProcessor:
             return
         
         self.state_dim = state_dim
-        # Head names: one per dimension + proximity
-        self.head_names = [f"dim_{i}" for i in range(state_dim)] + ["proximity"]
+        # Head names: one per dimension + proximity + energy
+        self.head_names = [f"dim_{i}" for i in range(state_dim)] + ["proximity", "energy"]
         self.lattice = MarkovLattice(self.head_names, vocab_size=self.vocab_size, hub_threshold=self.hub_threshold)
     
     def process_observation(self, current_pos, raw_obs, obstacles, max_observed_obstacles=10):
@@ -551,6 +551,14 @@ class UnifiedTknProcessor:
                 boundary_distances = raw_obs_np[boundary_start_idx:boundary_end_idx]
                 # Reshape to (state_dim, 2) where each row is [dist_to_min, dist_to_max] for that dimension
                 boundary_distances = boundary_distances.reshape(inferred_state_dim, 2)
+        
+        # Extract energy values from raw_obs (last 2 elements: energy_value, energy_normalized)
+        energy_value = None
+        energy_normalized = None
+        energy_start_idx = inferred_state_dim + max_observed_obstacles * obstacle_size + 2 * inferred_state_dim
+        if energy_start_idx < len(raw_obs_np) and len(raw_obs_np) >= energy_start_idx + 2:
+            energy_value = float(raw_obs_np[energy_start_idx])
+            energy_normalized = float(raw_obs_np[energy_start_idx + 1])
         
         # Calculate deltas
         if self.previous_pos is not None:
@@ -679,6 +687,44 @@ class UnifiedTknProcessor:
         proximity_traits = torch.tensor([[proximity_hub_count, proximity_surprise]], dtype=torch.float32)
         quantized_values["proximity"] = int(proximity_q)
         
+        # Process energy (tokenize like spatial dimensions)
+        if energy_value is not None and energy_normalized is not None:
+            # Quantize energy_value using proximity_head (can be large values)
+            energy_value_q = self.proximity_head.quantize(energy_value)
+            energy_value_pattern, energy_value_novel = self.proximity_head.process(energy_value_q)
+            
+            # Quantize energy_normalized using unified_head (0-1 range)
+            energy_normalized_q = self.unified_head.quantize(energy_normalized)
+            energy_normalized_pattern, energy_normalized_novel = self.unified_head.process(energy_normalized_q)
+            
+            # Use normalized energy as primary pattern (more informative for learning)
+            energy_pattern = energy_normalized_pattern if energy_normalized_pattern is not None else [energy_normalized_q]
+            energy_novel = energy_normalized_novel
+            
+            # Get head state for energy (use unified_head since we're using normalized)
+            energy_buffer_hash, energy_hub_count, energy_surprise = self.unified_head.get_head_state()
+            
+            # Store energy for lattice.update()
+            head_name = "energy"
+            head_emissions[head_name] = (energy_pattern, energy_novel)
+            hub_counts_dict[head_name] = energy_hub_count
+            surprises_dict[head_name] = energy_surprise
+            
+            energy_traits = torch.tensor([[energy_hub_count, energy_surprise]], dtype=torch.float32)
+            quantized_values["energy_value"] = int(energy_value_q)
+            quantized_values["energy_normalized"] = int(energy_normalized_q)
+        else:
+            # No energy data - use default values
+            energy_pattern = [0]
+            energy_novel = False
+            head_name = "energy"
+            head_emissions[head_name] = (energy_pattern, energy_novel)
+            hub_counts_dict[head_name] = 0.0
+            surprises_dict[head_name] = 0.0
+            energy_traits = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+            quantized_values["energy_value"] = 0
+            quantized_values["energy_normalized"] = 0
+        
         # Update lattice with Markov tokenization and position tracking
         # This will tokenize all heads using Markov transitions
         if self.lattice:
@@ -692,10 +738,10 @@ class UnifiedTknProcessor:
             lattice_tokens = torch.zeros(len(self.head_names), dtype=torch.long)
             surprise_mask = torch.zeros(len(self.head_names), dtype=torch.bool)
         
-        # Extract dimension tokens from lattice (excluding proximity)
+        # Extract dimension tokens from lattice (excluding proximity and energy)
         dimension_tokens = []
         for i, name in enumerate(self.head_names):
-            if name != "proximity":
+            if name != "proximity" and name != "energy":
                 token_id = lattice_tokens[i].item()
                 dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))
         
@@ -718,10 +764,11 @@ class UnifiedTknProcessor:
             # Legacy format for compatibility
             "lattice_tokens": lattice_tokens,  # (num_heads,)
             "surprise_mask": surprise_mask,  # (num_heads,)
-            "lattice_traits": torch.cat(dimension_traits + [proximity_traits], dim=0),  # (num_heads, 2)
+            "lattice_traits": torch.cat(dimension_traits + [proximity_traits, energy_traits], dim=0),  # (num_heads, 2)
             "buffer_hashes": torch.cat([
                 torch.tensor([self.unified_head.get_head_state()[0]] * inferred_state_dim + 
-                           [self.proximity_head.get_head_state()[0]], dtype=torch.long)
+                           [self.proximity_head.get_head_state()[0]] +
+                           [self.unified_head.get_head_state()[0]], dtype=torch.long)
             ], dim=0),
             "metadata": {
                 "timestamp": datetime.now().isoformat(),

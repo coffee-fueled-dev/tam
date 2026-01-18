@@ -328,6 +328,12 @@ class Actor(nn.Module):
         
         All costs are dimension-agnostic and environment-agnostic.
         
+        The binding failure mechanism naturally captures all contradictions:
+        - If actual_path is shorter than proposed_tube (e.g., energy depletion),
+          the deviation at the unexecuted portion creates a natural penalty
+        - The severity of the penalty scales with how much of the planned path
+          couldn't be executed, making it principled and environment-agnostic
+        
         Args:
             proposed_tube: (T, state_dim) relative tube trajectory
             actual_path: (T_actual, state_dim) actual path taken from world
@@ -369,7 +375,38 @@ class Actor(nn.Module):
         weighted_deviation = (deviation_per_dim**2) / (sigma_slice + 1e-6)  # (T, state_dim)
         
         # Binding loss: average weighted deviation (binding failure measure)
+        # This naturally captures all contradictions, including energy depletion:
+        # - If actual_path is shorter than proposed_tube, the deviation at the end
+        #   creates a penalty proportional to the unexecuted portion
+        # - The penalty scales automatically with path length and deviation magnitude
+        # - No special cases needed - binding failure is the universal mechanism
         binding_loss = torch.mean(weighted_deviation.sum(dim=-1))
+        
+        # If actual path is shorter than planned, add penalty for unexecuted portion
+        # This handles energy depletion and other early termination naturally
+        if len(actual_path) < len(proposed_tube):
+            # Calculate deviation for unexecuted portion
+            # Use the last actual position vs. remaining planned positions
+            remaining_planned = proposed_tube[len(actual_path):]  # (T_remaining, state_dim)
+            last_actual_global = actual_path[-1] + current_pos  # (state_dim,)
+            
+            # Expected positions for unexecuted portion
+            expected_remaining_global = remaining_planned + current_pos  # (T_remaining, state_dim)
+            
+            # Deviation for unexecuted portion: distance from last actual to each expected
+            # This creates a penalty proportional to how much wasn't executed
+            unexecuted_deviations = torch.norm(
+                expected_remaining_global - last_actual_global.unsqueeze(0), 
+                dim=-1
+            )  # (T_remaining,)
+            
+            # Weight by sigma for unexecuted portion
+            sigma_remaining = sigma_t[len(actual_path):].mean(dim=-1)  # (T_remaining,)
+            weighted_unexecuted = (unexecuted_deviations**2) / (sigma_remaining + 1e-6)  # (T_remaining,)
+            
+            # Add unexecuted penalty to binding loss
+            unexecuted_penalty = torch.mean(weighted_unexecuted)
+            binding_loss = binding_loss + unexecuted_penalty
         
         # Agency cost: cone width (sigma) - narrower cones = higher agency
         # This is dimension-agnostic: works for any state_dim
