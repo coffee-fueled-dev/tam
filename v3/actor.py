@@ -120,7 +120,8 @@ class Actor(nn.Module):
         # Use learned basis functions
         return self.basis_functions
     
-    def forward(self, latent_situation, intent, previous_velocity=None, situation_sequence=None):
+    def forward(self, latent_situation, intent, previous_velocity=None, situation_sequence=None,
+                markov_lattice=None, current_pos=None):
         """
         Generate affordance tubes using basis function projection.
         
@@ -130,6 +131,8 @@ class Actor(nn.Module):
             previous_velocity: Optional (B, state_dim) or (state_dim,) tensor (kept for interface compatibility, not used)
             situation_sequence: (B, state_dim, token_embed_dim) sequence from transformer
                              Required for cross-attention
+            markov_lattice: Optional MarkovLattice for look-ahead queries
+            current_pos: Optional (state_dim,) current position for look-ahead queries
         
         Returns:
             logits: (B, M) port selection logits
@@ -303,6 +306,13 @@ class Actor(nn.Module):
         # Stack and reshape
         mu_t = torch.stack(mu_t_padded).view(B, self.n_ports, max_T, state_dim)
         sigma_t = torch.stack(sigma_t_padded).view(B, self.n_ports, max_T, state_dim)
+        
+        # Note: Risk modulation removed - actor learns sigma directly from context
+        # The hub graph learns risk patterns, and the transformer/actor learns to associate
+        # patterns with appropriate sigma values through the situation_sequence attention.
+        # The actor's sigma predictions already incorporate obstacle information via the
+        # transformer's dimension-token sequence (which includes obstacle directions).
+        # No post-hoc modulation needed - let gradients flow and the model learn.
         
         return logits, mu_t, sigma_t, knot_mask, basis_weights
 

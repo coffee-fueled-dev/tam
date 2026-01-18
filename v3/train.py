@@ -26,7 +26,8 @@ if __name__ == "__main__":
         "n_layers": 3,
         "n_heads": 8,
         "max_dimension_embed": 32,
-        "dropout": 0.1
+        "dropout": 0.1,
+        "memory_window": 10  # Number of recent situations to remember for temporal context
     }
     
     # Actor Configuration
@@ -82,7 +83,7 @@ if __name__ == "__main__":
     # TRAINING CONFIGURATION
     # ============================================================================
     TRAINING_CONFIG = {
-        "total_moves": 10_000,  # Total number of moves (not episodes)
+        "total_moves": 500,  # Total number of moves
         "learning_rate": 1e-3,
         
         # Loss weights (principled TAM loss components)
@@ -111,14 +112,23 @@ if __name__ == "__main__":
         "quantization_bins": 11,  # Number of quantization bins per head
         "quant_range": (-2.0, 2.0),  # Default quantization range (min, max)
         "proximity_quant_range": (-5.0, 10.0),  # Quantization range for proximity head
-        "vocab_size": VOCAB_SIZE
+        "vocab_size": VOCAB_SIZE,
+        "hub_threshold": 3  # Minimum hub_count to be considered a hub (for MarkovLattice)
+    }
+    
+    # ============================================================================
+    # HUB GRAPH CONFIGURATION
+    # ============================================================================
+    HUB_GRAPH_CONFIG = {
+        "hub_threshold": 3,  # Minimum hub_count to be considered a hub
+        "enable_look_ahead": True  # Enable trajectory queries for proactive planning
     }
     
     # ============================================================================
     # VISUALIZATION CONFIGURATION
     # ============================================================================
     VISUALIZATION_CONFIG = {
-        "plot_live": False,  # Whether to show live visualization
+        "plot_live": True,  # Whether to show live visualization
         "max_visualization_history": 5,  # Maximum number of moves to display in visualization
         "plot_update_frequency": 1,  # Update plot every N moves (1 = every move)
         "replay_frame_delay": 0.01  # Delay between frames in replay (seconds). Lower = faster replay
@@ -210,6 +220,7 @@ if __name__ == "__main__":
             "tokenizer": TOKENIZER_CONFIG,
             "visualization": VISUALIZATION_CONFIG,
             "logging": LOGGING_CONFIG,
-            "system": SYSTEM_CONFIG
+            "system": SYSTEM_CONFIG,
+            "hub_graph": HUB_GRAPH_CONFIG
         }
     )

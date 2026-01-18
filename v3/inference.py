@@ -14,7 +14,7 @@ class TransformerInferenceEngine(nn.Module):
     """
     def __init__(self, vocab_size=65536, token_embed_dim=64, 
                  latent_dim=128, n_layers=3, n_heads=8, 
-                 max_dimension_embed=32, dropout=0.1):
+                 max_dimension_embed=32, dropout=0.1, memory_window=10):
         """
         Args:
             vocab_size: Token vocabulary size
@@ -24,6 +24,7 @@ class TransformerInferenceEngine(nn.Module):
             n_heads: Number of attention heads
             max_dimension_embed: Maximum dimension index for positional embedding
             dropout: Dropout rate for transformer layers
+            memory_window: Number of recent situations to remember for temporal context
         """
         super().__init__()
         self.vocab_size = vocab_size
@@ -31,6 +32,7 @@ class TransformerInferenceEngine(nn.Module):
         self.latent_dim = latent_dim
         self.n_layers = n_layers
         self.n_heads = n_heads
+        self.memory_window = memory_window
         
         # Token embedding: pattern IDs -> dense vectors
         self.token_embedding = nn.Embedding(vocab_size, token_embed_dim)
@@ -65,7 +67,7 @@ class TransformerInferenceEngine(nn.Module):
         # CLS token for aggregation (learned)
         self.cls_token = nn.Parameter(torch.randn(1, 1, token_embed_dim))
     
-    def forward(self, dimension_tokens, dimension_traits, rel_goal, h_prev=None):
+    def forward(self, dimension_tokens, dimension_traits, rel_goal, h_prev=None, memory_context=None):
         """
         Process dimensions as a sequence.
         
@@ -77,10 +79,12 @@ class TransformerInferenceEngine(nn.Module):
                             Each element: (B, 2) tensor of [hub_count, surprise]
             rel_goal: (B, state_dim) relative goal vector
             h_prev: Optional, kept for interface compatibility (not used in transformer)
+            memory_context: Optional (B, memory_window, token_embed_dim) sliding window of recent situations
             
         Returns:
             situation: (B, latent_dim) latent situation
             situation_sequence: (B, state_dim, token_embed_dim) sequence for Actor attention
+            new_memory_context: (B, memory_window, token_embed_dim) updated memory context
         """
         B = rel_goal.shape[0]
         state_dim = rel_goal.shape[-1]
@@ -175,8 +179,15 @@ class TransformerInferenceEngine(nn.Module):
         cls = self.cls_token.expand(B, -1, -1)  # (B, 1, token_embed_dim)
         sequence_with_cls = torch.cat([cls, sequence], dim=1)  # (B, state_dim+1, token_embed_dim)
         
-        # Transformer encoder: attend across dimensions
-        encoded = self.transformer(sequence_with_cls)  # (B, state_dim+1, token_embed_dim)
+        # Add memory context if provided (for temporal attention)
+        if memory_context is not None:
+            # memory_context: (B, memory_window, token_embed_dim)
+            # Concatenate to sequence for temporal attention
+            sequence_with_memory = torch.cat([sequence_with_cls, memory_context], dim=1)  # (B, state_dim+1+memory_window, token_embed_dim)
+            encoded = self.transformer(sequence_with_memory)  # (B, state_dim+1+memory_window, token_embed_dim)
+        else:
+            # No memory context: standard processing
+            encoded = self.transformer(sequence_with_cls)  # (B, state_dim+1, token_embed_dim)
         
         # Extract CLS token as situation representation
         cls_output = encoded[:, 0, :]  # (B, token_embed_dim)
@@ -185,6 +196,26 @@ class TransformerInferenceEngine(nn.Module):
         situation = self.output_proj(cls_output)  # (B, latent_dim)
         
         # Extract dimension sequence (without CLS) for Actor attention
-        situation_sequence = encoded[:, 1:, :]  # (B, state_dim, token_embed_dim)
+        situation_sequence = encoded[:, 1:1+state_dim, :]  # (B, state_dim, token_embed_dim)
         
-        return situation, situation_sequence
+        # Update memory context: sliding window of recent situation sequences
+        # Use the current situation_sequence as the new memory entry
+        if memory_context is not None:
+            # Append current situation_sequence and keep only last memory_window entries
+            # situation_sequence: (B, state_dim, token_embed_dim)
+            # We'll use mean pooling across dimensions to get a single vector per situation
+            current_situation_embed = situation_sequence.mean(dim=1, keepdim=True)  # (B, 1, token_embed_dim)
+            new_memory_context = torch.cat([memory_context, current_situation_embed], dim=1)  # (B, memory_window+1, token_embed_dim)
+            # Keep only last memory_window entries
+            new_memory_context = new_memory_context[:, -self.memory_window:, :]  # (B, memory_window, token_embed_dim)
+        else:
+            # Initialize memory context with current situation
+            current_situation_embed = situation_sequence.mean(dim=1, keepdim=True)  # (B, 1, token_embed_dim)
+            # Pad to memory_window size
+            if self.memory_window > 1:
+                # Repeat current situation to fill memory window
+                new_memory_context = current_situation_embed.repeat(1, self.memory_window, 1)  # (B, memory_window, token_embed_dim)
+            else:
+                new_memory_context = current_situation_embed  # (B, 1, token_embed_dim)
+        
+        return situation, situation_sequence, new_memory_context

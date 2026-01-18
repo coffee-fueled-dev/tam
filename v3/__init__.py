@@ -13,7 +13,7 @@ __version__ = "3.0.0"
 from v3.actor import Actor
 from v3.inference import TransformerInferenceEngine
 from v3.geometry import CausalSpline
-from v3.tokenizer import UnifiedTknProcessor, TknProcessor, TknHead, InvariantLattice
+from v3.tokenizer import UnifiedTknProcessor, TknProcessor, TknHead, MarkovLattice
 
 # Simulation components
 from v3.simulation import SimulationWrapper, LivePlotter, train_actor
@@ -25,7 +25,7 @@ __all__ = [
     'UnifiedTknProcessor',
     'TknProcessor',  # Legacy, deprecated
     'TknHead',
-    'InvariantLattice',
+    'MarkovLattice',
     'SimulationWrapper',
     'LivePlotter',
     'train_actor',

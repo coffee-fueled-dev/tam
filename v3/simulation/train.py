@@ -136,10 +136,12 @@ def train_actor(inference_engine, actor, config=None):
     
     # Initialize tkn processor (UnifiedTknProcessor for transformer architecture)
     vocab_size_from_engine = inference_engine.vocab_size if hasattr(inference_engine, 'vocab_size') else vocab_size
+    hub_threshold = tokenizer_config.get("hub_threshold", 3)
     tkn_processor = UnifiedTknProcessor(
         quantization_bins=quantization_bins,
         quant_range=quant_range,
-        vocab_size=vocab_size_from_engine
+        vocab_size=vocab_size_from_engine,
+        hub_threshold=hub_threshold
     )
     tkn_log_file = os.path.join(run_dir, f"tkn_patterns_{session_timestamp}.jsonl")
     print(f"TKN enabled: Pattern discovery logging to {tkn_log_file}")
@@ -197,6 +199,11 @@ def train_actor(inference_engine, actor, config=None):
     # Reset InferenceEngine hidden state at start
     h_state = torch.zeros(1, latent_dim)  # (1, latent_dim) - initial situation
     
+    # Initialize memory context for temporal learning
+    memory_window = getattr(inference_engine, 'memory_window', 10)
+    token_embed_dim = getattr(inference_engine, 'token_embed_dim', 64)
+    memory_context = None  # Will be initialized on first forward pass
+    
     # Reset tkn processor at start
     tkn_processor.reset_episode()
     
@@ -238,17 +245,31 @@ def train_actor(inference_engine, actor, config=None):
         dimension_tokens = tkn_output["dimension_tokens"]  # List of (1,) tensors
         dimension_traits = tkn_output["dimension_traits"]  # List of (1, 2) tensors
         
-        # Call transformer inference engine
-        x_n, situation_sequence = inference_engine(
-            dimension_tokens, dimension_traits, rel_goal_tensor, h_state
-        )  # x_n: (1, latent_dim), situation_sequence: (1, state_dim, token_embed_dim)
+        # Call transformer inference engine with memory context
+        # Keep gradients flowing for temporal learning within the memory window
+        x_n, situation_sequence, new_memory_context = inference_engine(
+            dimension_tokens, dimension_traits, rel_goal_tensor, h_state, memory_context=memory_context
+        )  # x_n: (1, latent_dim), situation_sequence: (1, state_dim, token_embed_dim), new_memory_context: (1, memory_window, token_embed_dim)
         
         # For logging (legacy format compatibility)
         lattice_tokens = tkn_output.get("lattice_tokens", torch.zeros(len(dimension_tokens), dtype=torch.long))
         surprise_mask = tkn_output.get("surprise_mask", torch.zeros(len(dimension_tokens), dtype=torch.bool))
         lattice_traits = tkn_output.get("lattice_traits", torch.zeros(len(dimension_tokens), 2))
         
-        h_state = x_n.detach()  # Pass memory forward (detach to prevent backprop through time)
+        # Keep h_state connected for gradient flow (will be detached after backward pass)
+        h_state = x_n
+        
+        # Query hub graph for structural analogies if surprise detected
+        if surprise_mask is not None and surprise_mask.any():
+            markov_lattice = tkn_processor.lattice
+            if markov_lattice and hasattr(markov_lattice, 'query_structural_analogies'):
+                # Query for structural analogies to inform transformer
+                query_embedding = situation_sequence.mean(dim=1)  # (1, token_embed_dim)
+                analogies = markov_lattice.query_structural_analogies(
+                    dimension_tokens, query_embedding, k=5
+                )
+                # Note: Analogies can be used to modulate attention or add context
+                # For now, we just track them (can be enhanced later)
         
         # Buffer tkn logs for batch writing (much faster than writing every move)
         log_entry = {
@@ -274,8 +295,13 @@ def train_actor(inference_engine, actor, config=None):
         # 2. ACT: Propose affordances based on latent situation x_n
         # Actor operates on latent representation, not raw spatial features
         # Actor uses cross-attention to situation_sequence from transformer
+        # Pass markov_lattice for look-ahead queries
+        markov_lattice = tkn_processor.lattice if hasattr(tkn_processor, 'lattice') else None
+        current_pos_np = current_pos.squeeze().cpu().numpy() if isinstance(current_pos, torch.Tensor) else current_pos
+        
         logits, mu_t, sigma_t, knot_mask, basis_weights = actor(
-            x_n, rel_goal, previous_velocity=previous_velocity, situation_sequence=situation_sequence
+            x_n, rel_goal, previous_velocity=previous_velocity, situation_sequence=situation_sequence,
+            markov_lattice=markov_lattice, current_pos=current_pos_np
         )
         
         # Selection (Categorical sampling for exploration)
@@ -370,10 +396,21 @@ def train_actor(inference_engine, actor, config=None):
         
         optimizer.zero_grad()
         loss.backward()
+        
+        # Gradient clipping for temporal learning (prevents gradient explosion)
+        torch.nn.utils.clip_grad_norm_(inference_engine.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=1.0)
+        
         optimizer.step()
         
         # Track loss for analysis
         loss_history.append(float(loss.item()))
+        
+        # Detach memory_context and h_state after backward pass to prevent graph accumulation
+        # This allows temporal learning within each iteration's computation graph,
+        # but prevents unbounded graph growth across iterations
+        memory_context = new_memory_context.detach()
+        h_state = h_state.detach()
         
         # Update position
         current_pos = actual_p[-1].view(1, state_dim).detach()

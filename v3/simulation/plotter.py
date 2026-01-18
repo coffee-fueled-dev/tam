@@ -98,6 +98,8 @@ class LivePlotter:
         self.tube_spheres = []  # Store sphere surfaces for cleanup (deprecated)
         self.tube_markers = []  # Store tube start/end markers
         self.path_markers = []  # Store path endpoint markers
+        self.tube_capsules = []  # Store projected tube capsule surfaces
+        self.path_capsules = []  # Store actual path capsule surfaces
         self.current_pos_marker = None
         self.current_episode = -1  # Track current episode to detect transitions
         self.reached_goal_markers = []  # Store markers for goals reached in current episode
@@ -123,6 +125,168 @@ class LivePlotter:
         sm.set_array([])
         self.cbar = self.fig.colorbar(sm, ax=self.ax, pad=0.1, shrink=0.6)
         self.cbar.set_label('Normalized σ (Agency)', rotation=270, labelpad=15)
+    
+    def _plot_anisotropic_capsule(self, path_points, sigma_per_dim, color, alpha=0.25):
+        """
+        Plot an anisotropic capsule (ellipsoidal tube) around a path.
+        
+        Creates ellipsoidal cross-sections perpendicular to the path at each point,
+        with radii determined by sigma_per_dim, and connects them to form a capsule.
+        
+        Args:
+            path_points: (T, state_dim) numpy array of path points
+            sigma_per_dim: (T, state_dim) numpy array of per-dimension sigma values
+            color: Color for the capsule
+            alpha: Transparency (0.0 to 1.0)
+        
+        Returns:
+            List of surface objects for cleanup
+        """
+        if len(path_points) < 2:
+            return []  # Need at least 2 points for a capsule
+        
+        T, state_dim = path_points.shape
+        
+        # Ensure sigma_per_dim matches path_points length
+        if len(sigma_per_dim) != T:
+            # Interpolate if needed
+            if len(sigma_per_dim) == 1:
+                sigma_per_dim = np.tile(sigma_per_dim, (T, 1))
+            else:
+                # Linear interpolation
+                old_indices = np.linspace(0, len(sigma_per_dim) - 1, len(sigma_per_dim))
+                new_indices = np.linspace(0, len(sigma_per_dim) - 1, T)
+                sigma_per_dim = np.array([
+                    np.interp(new_indices, old_indices, sigma_per_dim[:, d])
+                    for d in range(sigma_per_dim.shape[1])
+                ]).T
+        
+        surfaces = []
+        
+        # Resolution: balance performance and visual quality
+        n_ellipse_points = 12  # Points per ellipsoid cross-section
+        
+        # Generate angles for ellipsoid parameterization
+        theta = np.linspace(0, 2 * np.pi, n_ellipse_points, endpoint=False)
+        
+        # For 3D, we'll create ellipsoids at each point and connect them
+        if state_dim == 3:
+            # Generate ellipsoid points at each path point
+            ellipsoid_points_list = []
+            
+            for t_idx in range(T):
+                center = path_points[t_idx]
+                sigma = sigma_per_dim[t_idx]
+                
+                # Compute tangent direction (average of incoming and outgoing)
+                if t_idx == 0:
+                    tangent = path_points[1] - path_points[0]
+                elif t_idx == T - 1:
+                    tangent = path_points[-1] - path_points[-2]
+                else:
+                    tangent = (path_points[t_idx + 1] - path_points[t_idx - 1]) / 2.0
+                
+                seg_length = np.linalg.norm(tangent)
+                if seg_length < 1e-6:
+                    # Use default direction if zero-length
+                    tangent = np.array([1.0, 0.0, 0.0])
+                else:
+                    tangent = tangent / seg_length
+                
+                # Create perpendicular coordinate frame using Gram-Schmidt
+                # Choose reference vector (prefer Z-axis unless tangent is close to it)
+                if abs(tangent[2]) < 0.9:
+                    ref = np.array([0.0, 0.0, 1.0])
+                else:
+                    ref = np.array([1.0, 0.0, 0.0])
+                
+                # First perpendicular vector
+                u = ref - np.dot(ref, tangent) * tangent
+                u_norm = np.linalg.norm(u)
+                if u_norm > 1e-6:
+                    u = u / u_norm
+                else:
+                    u = np.array([1.0, 0.0, 0.0]) - np.dot(np.array([1.0, 0.0, 0.0]), tangent) * tangent
+                    u = u / (np.linalg.norm(u) + 1e-10)
+                
+                # Second perpendicular vector (cross product)
+                v = np.cross(tangent, u)
+                v = v / (np.linalg.norm(v) + 1e-10)
+                
+                # Generate ellipsoid points in perpendicular plane
+                # For anisotropic affordance, use sigma values to determine ellipse radii
+                # Project sigma onto the perpendicular plane vectors u and v
+                # This gives us the effective radii in the plane directions
+                sigma_u = np.linalg.norm(sigma * np.abs(u))  # Effective radius along u
+                sigma_v = np.linalg.norm(sigma * np.abs(v))  # Effective radius along v
+                
+                # Fallback: if projection is too small, use direct sigma values
+                if sigma_u < 1e-6:
+                    sigma_u = sigma[0] if len(sigma) > 0 else 0.1
+                if sigma_v < 1e-6:
+                    sigma_v = sigma[1] if len(sigma) > 1 else sigma[0] if len(sigma) > 0 else 0.1
+                
+                ellipse_points = np.zeros((n_ellipse_points, 3))
+                for i, angle in enumerate(theta):
+                    # Local coordinates in perpendicular plane with anisotropic radii
+                    local_x = sigma_u * np.cos(angle)
+                    local_y = sigma_v * np.sin(angle)
+                    # Rotate to world coordinates
+                    ellipse_points[i] = center + local_x * u + local_y * v
+                
+                ellipsoid_points_list.append(ellipse_points)
+            
+            # Connect adjacent ellipsoids to form capsule segments
+            for seg_idx in range(T - 1):
+                ellipse_curr = ellipsoid_points_list[seg_idx]
+                ellipse_next = ellipsoid_points_list[seg_idx + 1]
+                
+                # Create surface mesh connecting two ellipses
+                # Stack points to create a cylindrical segment
+                x_coords = np.array([ellipse_curr[:, 0], ellipse_next[:, 0]])
+                y_coords = np.array([ellipse_curr[:, 1], ellipse_next[:, 1]])
+                z_coords = np.array([ellipse_curr[:, 2], ellipse_next[:, 2]])
+                
+                surface = self.ax.plot_surface(
+                    x_coords, y_coords, z_coords,
+                    color=color, alpha=alpha, edgecolor='none',
+                    antialiased=False, shade=False
+                )
+                surfaces.append(surface)
+        
+        else:
+            # For 2D or other dimensions, use simpler line-based visualization
+            # Create ellipses at each point and connect them
+            for t_idx in range(T - 1):
+                p0 = path_points[t_idx]
+                p1 = path_points[t_idx + 1]
+                sigma0 = sigma_per_dim[t_idx]
+                sigma1 = sigma_per_dim[t_idx + 1]
+                
+                # Create ellipses at endpoints and connect
+                n_segments = 8
+                for seg in range(n_segments):
+                    t = seg / n_segments
+                    center = (1 - t) * p0 + t * p1
+                    sigma_t = (1 - t) * sigma0 + t * sigma1
+                    
+                    # Generate ellipse points
+                    for angle in theta:
+                        if state_dim >= 2:
+                            x = center[0] + sigma_t[0] * np.cos(angle)
+                            y = center[1] + sigma_t[1] * np.sin(angle)
+                            # Plot as scatter or line for 2D
+                            if seg < n_segments - 1:
+                                t_next = (seg + 1) / n_segments
+                                center_next = (1 - t_next) * p0 + t_next * p1
+                                sigma_t_next = (1 - t_next) * sigma0 + t_next * sigma1
+                                x_next = center_next[0] + sigma_t_next[0] * np.cos(angle)
+                                y_next = center_next[1] + sigma_t_next[1] * np.sin(angle)
+                                line = self.ax.plot([x, x_next], [y, y_next], 
+                                                   color=color, alpha=alpha, linewidth=1)
+                                surfaces.extend(line)
+        
+        return surfaces
     
     def _plot_bounding_box(self):
         """Plot the bounding box as a wireframe cube."""
@@ -210,12 +374,27 @@ class LivePlotter:
             for line in self.tube_lines[:to_remove]:
                 line.remove()
             self.tube_lines = self.tube_lines[to_remove:]
+            
+            # Remove corresponding capsules
+            # Estimate: roughly one capsule per segment, so similar count
+            if len(self.tube_capsules) > self.max_history * 10:  # Allow more capsules (multiple per tube)
+                to_remove_capsules = len(self.tube_capsules) - self.max_history * 10
+                for capsule in self.tube_capsules[:to_remove_capsules]:
+                    capsule.remove()
+                self.tube_capsules = self.tube_capsules[to_remove_capsules:]
         
         if len(self.path_lines) > self.max_history:
             to_remove = len(self.path_lines) - self.max_history
             for line in self.path_lines[:to_remove]:
                 line.remove()
             self.path_lines = self.path_lines[to_remove:]
+            
+            # Remove corresponding capsules
+            if len(self.path_capsules) > self.max_history * 10:
+                to_remove_capsules = len(self.path_capsules) - self.max_history * 10
+                for capsule in self.path_capsules[:to_remove_capsules]:
+                    capsule.remove()
+                self.path_capsules = self.path_capsules[to_remove_capsules:]
         
         # Clean up old markers (optimized: batch removal)
         max_markers = self.max_history * 2
@@ -244,7 +423,7 @@ class LivePlotter:
         
         # Plot planned tube with radius visualization
         mu_np = mu_global.detach().cpu().numpy()
-        sigma_np = sigma_t.detach().cpu().numpy()
+        sigma_np_full = sigma_t.detach().cpu().numpy()  # Preserve full (T, state_dim) array
         
         # Ensure mu_np is 2D (T, state_dim)
         if mu_np.ndim > 2:
@@ -252,70 +431,52 @@ class LivePlotter:
         elif mu_np.ndim == 1:
             mu_np = mu_np.reshape(1, -1)
         
-        # Handle per-dimension sigmas: sigma_np is now (T, state_dim) instead of (T, 1)
-        # For visualization, we'll use the mean sigma across dimensions
-        if sigma_np.ndim > 1:
-            # If it's (T, state_dim), take mean across dimensions
-            if sigma_np.shape[-1] > 1:
-                sigma_np = sigma_np.mean(axis=-1)  # (T,)
+        # Ensure sigma_np_full is 2D (T, state_dim)
+        if sigma_np_full.ndim == 1:
+            # If 1D, assume it's per-dimension and replicate for all time steps
+            if len(sigma_np_full) == mu_np.shape[1]:
+                sigma_np_full = np.tile(sigma_np_full, (len(mu_np), 1))
             else:
-                sigma_np = sigma_np.squeeze(-1)  # (T,)
-        if sigma_np.ndim == 0:
-            sigma_np = np.array([sigma_np.item()])
+                # Single value, replicate for all dimensions and time steps
+                sigma_np_full = np.full((len(mu_np), mu_np.shape[1]), sigma_np_full[0] if len(sigma_np_full) > 0 else 0.1)
+        elif sigma_np_full.ndim == 0:
+            sigma_np_full = np.full((len(mu_np), mu_np.shape[1]), float(sigma_np_full.item()))
         
-        # Ensure sigma_np matches mu_np length (simple interpolation without scipy)
-        if len(sigma_np) != len(mu_np):
-            if len(sigma_np) == 1:
+        # Ensure sigma_np_full matches mu_np length
+        if len(sigma_np_full) != len(mu_np):
+            if len(sigma_np_full) == 1:
                 # Single value: replicate
-                sigma_np = np.full(len(mu_np), sigma_np[0])
-            elif len(sigma_np) < len(mu_np):
-                # Upsample: linear interpolation using numpy
-                old_indices = np.linspace(0, len(sigma_np) - 1, len(sigma_np))
-                new_indices = np.linspace(0, len(sigma_np) - 1, len(mu_np))
-                sigma_np = np.interp(new_indices, old_indices, sigma_np)
+                sigma_np_full = np.tile(sigma_np_full, (len(mu_np), 1))
+            elif len(sigma_np_full) < len(mu_np):
+                # Upsample: linear interpolation per dimension
+                old_indices = np.linspace(0, len(sigma_np_full) - 1, len(sigma_np_full))
+                new_indices = np.linspace(0, len(sigma_np_full) - 1, len(mu_np))
+                sigma_interp = np.array([
+                    np.interp(new_indices, old_indices, sigma_np_full[:, d])
+                    for d in range(sigma_np_full.shape[1])
+                ]).T
+                sigma_np_full = sigma_interp
             else:
                 # Downsample: take evenly spaced samples
-                indices = np.linspace(0, len(sigma_np) - 1, len(mu_np)).astype(int)
-                sigma_np = sigma_np[indices]
+                indices = np.linspace(0, len(sigma_np_full) - 1, len(mu_np)).astype(int)
+                sigma_np_full = sigma_np_full[indices]
         
-        # Normalize sigma values for colormap (0 = low uncertainty, 1 = high uncertainty)
-        # Use a fixed range for consistent visualization across moves
-        # Typical sigma range: 0.1 to 2.0, but we'll use dynamic normalization per tube
-        # Ensure sigma_np is 1D
-        if sigma_np.ndim > 1:
-            sigma_np = sigma_np.flatten()
-        sigma_min, sigma_max = float(sigma_np.min()), float(sigma_np.max())
-        if sigma_max > sigma_min:
-            sigma_normalized = (sigma_np - sigma_min) / (sigma_max - sigma_min)
-        else:
-            # All values are the same - use middle of colormap
-            sigma_normalized = np.full_like(sigma_np, 0.5)
+        # Compute averaged sigma for markers/endpoints (for backward compatibility)
+        sigma_np = sigma_np_full.mean(axis=-1)  # (T,) - averaged across dimensions
+        sigma_normalized = sigma_np  # Keep for marker coloring if needed
         
-        # Ensure sigma_normalized is 1D numpy array
-        sigma_normalized = np.atleast_1d(sigma_normalized).flatten()
-        
-        # Plot tube centerline with gradient coloring based on agency (sigma)
-        # OPTIMIZED: Use Line3DCollection to batch all segments of a tube into one object
-        # This dramatically reduces matplotlib overhead while maintaining sequential visibility
+        # Plot tube centerline - same color as actual path but dashed
         if len(mu_np) > 1:
             # Prepare segments for this tube as a single collection
-            # Shape: (N_segments, 2, 3) - each segment has start and end points
             segments = np.array([
                 [mu_np[i], mu_np[i+1]] 
                 for i in range(len(mu_np) - 1)
             ])
             
-            # Compute colors for each segment (average of endpoints)
-            segment_colors = []
-            for i in range(len(mu_np) - 1):
-                seg_sigma = float((sigma_normalized[i] + sigma_normalized[i + 1]) / 2.0)
-                segment_colors.append(self.agency_cmap(seg_sigma))
-            
-            # Create a single Line3DCollection for this entire tube
-            # This is 10-40x faster than plotting segments individually
+            # Use trajectory color (grey) for all segments
             tube_collection = Line3DCollection(
                 segments,
-                colors=segment_colors,
+                colors=self.COLORS['trajectory'],
                 linewidths=self.LINE_WIDTHS['tube'],
                 linestyles='--',
                 alpha=0.85,
@@ -324,35 +485,37 @@ class LivePlotter:
             
             # Add to axes and store reference
             self.ax.add_collection3d(tube_collection)
-            self.tube_lines.append(tube_collection)  # Store collection, not individual lines
+            self.tube_lines.append(tube_collection)
             
             # Add label only for first tube
             if len(self.tube_lines) == 1:
-                tube_collection.set_label('Planned Tube (σ gradient)')
+                tube_collection.set_label('Planned Tube')
+            
+            # Add anisotropic capsule around projected tube
+            capsule_surfaces = self._plot_anisotropic_capsule(
+                mu_np, sigma_np_full, self.COLORS['trajectory'], alpha=0.25
+            )
+            self.tube_capsules.extend(capsule_surfaces)
         else:
             # Single point: just plot as marker
             tube_line, = self.ax.plot(mu_np[:, 0], mu_np[:, 1], mu_np[:, 2], 
-                                      color=self.COLORS['tube_high_agency'], alpha=0.7, 
+                                      color=self.COLORS['trajectory'], alpha=0.7, 
                                       linestyle='--', linewidth=self.LINE_WIDTHS['tube'], 
                                       marker='o', markersize=6,
                                       label='Planned Tube' if len(self.tube_lines) == 0 else '')
             self.tube_lines.append(tube_line)
         
-        # Plot starting point of tube (colored by sigma at start)
+        # Plot starting point of tube (use trajectory color)
         start_point = mu_np[0]
-        start_sigma_val = float(sigma_normalized[0]) if len(sigma_normalized) > 0 else 0.5
-        start_sigma_color = self.agency_cmap(start_sigma_val)
         start_marker = self.ax.scatter(start_point[0], start_point[1], start_point[2], 
-                                      color=start_sigma_color, s=20, alpha=0.85, marker='o',
+                                      color=self.COLORS['trajectory'], s=20, alpha=0.85, marker='o',
                                       edgecolors='white', linewidths=0.5)
         self.tube_markers.append(start_marker)
         
-        # Plot end point of tube (colored by sigma at end)
+        # Plot end point of tube (use trajectory color)
         end_point = mu_np[-1]
-        end_sigma_val = float(sigma_normalized[-1]) if len(sigma_normalized) > 0 else 0.5
-        end_sigma_color = self.agency_cmap(end_sigma_val)
         end_marker = self.ax.scatter(end_point[0], end_point[1], end_point[2], 
-                                     color=end_sigma_color, s=35, alpha=0.9, marker='x', 
+                                     color=self.COLORS['trajectory'], s=35, alpha=0.9, marker='x', 
                                      linewidths=1.5, edgecolors='white')
         self.tube_markers.append(end_marker)
         
@@ -400,6 +563,27 @@ class LivePlotter:
                                          label='Actual Path' if len(self.path_lines) == 0 else '',
                                          antialiased=False)  # Disable antialiasing for better performance
                 self.path_lines.append(path_line)
+                
+                # Add anisotropic capsule around actual path (use same sigma as projected tube)
+                # Ensure path_np has same number of points as sigma_np_full for capsule
+                if len(path_np) != len(sigma_np_full):
+                    # Interpolate sigma to match path length
+                    if len(sigma_np_full) > 1:
+                        old_indices = np.linspace(0, len(sigma_np_full) - 1, len(sigma_np_full))
+                        new_indices = np.linspace(0, len(sigma_np_full) - 1, len(path_np))
+                        sigma_path = np.array([
+                            np.interp(new_indices, old_indices, sigma_np_full[:, d])
+                            for d in range(sigma_np_full.shape[1])
+                        ]).T
+                    else:
+                        sigma_path = np.tile(sigma_np_full, (len(path_np), 1))
+                else:
+                    sigma_path = sigma_np_full
+                
+                capsule_surfaces = self._plot_anisotropic_capsule(
+                    path_np, sigma_path, self.COLORS['trajectory'], alpha=0.25
+                )
+                self.path_capsules.extend(capsule_surfaces)
                 
                 # Plot path endpoints (reuse path_np array slicing)
                 start_pt = path_np[0]
@@ -454,6 +638,15 @@ class LivePlotter:
         for line in self.path_lines:
             line.remove()
         self.path_lines = []
+        
+        # Remove all capsule surfaces
+        for capsule in self.tube_capsules:
+            capsule.remove()
+        self.tube_capsules = []
+        
+        for capsule in self.path_capsules:
+            capsule.remove()
+        self.path_capsules = []
         
         # Remove all markers
         for marker in self.tube_markers:
@@ -551,6 +744,8 @@ class LivePlotter:
         self.tube_spheres = []  # Store sphere surfaces for cleanup (deprecated, but needed for _clear_episode)
         self.tube_markers = []
         self.path_markers = []
+        self.tube_capsules = []  # Store projected tube capsule surfaces
+        self.path_capsules = []  # Store actual path capsule surfaces
         self.current_pos_marker = None
         self.reached_goal_markers = []
         self.target_marker = None
@@ -616,12 +811,26 @@ class LivePlotter:
                 for line in self.tube_lines[:to_remove]:
                     line.remove()
                 self.tube_lines = self.tube_lines[to_remove:]
+                
+                # Remove corresponding capsules
+                if len(self.tube_capsules) > self.max_history * 10:
+                    to_remove_capsules = len(self.tube_capsules) - self.max_history * 10
+                    for capsule in self.tube_capsules[:to_remove_capsules]:
+                        capsule.remove()
+                    self.tube_capsules = self.tube_capsules[to_remove_capsules:]
             
             if len(self.path_lines) > self.max_history:
                 to_remove = len(self.path_lines) - self.max_history
                 for line in self.path_lines[:to_remove]:
                     line.remove()
                 self.path_lines = self.path_lines[to_remove:]
+                
+                # Remove corresponding capsules
+                if len(self.path_capsules) > self.max_history * 10:
+                    to_remove_capsules = len(self.path_capsules) - self.max_history * 10
+                    for capsule in self.path_capsules[:to_remove_capsules]:
+                        capsule.remove()
+                    self.path_capsules = self.path_capsules[to_remove_capsules:]
         
         print("Replay complete. Close window to exit.")
         plt.ioff()

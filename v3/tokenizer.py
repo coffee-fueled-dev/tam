@@ -104,27 +104,173 @@ class TknHead:
         return buffer_hash, hub_count, surprise
 
 
-class InvariantLattice:
+class MarkovLattice:
     """
-    Stateless geometric tokenizer that maps patterns to invariant token IDs.
+    Geometric tokenizer using Markov pairs (hub-to-hub transitions) for online tokenization.
     
-    Uses stable hashing to ensure any specific physical maneuver always
-    maps to the same token ID across all time and episodes.
+    Token IDs are assigned based on transitions: (previous_token, current_pattern) → token_id
+    This creates a sparse graph where hubs (frequently seen patterns) accumulate and
+    hub-to-hub relationships become meaningful for geometric reasoning.
     """
-    def __init__(self, head_names, vocab_size=65536):
+    def __init__(self, head_names, vocab_size=65536, hub_threshold=3):
         self.head_names = head_names
         self.vocab_size = vocab_size
-        # Current token per head (persistent state)
+        self.hub_threshold = hub_threshold  # Minimum hub_count to be a hub
+        
+        # Current token per head (persistent state for Markov transitions)
         self.current_lattice = torch.zeros(len(head_names), dtype=torch.long)
+        
+        # Markov transition graph: (prev_token, pattern_hash) -> token_id
+        # This IS the tokenization mechanism
+        self.markov_transitions = {}  # Dict[Tuple[int, int], int]
+        
+        # Hub graph: hub_id -> {neighbors: [hub_ids], in_degree: int, transition_count: int, hub_count: int, importance_score: float}
+        self.hub_graph = {}  # Dict[int, Dict]
+        
+        # Hub metadata: hub_id -> {pattern_hash, position_history, embeddings}
+        self.hub_metadata = {}  # Dict[int, Dict]
+        
+        # Pattern to hub mapping: pattern_hash -> hub_id (if hub_count >= threshold)
+        self.pattern_to_hub = {}  # Dict[int, int]
+        
         # Track novel patterns for surprise detection
         self.novel_patterns = set()
         
-    def update(self, head_emissions):
+        # Importance score weights (can be tuned)
+        self.importance_weights = {
+            'in_degree': 0.4,  # How many hubs transition to this one
+            'hub_count': 0.4,  # Frequency of pattern
+            'transition_freq': 0.2  # How often transitions occur
+        }
+    
+    def tokenize_with_markov(self, head_name, pattern, hub_count, surprise, previous_token=None):
         """
-        Update lattice with pattern emissions from heads.
+        Assign token ID based on Markov transition.
+        
+        Args:
+            head_name: Name of the head (e.g., "dim_0")
+            pattern: Pattern list from TknHead.process()
+            hub_count: Hub count (frequency) of current pattern
+            surprise: Surprise signal (1.0 if novel, else 0.0)
+            previous_token: Previous token ID for this head (None if first)
+            
+        Returns:
+            token_id: Assigned token ID based on Markov transition
+            is_novel: Whether this transition is novel
+        """
+        # Hash pattern to get pattern identifier
+        pattern_str = f"{head_name}:" + "-".join(map(str, pattern))
+        pattern_hash = int(hashlib.md5(pattern_str.encode()).hexdigest(), 16) % self.vocab_size
+        
+        # Determine token ID based on Markov transition
+        if previous_token is None:
+            # First token: use pattern hash directly
+            token_id = pattern_hash
+        else:
+            # Markov transition: (previous_token, pattern_hash) -> token_id
+            transition_key = (previous_token, pattern_hash)
+            
+            if transition_key in self.markov_transitions:
+                # Known transition: use existing token ID
+                token_id = self.markov_transitions[transition_key]
+            else:
+                # Novel transition: assign new token ID
+                # Use hash of transition to ensure stability
+                transition_hash = int(hashlib.md5(str(transition_key).encode()).hexdigest(), 16) % self.vocab_size
+                token_id = transition_hash
+                self.markov_transitions[transition_key] = token_id
+                self.novel_patterns.add(pattern_str)
+        
+        # Update hub graph if pattern is a hub (hub_count >= threshold)
+        if hub_count >= self.hub_threshold:
+            hub_id = token_id  # Use token_id as hub_id
+            
+            # Initialize hub if new
+            if hub_id not in self.hub_graph:
+                self.hub_graph[hub_id] = {
+                    'neighbors': [],
+                    'in_degree': 0,  # Count of hubs that transition TO this hub
+                    'transition_count': 0,  # Total transitions from this hub
+                    'hub_count': hub_count,
+                    'importance_score': 0.0  # Computed importance
+                }
+                self.hub_metadata[hub_id] = {
+                    'pattern_hash': pattern_hash,
+                    'position_history': [],
+                    'last_seen': None
+                }
+            else:
+                # Update hub_count if increased
+                self.hub_graph[hub_id]['hub_count'] = max(
+                    self.hub_graph[hub_id]['hub_count'], hub_count
+                )
+            
+            # Track transition to hub (if previous_token exists)
+            if previous_token is not None:
+                # Check if previous_token is also a hub
+                prev_hub_id = self.pattern_to_hub.get(previous_token, None)
+                if prev_hub_id is not None and prev_hub_id != hub_id:
+                    # Add transition: prev_hub -> current_hub
+                    if hub_id not in self.hub_graph[prev_hub_id]['neighbors']:
+                        self.hub_graph[prev_hub_id]['neighbors'].append(hub_id)
+                    self.hub_graph[prev_hub_id]['transition_count'] += 1
+                    
+                    # Update in-degree of current hub
+                    self.hub_graph[hub_id]['in_degree'] += 1
+            
+            # Update importance score
+            self._update_importance_score(hub_id)
+            
+            # Update pattern_to_hub mapping
+            self.pattern_to_hub[token_id] = hub_id
+        
+        return token_id, surprise > 0.0
+    
+    def _update_importance_score(self, hub_id):
+        """
+        Compute simplified importance score for a hub.
+        
+        Combines:
+        - In-degree: How many hubs transition to this one (normalized)
+        - Hub count: Frequency of pattern (normalized)
+        - Transition frequency: How often transitions occur from this hub (normalized)
+        
+        This is a simplified version of PageRank that can be computed incrementally.
+        """
+        hub = self.hub_graph[hub_id]
+        
+        # Normalize components (use max values across all hubs for normalization)
+        max_in_degree = max((h['in_degree'] for h in self.hub_graph.values()), default=1)
+        max_hub_count = max((h['hub_count'] for h in self.hub_graph.values()), default=1)
+        max_transition_count = max((h['transition_count'] for h in self.hub_graph.values()), default=1)
+        
+        # Normalized components
+        norm_in_degree = hub['in_degree'] / max_in_degree if max_in_degree > 0 else 0.0
+        norm_hub_count = hub['hub_count'] / max_hub_count if max_hub_count > 0 else 0.0
+        norm_transition_freq = hub['transition_count'] / max_transition_count if max_transition_count > 0 else 0.0
+        
+        # Weighted combination
+        importance = (
+            self.importance_weights['in_degree'] * norm_in_degree +
+            self.importance_weights['hub_count'] * norm_hub_count +
+            self.importance_weights['transition_freq'] * norm_transition_freq
+        )
+        
+        hub['importance_score'] = importance
+    
+    def get_hub_importance(self, hub_id):
+        """Get importance score for a hub (0.0 to 1.0)."""
+        return self.hub_graph.get(hub_id, {}).get('importance_score', 0.0)
+    
+    def update(self, head_emissions, hub_counts=None, surprises=None, current_pos=None):
+        """
+        Update lattice with pattern emissions using Markov tokenization.
         
         Args:
             head_emissions: dict mapping head_name -> (pattern_list, is_novel) or None
+            hub_counts: Optional dict mapping head_name -> hub_count (if None, will try to infer)
+            surprises: Optional dict mapping head_name -> surprise (if None, will use is_novel from emissions)
+            current_pos: Optional (state_dim,) current position for metadata
             
         Returns:
             current_lattice: (num_heads,) tensor of token IDs
@@ -137,22 +283,136 @@ class InvariantLattice:
             if emission_data is not None:
                 pattern, is_novel = emission_data
                 if pattern is not None:
-                    # Stable hashing: Geometry -> Invariant ID
-                    pattern_str = f"{name}:" + "-".join(map(str, pattern))
-                    hash_hex = hashlib.md5(pattern_str.encode()).hexdigest()
-                    token_id = int(hash_hex, 16) % self.vocab_size
-                    self.current_lattice[i] = token_id
+                    # Get previous token for Markov transition
+                    previous_token = self.current_lattice[i].item()
                     
-                    # Track novelty for surprise mechanism
-                    if is_novel:
-                        surprise_mask[i] = True
-                        self.novel_patterns.add(pattern_str)
+                    # Get hub_count and surprise
+                    if hub_counts is not None and name in hub_counts:
+                        hub_count = hub_counts[name]
+                    else:
+                        hub_count = 0  # Default if not provided
+                    
+                    if surprises is not None and name in surprises:
+                        surprise = surprises[name]
+                    else:
+                        surprise = 1.0 if is_novel else 0.0
+                    
+                    # Tokenize using Markov transition
+                    token_id, is_novel_transition = self.tokenize_with_markov(
+                        name, pattern, hub_count, surprise, previous_token
+                    )
+                    
+                    self.current_lattice[i] = token_id
+                    surprise_mask[i] = is_novel_transition
+                    
+                    # Update hub metadata with position if provided
+                    if current_pos is not None and token_id in self.hub_metadata:
+                        current_pos_copy = current_pos.copy() if hasattr(current_pos, 'copy') else np.array(current_pos)
+                        self.hub_metadata[token_id]['position_history'].append(current_pos_copy)
+                        self.hub_metadata[token_id]['last_seen'] = current_pos_copy
         
         return self.current_lattice.clone(), surprise_mask
     
+    def query_structural_analogies(self, query_tokens, query_embedding=None, k=5):
+        """
+        Find similar geometric patterns when encountering surprises.
+        
+        Uses hub graph to find structural analogies based on:
+        - Similar importance scores (hubs with similar centrality)
+        - Similar transition patterns (neighbors)
+        - Embedding similarity (if embeddings available)
+        
+        Returns top-k hubs sorted by combined similarity score.
+        """
+        # For each hub, compute similarity score
+        similarities = []
+        query_importance = self.get_hub_importance(query_tokens[0].item()) if query_tokens and len(query_tokens) > 0 else 0.0
+        
+        for hub_id, hub_data in self.hub_graph.items():
+            # Importance similarity (hubs with similar importance are analogous)
+            importance_sim = 1.0 - abs(hub_data['importance_score'] - query_importance)
+            
+            # Transition pattern similarity (overlap in neighbors)
+            # (Can be enhanced with embedding similarity if embeddings are stored)
+            
+            # Combined score (weighted)
+            similarity_score = importance_sim  # Can add more components
+            
+            similarities.append((hub_id, similarity_score, hub_data))
+        
+        # Sort by similarity and return top-k
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        return similarities[:k]
+    
+    def query_trajectory(self, trajectory_points, current_pos):
+        """
+        Query obstacles/patterns along a proposed trajectory.
+        
+        Uses hub metadata (position_history) to identify obstacles.
+        Returns risk signals based on:
+        - Hub density near trajectory points
+        - Hub importance (high-importance hubs are more "obstacle-like")
+        - Transition patterns (hubs that frequently cause binding failures)
+        
+        Args:
+            trajectory_points: (T, state_dim) proposed trajectory
+            current_pos: (state_dim,) current position
+            
+        Returns:
+            risk_signals: (T,) tensor indicating obstacle risk at each point.
+        """
+        if len(self.hub_metadata) == 0:
+            # No hubs yet, return zero risk
+            return torch.zeros(len(trajectory_points), dtype=torch.float32)
+        
+        risk_signals = []
+        
+        # Convert to numpy if needed
+        if isinstance(trajectory_points, torch.Tensor):
+            traj_np = trajectory_points.detach().cpu().numpy()
+        else:
+            traj_np = np.array(trajectory_points)
+        
+        if isinstance(current_pos, torch.Tensor):
+            current_pos_np = current_pos.detach().cpu().numpy() if current_pos.requires_grad else current_pos.cpu().numpy()
+        else:
+            current_pos_np = np.array(current_pos)
+        
+        # Ensure 1D
+        if current_pos_np.ndim > 1:
+            current_pos_np = current_pos_np.flatten()
+        
+        for traj_point in traj_np:
+            risk = 0.0
+            
+            # Check each hub's position history
+            for hub_id, metadata in self.hub_metadata.items():
+                if 'position_history' in metadata and len(metadata['position_history']) > 0:
+                    # Find minimum distance to any position in hub's history
+                    min_dist = float('inf')
+                    for pos in metadata['position_history']:
+                        pos_array = np.array(pos)
+                        if pos_array.ndim > 1:
+                            pos_array = pos_array.flatten()
+                        dist = np.linalg.norm(traj_point - pos_array)
+                        min_dist = min(min_dist, dist)
+                    
+                    # Risk increases if:
+                    # 1. Close to hub positions (obstacle locations)
+                    # 2. Hub has high importance (central/important obstacles)
+                    hub_importance = self.get_hub_importance(hub_id)
+                    
+                    # Inverse distance weighting with importance
+                    if min_dist < 1.0:  # Within obstacle radius
+                        risk += hub_importance / (min_dist + 0.1)
+            
+            risk_signals.append(min(risk, 10.0))  # Cap risk at 10.0
+        
+        return torch.tensor(risk_signals, dtype=torch.float32)
+    
     def reset_episode(self):
-        """Reset episode state (but keep lattice tokens - they're invariant)."""
-        pass  # Lattice tokens persist across episodes
+        """Reset episode state (but keep lattice tokens and hub graph - they persist)."""
+        pass  # Lattice tokens and hub graph persist across episodes
 
 
 class UnifiedTknProcessor:
@@ -165,16 +425,18 @@ class UnifiedTknProcessor:
     
     For transformer-based architecture: outputs dimension-tokenized sequences.
     """
-    def __init__(self, quantization_bins=11, quant_range=(-2.0, 2.0), vocab_size=65536):
+    def __init__(self, quantization_bins=11, quant_range=(-2.0, 2.0), vocab_size=65536, hub_threshold=3):
         """
         Args:
             quantization_bins: Number of quantization bins
             quant_range: Default quantization range (min, max)
             vocab_size: Token vocabulary size
+            hub_threshold: Minimum hub_count to be considered a hub (for MarkovLattice)
         """
         self.quantization_bins = quantization_bins
         self.quant_range = quant_range
         self.vocab_size = vocab_size
+        self.hub_threshold = hub_threshold
         
         # Single unified head (shared weights across dimensions)
         self.unified_head = TknHead("unified", quantization_bins, quant_range, vocab_size)
@@ -184,6 +446,7 @@ class UnifiedTknProcessor:
                                      quant_range=(-5.0, 10.0), vocab_size=vocab_size)
         
         # Lattice for tracking patterns (will be initialized after first observation)
+        # Now uses MarkovLattice for hub-based Markov tokenization
         self.lattice = None
         self.head_names = None  # Will be set after first observation
         
@@ -200,7 +463,7 @@ class UnifiedTknProcessor:
         self.state_dim = state_dim
         # Head names: one per dimension + proximity
         self.head_names = [f"dim_{i}" for i in range(state_dim)] + ["proximity"]
-        self.lattice = InvariantLattice(self.head_names, vocab_size=self.vocab_size)
+        self.lattice = MarkovLattice(self.head_names, vocab_size=self.vocab_size, hub_threshold=self.hub_threshold)
     
     def process_observation(self, current_pos, raw_obs, obstacles, max_observed_obstacles=10):
         """
@@ -298,8 +561,10 @@ class UnifiedTknProcessor:
         # Process each dimension with unified head
         dimension_tokens = []
         dimension_traits = []
-        head_emissions = {}
+        head_emissions = {}  # For MarkovLattice.update()
         quantized_values = {}
+        hub_counts_dict = {}  # For passing to lattice.update()
+        surprises_dict = {}  # For passing to lattice.update()
         
         for dim_idx in range(inferred_state_dim):
             # Quantize delta for this dimension
@@ -340,32 +605,32 @@ class UnifiedTknProcessor:
             # Get head state (traits) - use delta pattern state
             buffer_hash, hub_count, surprise = self.unified_head.get_head_state()
             
-            # For transformer: combine delta + goal_dir + obs_dir into single token
-            # Use delta token as primary, goal_dir and obs_dir influence traits
+            # Select primary pattern for tokenization (delta is primary)
+            primary_pattern = None
+            is_novel_primary = False
             if delta_pattern is not None:
-                primary_token = delta_pattern[0] if isinstance(delta_pattern, list) else delta_pattern
+                primary_pattern = delta_pattern
+                is_novel_primary = delta_novel
             elif goal_pattern is not None:
-                primary_token = goal_pattern[0] if isinstance(goal_pattern, list) else goal_pattern
+                primary_pattern = goal_pattern
+                is_novel_primary = goal_novel
             elif obs_dir_pattern is not None:
-                primary_token = obs_dir_pattern[0] if isinstance(obs_dir_pattern, list) else obs_dir_pattern
+                primary_pattern = obs_dir_pattern
+                is_novel_primary = obs_dir_novel
             else:
-                # No emission yet, use quantized value
-                primary_token = delta_q
+                # No emission yet, use quantized value as single-element pattern
+                primary_pattern = [delta_q]
+                is_novel_primary = False
             
-            # Create token ID from pattern (include obstacle and boundary direction for richer associations)
-            if buffer_hash > 0:
-                token_id = buffer_hash
-            else:
-                # Fallback: create hash from quantized values (now includes obstacle and boundary direction)
-                pattern_str = f"dim_{dim_idx}:{delta_q}:{goal_q}:{obs_dir_q}:{boundary_q}"
-                hash_hex = hashlib.md5(pattern_str.encode()).hexdigest()
-                token_id = int(hash_hex, 16) % self.vocab_size
+            # Store for lattice.update() - use head name matching lattice head_names
+            head_name = f"dim_{dim_idx}"
+            head_emissions[head_name] = (primary_pattern, is_novel_primary)
+            hub_counts_dict[head_name] = hub_count
+            surprises_dict[head_name] = surprise
             
-            dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))  # (1,) -> will be batched
             dimension_traits.append(torch.tensor([[hub_count, surprise]], dtype=torch.float32))  # (1, 2)
             
-            # Track emissions for lattice (legacy format)
-            head_name = f"dim_{dim_idx}"
+            # Track emissions for metadata (legacy format)
             if delta_pattern is not None:
                 head_emissions[f"{head_name}_delta"] = (delta_pattern, delta_novel)
             if goal_pattern is not None:
@@ -404,26 +669,40 @@ class UnifiedTknProcessor:
         proximity_pattern, proximity_novel = self.proximity_head.process(proximity_q)
         proximity_buffer_hash, proximity_hub_count, proximity_surprise = self.proximity_head.get_head_state()
         
-        if proximity_buffer_hash > 0:
-            proximity_token_id = proximity_buffer_hash
-        else:
-            # Fallback: create hash from quantized value
-            pattern_str = f"proximity:{proximity_q}"
-            hash_hex = hashlib.md5(pattern_str.encode()).hexdigest()
-            proximity_token_id = int(hash_hex, 16) % self.vocab_size
+        # Store proximity for lattice.update()
+        head_name = "proximity"
+        primary_pattern = proximity_pattern if proximity_pattern is not None else [proximity_q]
+        head_emissions[head_name] = (primary_pattern, proximity_novel)
+        hub_counts_dict[head_name] = proximity_hub_count
+        surprises_dict[head_name] = proximity_surprise
         
-        proximity_token = torch.tensor([proximity_token_id], dtype=torch.long)
         proximity_traits = torch.tensor([[proximity_hub_count, proximity_surprise]], dtype=torch.float32)
-        
-        head_emissions["proximity"] = (proximity_pattern, proximity_novel) if proximity_pattern is not None else None
         quantized_values["proximity"] = int(proximity_q)
         
-        # Update lattice (for legacy compatibility)
+        # Update lattice with Markov tokenization and position tracking
+        # This will tokenize all heads using Markov transitions
         if self.lattice:
-            lattice_tokens, surprise_mask = self.lattice.update(head_emissions)
+            lattice_tokens, surprise_mask = self.lattice.update(
+                head_emissions, 
+                hub_counts=hub_counts_dict,
+                surprises=surprises_dict,
+                current_pos=current_pos_np
+            )
         else:
             lattice_tokens = torch.zeros(len(self.head_names), dtype=torch.long)
             surprise_mask = torch.zeros(len(self.head_names), dtype=torch.bool)
+        
+        # Extract dimension tokens from lattice (excluding proximity)
+        dimension_tokens = []
+        for i, name in enumerate(self.head_names):
+            if name != "proximity":
+                token_id = lattice_tokens[i].item()
+                dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))
+        
+        # Extract proximity token
+        proximity_token_idx = self.head_names.index("proximity")
+        proximity_token_id = lattice_tokens[proximity_token_idx].item()
+        proximity_token = torch.tensor([proximity_token_id], dtype=torch.long)
         
         # Update state
         self.previous_pos = current_pos_np.copy()
@@ -514,8 +793,8 @@ class TknProcessor:
         self.previous_pos = None
         self.previous_rel_goal = None
         
-        # Initialize invariant lattice
-        self.lattice = InvariantLattice(self.head_names, vocab_size=vocab_size)
+        # Initialize Markov lattice
+        self.lattice = MarkovLattice(self.head_names, vocab_size=vocab_size, hub_threshold=3)
         
     def process_observation(self, current_pos, raw_obs, obstacles):
         """
@@ -603,19 +882,28 @@ class TknProcessor:
             head_emissions[head_name] = (goal_dir_pattern, goal_dir_novel) if goal_dir_pattern is not None else None
             quantized_values[head_name] = int(goal_dir_q)
         
-        # Update invariant lattice
-        lattice_tokens, surprise_mask = self.lattice.update(head_emissions)
-        
         # Collect lattice traits from all heads (epistemic status)
         buffer_hashes = []
-        hub_counts = []
-        surprises = []
+        hub_counts_dict = {}
+        surprises_dict = {}
         
         for head_name in self.head_names:
             buffer_hash, hub_count, surprise = self.heads[head_name].get_head_state()
             buffer_hashes.append(buffer_hash)
-            hub_counts.append(hub_count)
-            surprises.append(surprise)
+            hub_counts_dict[head_name] = float(hub_count)
+            surprises_dict[head_name] = float(surprise)
+        
+        # Update Markov lattice with hub_counts and surprises
+        lattice_tokens, surprise_mask = self.lattice.update(
+            head_emissions,
+            hub_counts=hub_counts_dict,
+            surprises=surprises_dict,
+            current_pos=current_pos_np
+        )
+        
+        # Convert hub_counts and surprises to lists for compatibility
+        hub_counts = [hub_counts_dict[name] for name in self.head_names]
+        surprises = [surprises_dict[name] for name in self.head_names]
         
         # Convert to tensors
         buffer_hashes_tensor = torch.tensor(buffer_hashes, dtype=torch.long)  # (num_heads,)
