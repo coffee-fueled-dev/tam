@@ -53,7 +53,7 @@ def generate_obstacles(
     bounds_size = max_bounds - min_bounds
     
     obstacles = []
-    max_attempts = num_obstacles * 100  # Limit attempts to avoid infinite loops
+    max_attempts = num_obstacles * 200  # Increased from 100 to 200 for better success rate
     attempts = 0
     
     # Minimum distance between obstacle centers
@@ -98,7 +98,11 @@ def generate_obstacles(
         obstacles.append((list(candidate_pos), float(candidate_radius)))
     
     if len(obstacles) < num_obstacles:
-        print(f"Warning: Only generated {len(obstacles)} obstacles out of {num_obstacles} requested")
+        print(f"Warning: Only generated {len(obstacles)} obstacles out of {num_obstacles} requested "
+              f"(attempted {attempts} times, max_attempts={max_attempts})")
+        print(f"  Constraints: packing_threshold={packing_threshold}, min_open_path_width={min_open_path_width}")
+        print(f"  Radius range: {min_radius} to {max_radius}")
+        print(f"  Consider: increasing packing_threshold, decreasing num_obstacles, or increasing bounds")
     
     return obstacles
 

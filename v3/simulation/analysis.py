@@ -92,15 +92,16 @@ def plot_training_progress(goal_stats_file: str, loss_history: Optional[List[flo
     ax3.legend()
     ax3.set_ylim(bottom=0)
     
-    # 4. Cumulative Moves vs Goal Number
+    # 4. Cumulative Goals vs Cumulative Moves (INVERTED: goals on y-axis)
     ax4 = plt.subplot(2, 3, 4)
-    cumulative = np.cumsum(moves_per_goal)
-    ax4.plot(goal_numbers, cumulative, 'o-', color='#8B5CF6', linewidth=2, markersize=6, alpha=0.8)
-    ax4.set_xlabel('Goal Number')
-    ax4.set_ylabel('Cumulative Moves')
-    ax4.set_title('Total Progress: Cumulative Moves')
+    cumulative_moves = np.cumsum(moves_per_goal)
+    ax4.plot(cumulative_moves, goal_numbers, 'o-', color='#8B5CF6', linewidth=2, markersize=6, alpha=0.8)
+    ax4.set_xlabel('Cumulative Moves')
+    ax4.set_ylabel('Cumulative Goals')
+    ax4.set_title('Total Progress: Goals Reached\n(Inverted: Goals vs Moves)')
     ax4.grid(True, alpha=0.3)
     ax4.set_ylim(bottom=0)
+    ax4.set_xlim(left=0)
     
     # 5. Agency Variability (std of agency)
     ax5 = plt.subplot(2, 3, 5)
@@ -111,35 +112,50 @@ def plot_training_progress(goal_stats_file: str, loss_history: Optional[List[flo
     ax5.grid(True, alpha=0.3)
     ax5.set_ylim(bottom=0)
     
-    # 6. Loss History (if available)
+    # 6. Loss History (averaged per goal, x-axis = goal number)
     ax6 = plt.subplot(2, 3, 6)
     if loss_history and len(loss_history) > 0:
-        # Downsample if too many points
-        if len(loss_history) > 1000:
-            indices = np.linspace(0, len(loss_history) - 1, 1000, dtype=int)
-            loss_sampled = [loss_history[i] for i in indices]
-            move_indices = np.linspace(0, len(loss_history) - 1, 1000)
-        else:
-            loss_sampled = loss_history
-            move_indices = np.arange(len(loss_history))
+        # Map loss history (per move) to goals
+        # Each goal has moves_per_goal[i] moves, so we need to average loss per goal
+        goal_losses = []
+        move_idx = 0
+        for i, moves in enumerate(moves_per_goal):
+            if move_idx + moves <= len(loss_history):
+                goal_loss = np.mean(loss_history[move_idx:move_idx + moves])
+                goal_losses.append(goal_loss)
+                move_idx += moves
+            else:
+                # Handle case where we run out of loss history
+                if move_idx < len(loss_history):
+                    goal_loss = np.mean(loss_history[move_idx:])
+                    goal_losses.append(goal_loss)
+                break
         
-        ax6.plot(move_indices, loss_sampled, '-', color='#EC4899', linewidth=1.5, alpha=0.7)
-        # Add moving average
-        if len(loss_sampled) > 50:
-            window = min(50, len(loss_sampled) // 10)
-            loss_ma = np.convolve(loss_sampled, np.ones(window)/window, mode='valid')
-            ma_indices = move_indices[window-1:]
-            ax6.plot(ma_indices, loss_ma, '--', color='#F472B6', linewidth=2, alpha=0.8, label=f'{window}-move MA')
-            ax6.legend()
-        ax6.set_xlabel('Move Number')
-        ax6.set_ylabel('Loss')
-        ax6.set_title('Training Loss Over Time\n(Lower = Better)')
-        ax6.set_yscale('log')  # Log scale for better visualization
+        if len(goal_losses) > 0:
+            # Ensure we have matching goal numbers
+            plot_goal_numbers = goal_numbers[:len(goal_losses)]
+            ax6.plot(plot_goal_numbers, goal_losses, 'o-', color='#EC4899', linewidth=2, markersize=6, alpha=0.8)
+            # Add moving average
+            if len(goal_losses) > 5:
+                window = min(5, len(goal_losses) // 3)
+                loss_ma = np.convolve(goal_losses, np.ones(window)/window, mode='valid')
+                ma_goal_numbers = plot_goal_numbers[window-1:]
+                ax6.plot(ma_goal_numbers, loss_ma, '--', color='#F472B6', linewidth=2, alpha=0.8, label=f'{window}-goal MA')
+                ax6.legend()
+            ax6.set_xlabel('Goal Number')
+            ax6.set_ylabel('Average Loss per Goal')
+            ax6.set_title('Training Loss Over Goals\n(Lower = Better)')
+            ax6.set_yscale('log')  # Log scale for better visualization
+        else:
+            ax6.text(0.5, 0.5, 'Loss history\nnot available', 
+                    ha='center', va='center', transform=ax6.transAxes,
+                    fontsize=14, color='gray')
+            ax6.set_title('Training Loss Over Goals')
     else:
         ax6.text(0.5, 0.5, 'Loss history\nnot available', 
                 ha='center', va='center', transform=ax6.transAxes,
                 fontsize=14, color='gray')
-        ax6.set_title('Training Loss Over Time')
+        ax6.set_title('Training Loss Over Goals')
     ax6.grid(True, alpha=0.3)
     
     plt.tight_layout()

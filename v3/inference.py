@@ -1,87 +1,190 @@
 import torch
 import torch.nn as nn
 
-class HybridInferenceEngine(nn.Module):
+class TransformerInferenceEngine(nn.Module):
     """
-    Dimension-agnostic Hybrid Inference Engine that processes:
-    1. Discrete tokens (what) - geometric pattern IDs
-    2. Lattice traits (epistemic status) - hub-ness, surprise, buffer state
-    3. High-fidelity intent (where) - raw rel_goal vector
+    Transformer-based inference engine that processes dimensions as sequences.
     
-    This creates a rich "Full Situation" representation that combines:
-    - Semantic meaning (token embeddings)
-    - Epistemic confidence (lattice topology)
-    - Spatial precision (direct goal vector)
+    Processes dimensions as variable-length sequences with attention, eliminating
+    the need for padding. Each dimension is treated as a "geometric motif" in
+    a sequence that the transformer attends to dynamically.
     
-    The intent dimension is configurable to support any state space dimensionality.
+    Input: Sequence of dimension-tokens (variable length based on state_dim)
+    Output: Latent situation (fixed size) + dimension sequence (for Actor attention)
     """
-    def __init__(self, num_heads, intent_dim, vocab_size=65536, token_embed_dim=16, latent_dim=128):
+    def __init__(self, vocab_size=65536, token_embed_dim=64, 
+                 latent_dim=128, n_layers=3, n_heads=8, 
+                 max_dimension_embed=32, dropout=0.1):
         """
         Args:
-            num_heads: Number of tkn heads (determined by state_dim and other features)
-            intent_dim: Dimension of intent/state space (e.g., 3 for 3D, 6 for 6D)
             vocab_size: Token vocabulary size
             token_embed_dim: Embedding dimension per token
             latent_dim: Dimension of latent situation space
+            n_layers: Number of transformer encoder layers
+            n_heads: Number of attention heads
+            max_dimension_embed: Maximum dimension index for positional embedding
+            dropout: Dropout rate for transformer layers
         """
         super().__init__()
-        self.num_heads = num_heads
-        self.intent_dim = intent_dim  # Dimension-agnostic intent
         self.vocab_size = vocab_size
         self.token_embed_dim = token_embed_dim
         self.latent_dim = latent_dim
+        self.n_layers = n_layers
+        self.n_heads = n_heads
         
-        # Token Stream: Discrete pattern IDs -> Dense embeddings
+        # Token embedding: pattern IDs -> dense vectors
         self.token_embedding = nn.Embedding(vocab_size, token_embed_dim)
         
-        # Lattice Traits Stream: Hub-ness + Surprise -> Features
-        # (num_heads, 2) -> (num_heads * 2) -> 32
-        self.trait_fc = nn.Sequential(
-            nn.Linear(num_heads * 2, 32),
-            nn.ReLU(),
-            nn.LayerNorm(32)
+        # Dimension positional embedding: which dimension is this?
+        # Allows model to distinguish delta_0 from delta_1, etc.
+        self.dim_embedding = nn.Embedding(max_dimension_embed, token_embed_dim)
+        
+        # Trait embedding: hub-ness + surprise -> features
+        self.trait_proj = nn.Linear(2, token_embed_dim)
+        
+        # Intent embedding: rel_goal components -> features (per-dimension)
+        self.intent_proj = nn.Linear(1, token_embed_dim)
+        
+        # Transformer encoder: processes sequence of dimension-tokens
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=token_embed_dim,
+            nhead=n_heads,
+            dim_feedforward=latent_dim * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        
+        # Output projection: sequence -> latent situation
+        self.output_proj = nn.Sequential(
+            nn.Linear(token_embed_dim, latent_dim),
+            nn.LayerNorm(latent_dim)
         )
         
-        # Intent Stream: High-fidelity rel_goal (intent_dim,) -> Features
-        self.intent_fc = nn.Sequential(
-            nn.Linear(intent_dim, 32),
-            nn.ReLU(),
-            nn.LayerNorm(32)
-        )
-        
-        # Combined GRU input: (Token Embeds) + Traits + Intent
-        # (num_heads * token_embed_dim) + 32 + 32
-        total_input_dim = (num_heads * token_embed_dim) + 32 + 32
-        self.gru = nn.GRUCell(total_input_dim, latent_dim)
-        self.ln = nn.LayerNorm(latent_dim)
-        
-    def forward(self, lattice_tokens, lattice_traits, rel_goal, h_prev):
+        # CLS token for aggregation (learned)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, token_embed_dim))
+    
+    def forward(self, dimension_tokens, dimension_traits, rel_goal, h_prev=None):
         """
-        Convert geometric tokens + lattice traits + intent to latent situation.
+        Process dimensions as a sequence.
         
         Args:
-            lattice_tokens: (B, num_heads) tensor of token IDs
-            lattice_traits: (B, num_heads, 2) tensor of [hub_count, surprise] per head
-            rel_goal: (B, intent_dim) tensor of high-fidelity relative goal vector
-            h_prev: (B, latent_dim) previous hidden state (situation from last step)
-        
+            dimension_tokens: List of token IDs per dimension
+                           Each element: (B,) tensor of token IDs for that dimension
+                           OR (B, num_heads_per_dim) if multiple tokens per dimension
+            dimension_traits: List of traits per dimension
+                            Each element: (B, 2) tensor of [hub_count, surprise]
+            rel_goal: (B, state_dim) relative goal vector
+            h_prev: Optional, kept for interface compatibility (not used in transformer)
+            
         Returns:
-            h_next: (B, latent_dim) new hidden state (current situation x_n)
+            situation: (B, latent_dim) latent situation
+            situation_sequence: (B, state_dim, token_embed_dim) sequence for Actor attention
         """
-        # 1. Token Stream: Embed discrete pattern IDs
-        token_embeds = self.token_embedding(lattice_tokens)  # (B, num_heads, token_embed_dim)
-        token_flat = token_embeds.view(token_embeds.size(0), -1)  # (B, num_heads * token_embed_dim)
+        B = rel_goal.shape[0]
+        state_dim = rel_goal.shape[-1]
+        device = rel_goal.device
         
-        # 2. Lattice Traits Stream: Process epistemic status
-        trait_flat = lattice_traits.view(lattice_traits.size(0), -1)  # (B, num_heads * 2)
-        trait_feat = self.trait_fc(trait_flat)  # (B, 32)
+        # Build sequence: one token per dimension
+        # Each dimension gets: [token_embed + dim_embed + trait_embed + intent_embed]
+        sequence_tokens = []
         
-        # 3. Intent Stream: Process high-fidelity goal vector
-        intent_feat = self.intent_fc(rel_goal)  # (B, 32)
+        for dim_idx in range(state_dim):
+            # Get token IDs for this dimension
+            if isinstance(dimension_tokens, list):
+                # UnifiedTknProcessor returns list of (1,) tensors
+                dim_token_tensor = dimension_tokens[dim_idx]  # (1,) from UnifiedTknProcessor
+                # Ensure it's 1D, then expand to batch size
+                if dim_token_tensor.dim() == 0:
+                    dim_token_tensor = dim_token_tensor.unsqueeze(0)  # (1,)
+                # Expand to batch size: (1,) -> (B,)
+                if dim_token_tensor.shape[0] == 1:
+                    dim_token_ids = dim_token_tensor.expand(B)  # (B,)
+                else:
+                    dim_token_ids = dim_token_tensor  # Already (B,)
+                # Add dimension for embedding: (B,) -> (B, 1)
+                dim_token_ids = dim_token_ids.unsqueeze(-1)  # (B, 1)
+            else:
+                # Fallback: if passed as tensor, assume it's per-dimension
+                dim_token_ids = dimension_tokens[:, dim_idx] if dimension_tokens.dim() > 1 else dimension_tokens
+                if dim_token_ids.dim() == 1:
+                    dim_token_ids = dim_token_ids.unsqueeze(-1)  # (B, 1)
+            
+            # Token embedding (from tkn processor)
+            # dim_token_ids should be (B, 1) now
+            token_embeds = self.token_embedding(dim_token_ids)  # (B, 1, token_embed_dim)
+            token_embed = token_embeds.squeeze(1)  # (B, token_embed_dim)
+            
+            # Dimension positional embedding
+            dim_pos = self.dim_embedding(torch.tensor(dim_idx, device=device))  # (token_embed_dim,)
+            dim_pos = dim_pos.unsqueeze(0).expand(B, -1)  # (B, token_embed_dim)
+            
+            # Trait embedding (hub-ness, surprise)
+            if isinstance(dimension_traits, list):
+                # UnifiedTknProcessor returns list of (1, 2) tensors
+                dim_trait_tensor = dimension_traits[dim_idx]  # (1, 2) from UnifiedTknProcessor
+                # Expand to batch size if needed
+                if dim_trait_tensor.shape[0] == 1 and B > 1:
+                    dim_traits = dim_trait_tensor.expand(B, -1)  # (B, 2)
+                else:
+                    dim_traits = dim_trait_tensor  # (B, 2)
+            else:
+                # Fallback: if passed as tensor, extract per-dimension
+                dim_traits = dimension_traits[:, dim_idx, :] if dimension_traits.dim() == 3 else dimension_traits
+            
+            trait_embed = self.trait_proj(dim_traits)  # (B, token_embed_dim)
+            
+            # Intent embedding (rel_goal component)
+            intent_component = rel_goal[:, dim_idx:dim_idx+1]  # (B, 1)
+            intent_embed = self.intent_proj(intent_component)  # (B, token_embed_dim)
+            
+            # Combine all embeddings for this dimension
+            dim_token = token_embed + dim_pos + trait_embed + intent_embed  # Should be (B, token_embed_dim)
+            
+            # Ensure dim_token is exactly 2D (B, token_embed_dim)
+            if dim_token.dim() == 1:
+                # Single dimension: expand to batch if needed
+                if B == 1:
+                    dim_token = dim_token.unsqueeze(0)  # (1, token_embed_dim)
+                else:
+                    dim_token = dim_token.unsqueeze(0).expand(B, -1)  # (B, token_embed_dim)
+            elif dim_token.dim() > 2:
+                # Too many dimensions: flatten
+                dim_token = dim_token.view(B, -1)
+                # If flattened to wrong size, take first token_embed_dim elements
+                if dim_token.shape[1] != self.token_embed_dim:
+                    dim_token = dim_token[:, :self.token_embed_dim]
+            
+            # Final check: ensure shape is exactly (B, token_embed_dim)
+            assert dim_token.shape == (B, self.token_embed_dim), \
+                f"dim_token shape mismatch at dim {dim_idx}: got {dim_token.shape}, expected {(B, self.token_embed_dim)}"
+            
+            sequence_tokens.append(dim_token)
         
-        # 4. Concatenate all channels (The 'Full Situation')
-        combined = torch.cat([token_flat, trait_feat, intent_feat], dim=-1)  # (B, total_input_dim)
+        # Stack into sequence: (B, state_dim, token_embed_dim)
+        # All tokens should now be exactly (B, token_embed_dim)
+        sequence = torch.stack(sequence_tokens, dim=1)  # (B, state_dim, token_embed_dim)
         
-        # 5. Update latent situation x_n
-        h_next = self.gru(combined, h_prev)
-        return self.ln(h_next)
+        # Verify sequence shape before concatenating with CLS
+        assert sequence.dim() == 3, f"Expected sequence to be 3D (B, state_dim, token_embed_dim), got {sequence.shape}"
+        assert sequence.shape == (B, state_dim, self.token_embed_dim), \
+            f"Sequence shape mismatch: got {sequence.shape}, expected {(B, state_dim, self.token_embed_dim)}"
+        
+        # Add CLS token at beginning
+        cls = self.cls_token.expand(B, -1, -1)  # (B, 1, token_embed_dim)
+        sequence_with_cls = torch.cat([cls, sequence], dim=1)  # (B, state_dim+1, token_embed_dim)
+        
+        # Transformer encoder: attend across dimensions
+        encoded = self.transformer(sequence_with_cls)  # (B, state_dim+1, token_embed_dim)
+        
+        # Extract CLS token as situation representation
+        cls_output = encoded[:, 0, :]  # (B, token_embed_dim)
+        
+        # Project to latent space
+        situation = self.output_proj(cls_output)  # (B, latent_dim)
+        
+        # Extract dimension sequence (without CLS) for Actor attention
+        situation_sequence = encoded[:, 1:, :]  # (B, state_dim, token_embed_dim)
+        
+        return situation, situation_sequence

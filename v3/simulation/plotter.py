@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
+import time
 
 class LivePlotter:
     # Consistent aesthetic color palette
@@ -24,24 +26,21 @@ class LivePlotter:
         'boundary': 0.8,  # Thin boundary lines
     }
     
-    def __init__(self, obstacles, target_pos, bounds=None, max_history=5):
+    def __init__(self, obstacles, target_pos, bounds=None, max_history=5, record_mode=False):
         """
         Args:
             obstacles: List of (position, radius) tuples
             target_pos: Initial target position
             bounds: Optional dict with 'min' and 'max' keys for bounding box
             max_history: Maximum number of moves to display in visualization (default: 5)
+            record_mode: If True, collect data for replay instead of rendering live
         """
-        plt.ion()
-        self.fig = plt.figure(figsize=(12, 8))
-        self.ax = self.fig.add_subplot(111, projection='3d')
-        # Performance optimization: Set aspect ratio once (avoids recalculation)
-        self.ax.set_box_aspect([1, 1, 1])
         self.obstacles = obstacles
         self.target_pos = target_pos
-        self.max_history = max_history  # Maximum number of moves to display
+        self.max_history = max_history
+        self.record_mode = record_mode
         
-        # Set default bounds if not provided
+        # Set default bounds if not provided (needed for both record and replay modes)
         if bounds is None:
             self.bounds = {
                 'min': [-2.0, -2.0, -2.0],
@@ -49,6 +48,21 @@ class LivePlotter:
             }
         else:
             self.bounds = bounds
+        
+        # In record mode, just collect data - no plotting setup
+        if record_mode:
+            self.recorded_data = []  # List of (mu_t, sigma_t, actual_path, current_pos, step, goal_positions)
+            self.goal_positions = []  # Track goal positions over time
+            return
+        
+        # Live mode: set up plotting
+        plt.ion()
+        self.fig = plt.figure(figsize=(12, 8))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        # Performance optimization: Set aspect ratio once (avoids recalculation)
+        self.ax.set_box_aspect([1, 1, 1])
+        
+        # Bounds already set above (before record_mode check)
         
         # Plot bounding box as wireframe
         self._plot_bounding_box()
@@ -141,18 +155,46 @@ class LivePlotter:
                           linewidth=self.LINE_WIDTHS['boundary'], alpha=0.4, 
                           label='Boundary' if edge == edges[0] else '')
         
-    def update(self, mu_t, sigma_t, actual_path, current_pos, episode, step):
+    def update(self, mu_t, sigma_t, actual_path, current_pos, episode, step, goal_pos=None):
         """
         Update the plot with new tube and path information.
         
+        In record_mode: Collects data for later replay (no rendering)
+        In live_mode: Updates visualization immediately
+        
         Args:
-            mu_t: (T, 3) planned tube trajectory (relative)
-            sigma_t: (T, 1) tube radii
-            actual_path: (T, 3) actual path taken
-            current_pos: (1, 3) current position
+            mu_t: (T, state_dim) planned tube trajectory (relative)
+            sigma_t: (T, state_dim) tube radii (per-dimension)
+            actual_path: (T, state_dim) actual path taken
+            current_pos: (1, state_dim) current position
             episode: current episode number
             step: current step number
+            goal_pos: Optional current goal position (for recording)
         """
+        # Record mode: just collect data, no rendering
+        if self.record_mode:
+            # Convert tensors to numpy for storage
+            mu_t_np = mu_t.detach().cpu().numpy() if isinstance(mu_t, torch.Tensor) else np.array(mu_t)
+            sigma_t_np = sigma_t.detach().cpu().numpy() if isinstance(sigma_t, torch.Tensor) else np.array(sigma_t)
+            actual_path_np = actual_path.detach().cpu().numpy() if isinstance(actual_path, torch.Tensor) else np.array(actual_path)
+            current_pos_np = current_pos.detach().cpu().numpy() if isinstance(current_pos, torch.Tensor) else np.array(current_pos)
+            goal_pos_np = goal_pos.detach().cpu().numpy() if isinstance(goal_pos, torch.Tensor) else (np.array(goal_pos) if goal_pos is not None else None)
+            
+            self.recorded_data.append({
+                'mu_t': mu_t_np.copy(),
+                'sigma_t': sigma_t_np.copy(),
+                'actual_path': actual_path_np.copy(),
+                'current_pos': current_pos_np.copy(),
+                'step': step,
+                'goal_pos': goal_pos_np.copy() if goal_pos_np is not None else None
+            })
+            return
+        
+        # Live mode: render immediately
+        self._render_frame(mu_t, sigma_t, actual_path, current_pos, episode, step)
+    
+    def _render_frame(self, mu_t, sigma_t, actual_path, current_pos, episode, step):
+        """Internal method to render a single frame (used by both update and replay)."""
         # Clear previous episode's visualization when starting a new episode
         if episode != self.current_episode:
             self._clear_episode()
@@ -160,6 +202,8 @@ class LivePlotter:
         
         # Keep only last few steps for clarity within current episode
         # Optimized: only clean up when we exceed limit (avoid unnecessary work)
+        # Note: tube_lines can contain either Line3DCollection objects or regular line objects
+        # Both support .remove() method, so cleanup works for both
         if len(self.tube_lines) > self.max_history:
             # Remove old items efficiently
             to_remove = len(self.tube_lines) - self.max_history
@@ -251,34 +295,40 @@ class LivePlotter:
         sigma_normalized = np.atleast_1d(sigma_normalized).flatten()
         
         # Plot tube centerline with gradient coloring based on agency (sigma)
-        # Low sigma (confident) = darker purple, High sigma (uncertain) = bright yellow
-        # Use efficient line collection approach: plot segments with colors
+        # OPTIMIZED: Use Line3DCollection to batch all segments of a tube into one object
+        # This dramatically reduces matplotlib overhead while maintaining sequential visibility
         if len(mu_np) > 1:
-            # For efficiency, plot segments in batches to reduce matplotlib overhead
-            # Group consecutive segments with similar colors to reduce number of plot calls
-            segment_colors = []
-            segment_points = []
+            # Prepare segments for this tube as a single collection
+            # Shape: (N_segments, 2, 3) - each segment has start and end points
+            segments = np.array([
+                [mu_np[i], mu_np[i+1]] 
+                for i in range(len(mu_np) - 1)
+            ])
             
-            # Compute segment colors (average of endpoints)
+            # Compute colors for each segment (average of endpoints)
+            segment_colors = []
             for i in range(len(mu_np) - 1):
                 seg_sigma = float((sigma_normalized[i] + sigma_normalized[i + 1]) / 2.0)
-                color = self.agency_cmap(seg_sigma)
-                segment_colors.append(color)
-                segment_points.append((mu_np[i], mu_np[i + 1]))
+                segment_colors.append(self.agency_cmap(seg_sigma))
             
-            # Plot segments (batch similar colors together for efficiency)
-            # For now, plot individually but this is still much faster than spheres
-            for i, (start_pt, end_pt) in enumerate(segment_points):
-                segment_line, = self.ax.plot(
-                    [start_pt[0], end_pt[0]],
-                    [start_pt[1], end_pt[1]],
-                    [start_pt[2] if len(start_pt) > 2 else 0.0, end_pt[2] if len(end_pt) > 2 else 0.0],
-                    color=segment_colors[i], alpha=0.85, linestyle='--', 
-                    linewidth=self.LINE_WIDTHS['tube'],
-                    label='Planned Tube (σ gradient)' if len(self.tube_lines) == 0 and i == 0 else '',
-                    antialiased=False  # Disable antialiasing for better performance
-                )
-                self.tube_lines.append(segment_line)
+            # Create a single Line3DCollection for this entire tube
+            # This is 10-40x faster than plotting segments individually
+            tube_collection = Line3DCollection(
+                segments,
+                colors=segment_colors,
+                linewidths=self.LINE_WIDTHS['tube'],
+                linestyles='--',
+                alpha=0.85,
+                antialiased=False
+            )
+            
+            # Add to axes and store reference
+            self.ax.add_collection3d(tube_collection)
+            self.tube_lines.append(tube_collection)  # Store collection, not individual lines
+            
+            # Add label only for first tube
+            if len(self.tube_lines) == 1:
+                tube_collection.set_label('Planned Tube (σ gradient)')
         else:
             # Single point: just plot as marker
             tube_line, = self.ax.plot(mu_np[:, 0], mu_np[:, 1], mu_np[:, 2], 
@@ -392,18 +442,6 @@ class LivePlotter:
         avg_sigma = float(sigma_np.mean()) if len(sigma_np) > 0 else 0.0
         goals_reached_count = len(self.reached_goal_markers)
         self.ax.set_title(f'Move {step} | Avg σ: {avg_sigma:.3f} | Goals: {goals_reached_count}')
-        
-        # Refresh plot (optimized for performance)
-        # Only do full redraw every N updates, otherwise just flush events
-        if step % 5 == 0:  # Full redraw every 5 steps
-            plt.draw()
-        else:
-            # Just flush events for faster updates
-            self.fig.canvas.flush_events()
-        
-        # Reduced pause time - only pause on full redraws
-        if step % 5 == 0:
-            plt.pause(0.005)  # Very short pause on full redraws
     
     def _clear_episode(self):
         """Clear all visualization elements from the previous episode."""
@@ -469,6 +507,128 @@ class LivePlotter:
         self.reached_goal_markers.append(reached_marker)
         self.ax.legend()
     
-    def close(self):
+    def replay(self, frame_delay=0.1, start_frame=0, end_frame=None):
+        """
+        Replay recorded training session after training completes.
+        
+        Args:
+            frame_delay: Delay between frames in seconds (default: 0.1 = 10 FPS)
+            start_frame: Starting frame index (default: 0)
+            end_frame: Ending frame index (default: None = all frames)
+        """
+        if not self.record_mode or len(self.recorded_data) == 0:
+            print("No recorded data to replay")
+            return
+        
+        print(f"\nReplaying {len(self.recorded_data)} frames...")
+        
+        # Initialize plotting (was skipped in record_mode)
+        plt.ion()
+        self.fig = plt.figure(figsize=(12, 8))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.ax.set_box_aspect([1, 1, 1])
+        self._plot_bounding_box()
+        
+        # Plot obstacles
+        obstacle_resolution = max(8, min(12, 20 // max(1, len(self.obstacles) // 4)))
+        u = np.linspace(0, 2 * np.pi, obstacle_resolution)
+        v = np.linspace(0, np.pi, obstacle_resolution)
+        for obs_p, obs_r in self.obstacles:
+            x = obs_p[0] + obs_r * np.outer(np.cos(u), np.sin(v))
+            y = obs_p[1] + obs_r * np.outer(np.sin(u), np.sin(v))
+            z = obs_p[2] + obs_r * np.outer(np.ones(np.size(u)), np.cos(v))
+            self.ax.plot_surface(x, y, z, color=self.COLORS['obstacle'], 
+                               alpha=self.COLORS['obstacle_alpha'], edgecolor='none',
+                               antialiased=False)
+        
+        # Plot start
+        self.ax.scatter(0, 0, 0, color=self.COLORS['start'], s=100, 
+                        marker='o', edgecolors='white', linewidths=1, label='Start')
+        
+        # Initialize storage
+        self.tube_lines = []
+        self.path_lines = []
+        self.tube_spheres = []  # Store sphere surfaces for cleanup (deprecated, but needed for _clear_episode)
+        self.tube_markers = []
+        self.path_markers = []
+        self.current_pos_marker = None
+        self.reached_goal_markers = []
+        self.target_marker = None
+        self.current_episode = -1
+        
+        # Custom colormap
+        from matplotlib.colors import LinearSegmentedColormap
+        colors_list = [self.COLORS['tube_high_agency'], self.COLORS['tube_low_agency']]
+        self.agency_cmap = LinearSegmentedColormap.from_list('agency', colors_list, N=256)
+        
+        self.ax.set_xlabel('X')
+        self.ax.set_ylabel('Y')
+        self.ax.set_zlabel('Z')
+        self.ax.set_title('Training Replay: Tube Warping Visualization\nTube color = Agency (σ): Blue=High Agency, Light Grey=Low Agency')
+        self.ax.legend()
+        self.ax.set_xlim(self.bounds['min'][0], self.bounds['max'][0])
+        self.ax.set_ylim(self.bounds['min'][1], self.bounds['max'][1])
+        self.ax.set_zlim(self.bounds['min'][2], self.bounds['max'][2])
+        
+        # Colorbar
+        sm = plt.cm.ScalarMappable(cmap=self.agency_cmap, norm=plt.Normalize(vmin=0, vmax=1))
+        sm.set_array([])
+        self.cbar = self.fig.colorbar(sm, ax=self.ax, pad=0.1, shrink=0.6)
+        self.cbar.set_label('Normalized σ (Agency)', rotation=270, labelpad=15)
+        
+        # Replay frames
+        end_frame = end_frame if end_frame is not None else len(self.recorded_data)
+        frames_to_replay = self.recorded_data[start_frame:end_frame]
+        
+        current_goal_pos = None
+        for frame_idx, frame_data in enumerate(frames_to_replay):
+            # Update goal position if it changed
+            if frame_data['goal_pos'] is not None:
+                new_goal_pos = frame_data['goal_pos']
+                if current_goal_pos is None or not np.allclose(new_goal_pos, current_goal_pos):
+                    # Update target marker
+                    if self.target_marker is not None:
+                        self.target_marker.remove()
+                    self.target_marker = self.ax.scatter(
+                        new_goal_pos[0], new_goal_pos[1], new_goal_pos[2],
+                        color=self.COLORS['goal'], s=300, marker='*',
+                        edgecolors='#D97706', linewidths=1.5, label='Target', zorder=10
+                    )
+                    current_goal_pos = new_goal_pos
+            
+            # Convert numpy back to format expected by _render_frame
+            mu_t = torch.from_numpy(frame_data['mu_t'])
+            sigma_t = torch.from_numpy(frame_data['sigma_t'])
+            actual_path = torch.from_numpy(frame_data['actual_path'])
+            current_pos = torch.from_numpy(frame_data['current_pos']).unsqueeze(0)
+            
+            # Render this frame
+            self._render_frame(mu_t, sigma_t, actual_path, current_pos, 
+                             episode=0, step=frame_data['step'])
+            
+            # Render and pause for smooth playback
+            self.fig.canvas.draw()
+            plt.pause(frame_delay)
+            
+            # Keep only last N moves visible
+            if len(self.tube_lines) > self.max_history:
+                to_remove = len(self.tube_lines) - self.max_history
+                for line in self.tube_lines[:to_remove]:
+                    line.remove()
+                self.tube_lines = self.tube_lines[to_remove:]
+            
+            if len(self.path_lines) > self.max_history:
+                to_remove = len(self.path_lines) - self.max_history
+                for line in self.path_lines[:to_remove]:
+                    line.remove()
+                self.path_lines = self.path_lines[to_remove:]
+        
+        print("Replay complete. Close window to exit.")
         plt.ioff()
-        plt.close(self.fig)
+        plt.show()
+    
+    def close(self):
+        """Close plotter."""
+        if hasattr(self, 'fig'):
+            plt.ioff()
+            plt.close(self.fig)

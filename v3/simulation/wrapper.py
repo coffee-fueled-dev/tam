@@ -59,7 +59,9 @@ class SimulationWrapper:
         
         Returns:
             raw_ctx: torch.Tensor of shape (raw_ctx_dim,)
-            raw_ctx_dim = state_dim (rel_goal) + max_obstacles * (state_dim + 1) (rel_obs_pos + obs_radius)
+            raw_ctx_dim = state_dim (rel_goal) 
+                        + max_obstacles * (state_dim + 1) (rel_obs_pos + obs_radius)
+                        + 2 * state_dim (boundary distances: dist_to_min, dist_to_max per dimension)
         """
         # Ensure current_pos is (state_dim,)
         if current_pos.dim() > 1:
@@ -135,8 +137,21 @@ class SimulationWrapper:
                 obs_parts.append(zeros_state)  # Zero relative position
                 obs_parts.append(zeros_1d)  # Zero radius (indicates no obstacle - actor learns to ignore)
         
-        # Concatenate all parts
-        raw_ctx = torch.cat(obs_parts, dim=0)  # (state_dim + max_obstacles*(state_dim+1),)
+        # Add boundary information: distance to each boundary per dimension
+        # This enables proactive boundary avoidance (same principle as obstacles)
+        # For each dimension, compute distance to min and max boundaries
+        boundary_distances = []
+        for dim in range(self.state_dim):
+            dist_to_min = current_pos_flat[dim] - self.bounds_min[dim]  # Positive = inside bounds
+            dist_to_max = self.bounds_max[dim] - current_pos_flat[dim]  # Positive = inside bounds
+            boundary_distances.append(dist_to_min)
+            boundary_distances.append(dist_to_max)
+        
+        boundary_tensor = torch.stack(boundary_distances)  # (2 * state_dim,)
+        
+        # Concatenate all parts: [rel_goal, obstacles..., boundaries]
+        raw_ctx = torch.cat([torch.cat(obs_parts, dim=0), boundary_tensor], dim=0)
+        # Shape: (state_dim + max_obstacles*(state_dim+1) + 2*state_dim,)
         
         return raw_ctx
     
