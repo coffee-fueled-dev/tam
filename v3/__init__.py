@@ -16,17 +16,15 @@ from v3.geometry import CausalSpline
 from v3.tokenizer import UnifiedTknProcessor, TknProcessor, TknHead, MarkovLattice
 
 # Simulation components
-from v3.simulation import SimulationWrapper, LivePlotter, train_actor
+from v3.simulation import SimulationWrapper, train_actor
 
 __all__ = [
     'Actor',
     'TransformerInferenceEngine',
     'CausalSpline',
     'UnifiedTknProcessor',
-    'TknProcessor',  # Legacy, deprecated
     'TknHead',
     'MarkovLattice',
     'SimulationWrapper',
-    'LivePlotter',
     'train_actor',
 ]

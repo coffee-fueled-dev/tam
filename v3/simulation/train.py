@@ -3,16 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-import matplotlib.pyplot as plt
 import random
 import json
 import os
 from datetime import datetime
 
-from v3.simulation.plotter import LivePlotter
+from v3.simulation.visualization_recorder import VisualizationRecorder
 from v3.simulation.wrapper import SimulationWrapper
 from v3.tokenizer import UnifiedTknProcessor
-from v3.simulation.analysis import plot_training_progress, generate_training_summary
 from v3.simulation.environment import generate_obstacles
 
 def train_actor(inference_engine, actor, config=None):
@@ -81,10 +79,9 @@ def train_actor(inference_engine, actor, config=None):
     vocab_size = tokenizer_config.get("vocab_size", 65536)
     
     # Extract visualization configuration
-    plot_live = visualization_config.get("plot_live", True)
     max_visualization_history = visualization_config.get("max_visualization_history", 5)
     plot_update_frequency = visualization_config.get("plot_update_frequency", 1)
-    replay_frame_delay = visualization_config.get("replay_frame_delay", 0.1)
+    compression = visualization_config.get("compression", "none")  # "none", "gzip", "delta"
     
     # Extract logging configuration
     artifacts_dir = logging_config.get("artifacts_dir", "/Users/zach/Documents/dev/cfd/tam/artifacts")
@@ -149,7 +146,6 @@ def train_actor(inference_engine, actor, config=None):
     run_dir = os.path.join(artifacts_dir, f"run_{session_timestamp}")
     os.makedirs(run_dir, exist_ok=True)
     
-    session_file = os.path.join(run_dir, f"training_session_{session_timestamp}.json")
     goal_stats_file = os.path.join(run_dir, f"goal_stats_{session_timestamp}.jsonl")
     
     # Initialize tkn processor (UnifiedTknProcessor for transformer architecture)
@@ -178,27 +174,14 @@ def train_actor(inference_engine, actor, config=None):
             raise ValueError(f"Actor latent_dim mismatch: expected {latent_dim}, "
                            f"but actor.situation_proj expects {actor.situation_proj.in_features}")
     
-    # Training data storage
-    training_data = {
-        "session_timestamp": session_timestamp,
-        "total_moves": total_moves,
-        "obstacles": obstacles,
-        "obstacle_seed": obstacle_seed,  # Save seed for reproducibility
-        "bounds": bounds,
-        "raw_ctx_dim": raw_ctx_dim,
-        "latent_dim": latent_dim,
-        "state_dim": state_dim,
-        "max_observed_obstacles": max_observed_obstacles,
-        "initial_target": target_pos.tolist(),
-        "use_tokenized": True,  # Always using tokenized system
-        "config": config  # Save full config for reproducibility
-    }
-    
-    # Initialize plotter in record mode (collects data for replay after training)
-    plotter = None
-    if plot_live:
-        plotter = LivePlotter(obstacles, target_pos.numpy(), bounds=bounds, 
-                             max_history=max_visualization_history, record_mode=True)
+    # Initialize VisualizationRecorder for data recording (generates visualization_data.jsonl and visualization_metadata.json)
+    plotter = VisualizationRecorder(
+        obstacles, target_pos.numpy(), bounds=bounds,
+        max_history=max_visualization_history,
+        artifacts_dir=run_dir,
+        config=config,
+        world_seed=obstacle_seed
+    )
     
     print(f"Training for {total_moves} moves... (Session: {session_timestamp})")
     print(f"Run directory: {run_dir}")
@@ -207,7 +190,6 @@ def train_actor(inference_engine, actor, config=None):
     print(f"State dimension: {state_dim}")
     print(f"Obstacles: {len(obstacles)} (seed={obstacle_seed}, deterministic)")
     print(f"Bounds: {bounds['min']} to {bounds['max']}")
-    print(f"Visualization will show last {max_visualization_history} moves only")
 
     # Initialize training state
     current_pos = torch.zeros((1, state_dim))
@@ -226,6 +208,7 @@ def train_actor(inference_engine, actor, config=None):
     tkn_processor.reset_episode()
     
     # Goal tracking for logging (use numpy arrays for better performance)
+    goal_number = 0  # Track total goals reached
     goal_start_pos = current_pos.clone()  # Position when current goal was set
     goal_start_move = 0  # Move number when current goal was set
     moves_to_current_goal = 0  # Moves taken toward current goal
@@ -234,10 +217,8 @@ def train_actor(inference_engine, actor, config=None):
     
     # Performance optimizations:
     # 1. Batch I/O: Buffer tkn logs and write in batches (reduces file I/O overhead)
-    # 2. Reduced plot frequency: Update visualization every N moves (reduces matplotlib overhead)
-    # 3. Disabled expensive sphere visualization (was creating many 3D surfaces)
-    # 4. Optimized tensor operations: Avoid unnecessary copies, use efficient numpy conversions
-    # 5. Optimized statistics: Use float32 arrays, compute stats efficiently
+    # 2. Optimized tensor operations: Avoid unnecessary copies, use efficient numpy conversions
+    # 3. Optimized statistics: Use float32 arrays, compute stats efficiently
     tkn_log_buffer = []  # Buffer tkn logs to write in batches
     
     # Track loss history for analysis
@@ -466,12 +447,12 @@ def train_actor(inference_engine, actor, config=None):
         # The model should learn path smoothness through binding failures if needed
         previous_velocity = None  # Keep for interface compatibility but not used
             
-        # Record data for replay (no rendering during training - zero overhead)
+        # Record data for visualization (no rendering during training - zero overhead)
         if plotter is not None and move_count % plot_update_frequency == 0:
-            # Record mode: just collects data, no rendering
             plotter.update(selected_tube, selected_sigma, actual_p, current_pos, 
                          episode=0, step=move_count, goal_pos=target_pos,
-                         energy=sim.current_energy, max_energy=sim.max_energy)
+                         energy=sim.current_energy, max_energy=sim.max_energy,
+                         loss=loss.item())
         
         # Check if goal is reached - if so, log goal statistics and generate new goal
         # Optimized: compute distance once and reuse
@@ -503,9 +484,12 @@ def train_actor(inference_engine, actor, config=None):
             else:
                 agency_mean = agency_max = agency_min = agency_std = 0.0
             
+            # Increment goal counter
+            goal_number += 1
+            
             # Log goal statistics
             goal_stats = {
-                "goal_number": len(training_data.get("goals_data", [])) + 1,
+                "goal_number": goal_number,
                 "start_position": goal_start_pos.squeeze().tolist(),
                 "goal_position": target_pos.tolist(),
                 "moves_taken": moves_to_current_goal,
@@ -530,10 +514,7 @@ def train_actor(inference_engine, actor, config=None):
                 json.dump(goal_stats, f)
                 f.write('\n')
             
-            # Store in training data
-            if "goals_data" not in training_data:
-                training_data["goals_data"] = []
-            training_data["goals_data"].append(goal_stats)
+            # Goal statistics logged to JSONL file only
             
             # Record goal reached (will be visualized during replay)
             # Note: mark_goal_reached is for live mode, we'll handle this in replay
@@ -568,8 +549,7 @@ def train_actor(inference_engine, actor, config=None):
             segment_lengths = []
             agency_values = []
             
-            # Goal position updates are recorded in plotter.update() calls
-            # No need to update visualization during training (record mode)
+            # Goal position tracking (visualization disabled)
             
             # Print goal reached summary
             print(f"Move {move_count}/{total_moves} | Goal reached! | Moves: {goal_stats['moves_taken']} | "
@@ -583,74 +563,22 @@ def train_actor(inference_engine, actor, config=None):
                 f.write('\n')
         tkn_log_buffer.clear()
     
-    # Save training data to file
-    with open(session_file, 'w') as f:
-        json.dump(training_data, f, indent=2)
     print(f"\nTraining complete. Total moves: {move_count}")
-    print(f"Session data saved to: {session_file}")
     print(f"Goal statistics saved to: {goal_stats_file}")
+    print(f"TKN patterns saved to: {tkn_log_file}")
     
-    # Save tkn statistics
-    tkn_stats_file = os.path.join(run_dir, f"tkn_stats_{session_timestamp}.json")
-    tkn_stats = {
-        "total_novel_patterns": len(tkn_processor.lattice.novel_patterns),
-        "head_names": tkn_processor.head_names,
-        "vocab_size": tkn_processor.lattice.vocab_size,
-        "novel_patterns_sample": list(tkn_processor.lattice.novel_patterns)[:20]  # Sample of novel patterns
-    }
-    with open(tkn_stats_file, 'w') as f:
-        json.dump(tkn_stats, f, indent=2)
-    print(f"TKN statistics saved to: {tkn_stats_file}")
-    print(f"Total novel patterns discovered: {tkn_stats['total_novel_patterns']}")
-    
-    # Generate training progress plots
-    progress_plot_file = os.path.join(run_dir, f"training_progress_{session_timestamp}.png")
-    summary_file = os.path.join(run_dir, f"training_summary_{session_timestamp}.json")
-    
-    try:
-        plot_training_progress(goal_stats_file, loss_history=loss_history, output_path=progress_plot_file)
-        summary = generate_training_summary(goal_stats_file, output_path=summary_file)
-        
-        # Print summary statistics
-        if summary:
-            print(f"\n{'='*60}")
-            print("TRAINING SUMMARY")
-            print(f"{'='*60}")
-            print(f"Total Goals Reached: {summary['total_goals']}")
-            print(f"Total Moves: {summary['total_moves']}")
-            print(f"\nMoves per Goal:")
-            print(f"  Overall: {summary['moves_per_goal']['overall']['mean']:.2f} ± {summary['moves_per_goal']['overall']['std']:.2f}")
-            if summary['moves_per_goal']['early_phase']['mean']:
-                print(f"  Early:   {summary['moves_per_goal']['early_phase']['mean']:.2f} ± {summary['moves_per_goal']['early_phase']['std']:.2f}")
-            if summary['moves_per_goal']['late_phase']['mean']:
-                print(f"  Late:    {summary['moves_per_goal']['late_phase']['mean']:.2f} ± {summary['moves_per_goal']['late_phase']['std']:.2f}")
-            if summary['improvement']['moves_reduction']:
-                print(f"  Improvement: {summary['improvement']['moves_reduction']:.2f} moves reduction")
-            print(f"\nAgency (σ):")
-            print(f"  Overall: {summary['agency']['overall_mean']:.3f} ± {summary['agency']['overall_std']:.3f}")
-            if summary['agency']['early_mean'] and summary['agency']['late_mean']:
-                print(f"  Early:   {summary['agency']['early_mean']:.3f}")
-                print(f"  Late:   {summary['agency']['late_mean']:.3f}")
-                if summary['improvement']['agency_change']:
-                    print(f"  Change: {summary['improvement']['agency_change']:.3f} ({'↓' if summary['improvement']['agency_change'] > 0 else '↑'} more confident)")
-            print(f"{'='*60}")
-    except Exception as e:
-        print(f"Warning: Could not generate training plots: {e}")
+    # Finalize visualization data files
+    if plotter is not None:
+        try:
+            plotter.finalize(output_dir=run_dir, compression=compression)
+        except Exception as e:
+            print(f"\n⚠️  Warning: Error finalizing visualization data: {e}")
+            import traceback
+            traceback.print_exc()
     
     print(f"\nAll run files saved to: {run_dir}")
-    print(f"  - Training session: {session_file}")
     print(f"  - Goal statistics: {goal_stats_file}")
     print(f"  - TKN patterns: {tkn_log_file}")
-    print(f"  - TKN statistics: {tkn_stats_file}")
-    if 'progress_plot_file' in locals():
-        print(f"  - Training progress plot: {progress_plot_file}")
-    if 'summary_file' in locals():
-        print(f"  - Training summary: {summary_file}")
-    
-    # Replay visualization after training completes
-    if plotter is not None and plot_live:
-        print("\n" + "="*60)
-        print("Starting visualization replay...")
-        print(f"Replay speed: {1.0/replay_frame_delay:.1f} FPS (frame_delay={replay_frame_delay}s)")
-        print("="*60)
-        plotter.replay(frame_delay=replay_frame_delay)
+    if plotter is not None and plotter.jsonl_path:
+        print(f"  - Visualization data: {plotter.jsonl_path}")
+        print(f"  - Visualization metadata: {plotter.metadata_path}")

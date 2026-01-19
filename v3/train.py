@@ -136,11 +136,8 @@ if __name__ == "__main__":
     # VISUALIZATION CONFIGURATION
     # ============================================================================
     VISUALIZATION_CONFIG = {
-        "plot_live": True,  # Whether to show live visualization
-        "max_visualization_history": 5,  # Maximum number of moves to display in visualization
-        "plot_update_frequency": 1,  # Update plot every N moves (1 = every move)
-        "replay_frame_delay": 0.01  # Delay between frames in replay (seconds). Lower = faster replay
-        # Examples: 0.05 = 20 FPS (fast), 0.1 = 10 FPS (normal), 0.2 = 5 FPS (slow), 0.01 = 100 FPS (very fast)
+        "max_visualization_history": 5,  # Maximum number of moves to display in visualization (for future use)
+        "plot_update_frequency": 1,  # Update plot every N moves (1 = every move) (for future use)
     }
     
     # ============================================================================
@@ -207,10 +204,7 @@ if __name__ == "__main__":
           f"intent={TRAINING_CONFIG['loss_weights']['intent_loss']}")
     
     print(f"\nVisualization Configuration:")
-    print(f"  - Live plotting: {VISUALIZATION_CONFIG['plot_live']}")
-    print(f"  - Max history: {VISUALIZATION_CONFIG['max_visualization_history']} moves")
-    print(f"  - Update frequency: every {VISUALIZATION_CONFIG['plot_update_frequency']} moves")
-    print(f"  - Replay speed: {1.0/VISUALIZATION_CONFIG['replay_frame_delay']:.1f} FPS (frame_delay={VISUALIZATION_CONFIG['replay_frame_delay']}s)")
+    print(f"  - Visualization files disabled (using web-based viewer)")
     
     print("=" * 80)
     
