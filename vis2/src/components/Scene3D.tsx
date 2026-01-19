@@ -39,7 +39,7 @@ export function Scene3D({
   const obstaclesRef = useRef<THREE.InstancedMesh | null>(null);
   const boundaryLinesRef = useRef<THREE.LineSegments | null>(null);
   const currentPosMarkerRef = useRef<THREE.Mesh | null>(null);
-  const currentGoalMarkerRef = useRef<THREE.Mesh | null>(null);
+  const activeGoalMarkersRef = useRef<THREE.Mesh[]>([]);
   const goalMarkersRef = useRef<THREE.Mesh[]>([]);
   const sceneCenterRef = useRef<[number, number, number]>([0, 0, 0]);
 
@@ -308,7 +308,7 @@ export function Scene3D({
       
       // IMPORTANT: Reset marker refs so they get recreated with the new scene
       currentPosMarkerRef.current = null;
-      currentGoalMarkerRef.current = null;
+      activeGoalMarkersRef.current = [];
       goalMarkersRef.current = [];
       dynamicObjectsRef.current = [];
       obstaclesRef.current = null;
@@ -622,15 +622,34 @@ export function Scene3D({
       }
     }
 
-    // Update current goal marker (always visible when goal exists)
-    const goalPos = frame?.goal_pos;
+    // Update active goal markers (render all active goals)
+    const activeGoals = frame?.active_goals || [];
     
-    if (goalPos && Array.isArray(goalPos) && goalPos.length >= 3) {
-      const x = goalPos[0] ?? 0;
-      const y = goalPos[1] ?? 0;
-      const z = goalPos.length > 2 ? (goalPos[2] ?? 0) : 0;
-      
-      if (!currentGoalMarkerRef.current) {
+    // Remove old active goal markers
+    activeGoalMarkersRef.current.forEach((marker) => {
+      scene.remove(marker);
+      if (marker.geometry) marker.geometry.dispose();
+      if (marker.material) {
+        if (Array.isArray(marker.material)) {
+          marker.material.forEach((mat) => mat.dispose());
+        } else {
+          marker.material.dispose();
+        }
+      }
+      // Remove point light if it exists
+      if ((marker as any).pointLight) {
+        scene.remove((marker as any).pointLight);
+      }
+    });
+    activeGoalMarkersRef.current = [];
+    
+    // Create markers for all active goals
+    activeGoals.forEach((goalPos) => {
+      if (goalPos && Array.isArray(goalPos) && goalPos.length >= 3) {
+        const x = goalPos[0] ?? 0;
+        const y = goalPos[1] ?? 0;
+        const z = goalPos.length > 2 ? (goalPos[2] ?? 0) : 0;
+        
         // Create a prominent orange/yellow goal orb - 1.7x size of reached goals (0.18 * 1.7 = 0.306)
         const goalGeometry = new THREE.SphereGeometry(0.3, 32, 32);
         const goalMaterial = new THREE.MeshBasicMaterial({
@@ -641,31 +660,15 @@ export function Scene3D({
         goalMarker.renderOrder = 1000; // Render on top
         goalMarker.position.set(x, y, z);
         scene.add(goalMarker);
-        currentGoalMarkerRef.current = goalMarker;
+        activeGoalMarkersRef.current.push(goalMarker);
         
         // Add a PointLight at the position for extra visibility
         const pointLight = new THREE.PointLight(COLORS.goal, 3, 20);
         pointLight.position.set(x, y, z);
         scene.add(pointLight);
         (goalMarker as any).pointLight = pointLight;
-        
-        
-      } else {
-        currentGoalMarkerRef.current.position.set(x, y, z);
-        if ((currentGoalMarkerRef.current as any).pointLight) {
-          (currentGoalMarkerRef.current as any).pointLight.position.set(x, y, z);
-        }
       }
-      currentGoalMarkerRef.current.visible = true;
-      if ((currentGoalMarkerRef.current as any).pointLight) {
-        (currentGoalMarkerRef.current as any).pointLight.visible = true;
-      }
-    } else if (currentGoalMarkerRef.current) {
-      currentGoalMarkerRef.current.visible = false;
-      if ((currentGoalMarkerRef.current as any).pointLight) {
-        (currentGoalMarkerRef.current as any).pointLight.visible = false;
-      }
-    }
+    });
 
     // Render reached goals (only those reached up to this frame)
     goalMarkersRef.current.forEach((marker) => {

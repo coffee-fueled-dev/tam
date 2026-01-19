@@ -40,15 +40,15 @@ def train_actor(inference_engine, actor, config=None):
     tokenizer_config = config.get("tokenizer", {})
     visualization_config = config.get("visualization", {})
     logging_config = config.get("logging", {})
-    system_config = config.get("system", {})
     
     # Extract environment configuration
     bounds = env_config.get("bounds", {"min": [-2.0] * state_dim, "max": [12.0] * state_dim})
     obstacles_config = env_config.get("obstacles", {})
     goal_gen_config = env_config.get("goal_generation", {})
     max_observed_obstacles = env_config.get("max_observed_obstacles", 10)
+    max_observed_goals = env_config.get("max_observed_goals", 10)
     goal_reached_threshold = env_config.get("goal_reached_threshold", 0.5)
-    initial_target = env_config.get("initial_target", [10.0] * state_dim)
+    initial_goal_count = env_config.get("initial_goal_count", 5)  # Number of goals at session start
     
     # Extract energy configuration
     energy_config = env_config.get("energy", {})
@@ -66,11 +66,7 @@ def train_actor(inference_engine, actor, config=None):
         "geometry_cost": 0.05,
     })
     surprise_factor = training_config.get("surprise_factor", 0.3)
-    intent_bias_config = training_config.get("intent_bias", {
-        "close_threshold": 1.0,
-        "close_factor": 1.0,
-        "far_factor": 0.5
-    })
+    
     
     # Extract tokenizer configuration
     quantization_bins = tokenizer_config.get("quantization_bins", 11)
@@ -126,16 +122,52 @@ def train_actor(inference_engine, actor, config=None):
             "energy_per_unit_distance": energy_per_unit_distance
         }
     )
-    # Initialize target position
-    target_pos = torch.tensor(initial_target)
+    
+    # Initialize active goals: generate N goals at session start
+    def generate_random_goal():
+        """Generate a random goal position within bounds, avoiding obstacles."""
+        margin = goal_gen_config.get("margin", 0.5)
+        min_bounds = [b + margin for b in bounds['min']]
+        max_bounds = [b - margin for b in bounds['max']]
+        
+        min_dist_from_obstacles = goal_gen_config.get("min_dist_from_obstacles", 1.0)
+        max_attempts = goal_gen_config.get("max_attempts", 50)
+        
+        for attempt in range(max_attempts):
+            goal_pos = torch.tensor([
+                random.uniform(min_bounds[i], max_bounds[i]) for i in range(state_dim)
+            ])
+            
+            # Check obstacle collision
+            valid = True
+            for obs_p, obs_r in obstacles:
+                obs_pos = torch.tensor(obs_p)
+                if torch.norm(goal_pos - obs_pos) < obs_r + min_dist_from_obstacles:
+                    valid = False
+                    break
+            
+            if valid:
+                return goal_pos
+        
+        # Fallback: return a goal at the center if all attempts fail
+        center = [(bounds['min'][i] + bounds['max'][i]) / 2 for i in range(state_dim)]
+        return torch.tensor(center)
+    
+    # Generate initial goals
+    active_goals = []
+    for _ in range(initial_goal_count):
+        goal = generate_random_goal()
+        active_goals.append(goal)
+    
+    goals_replenished = False  # Flag to track if we've started replenishing
     
     # Calculate raw context dimension: 
-    # - state_dim (rel_goal) 
-    # + max_observed_obstacles * (state_dim + 1) (rel_obs_pos + obs_radius)
-    # + 2 * state_dim (boundary distances: min and max per dimension)
-    # + 2 (energy_value, energy_normalized)
-    # This is FIXED regardless of actual obstacle count (uses padding/truncation)
-    raw_ctx_dim = state_dim + max_observed_obstacles * (state_dim + 1) + 2 * state_dim + 2
+    # - max_observed_obstacles * (state_dim + 2) (rel_obs_pos + obs_radius + color)
+    # - max_observed_goals * (state_dim + 2) (rel_goal_pos + goal_radius + color)
+    # - 2 * state_dim (boundary distances: min and max per dimension)
+    # - 2 (energy_value, energy_normalized)
+    # This is FIXED regardless of actual obstacle/goal count (uses padding/truncation)
+    raw_ctx_dim = max_observed_obstacles * (state_dim + 2) + max_observed_goals * (state_dim + 2) + 2 * state_dim + 2
     
     # Create session directory and file
     os.makedirs(artifacts_dir, exist_ok=True)
@@ -175,7 +207,7 @@ def train_actor(inference_engine, actor, config=None):
     
     # Initialize VisualizationRecorder for data recording (generates visualization_data.jsonl and visualization_metadata.json)
     plotter = VisualizationRecorder(
-        obstacles, target_pos.numpy(), bounds=bounds,
+        obstacles, active_goals=active_goals, bounds=bounds,
         max_history=max_visualization_history,
         artifacts_dir=run_dir,
         config=config,
@@ -184,10 +216,11 @@ def train_actor(inference_engine, actor, config=None):
     
     print(f"Training for {total_moves} moves... (Session: {session_timestamp})")
     print(f"Run directory: {run_dir}")
-    print(f"Raw context dimension: {raw_ctx_dim} ({state_dim} goal + {max_observed_obstacles} max obstacles * {state_dim + 1})")
+    print(f"Raw context dimension: {raw_ctx_dim} ({max_observed_obstacles} max obstacles * {state_dim + 2} + {max_observed_goals} max goals * {state_dim + 2} + {2 * state_dim} boundaries + 2 energy)")
     print(f"Latent dimension: {latent_dim}")
     print(f"State dimension: {state_dim}")
     print(f"Obstacles: {len(obstacles)} (seed={obstacle_seed}, deterministic)")
+    print(f"Initial goals: {len(active_goals)}")
     print(f"Bounds: {bounds['min']} to {bounds['max']}")
 
     # Initialize training state
@@ -199,8 +232,6 @@ def train_actor(inference_engine, actor, config=None):
     h_state = torch.zeros(1, latent_dim)  # (1, latent_dim) - initial situation
     
     # Initialize memory context for temporal learning
-    memory_window = getattr(inference_engine, 'memory_window', 10)
-    token_embed_dim = getattr(inference_engine, 'token_embed_dim', 64)
     memory_context = None  # Will be initialized on first forward pass
     
     # Reset tkn processor at start
@@ -209,7 +240,6 @@ def train_actor(inference_engine, actor, config=None):
     # Goal tracking for logging (use numpy arrays for better performance)
     goal_number = 0  # Track total goals reached
     goal_start_pos = current_pos.clone()  # Position when current goal was set
-    goal_start_move = 0  # Move number when current goal was set
     moves_to_current_goal = 0  # Moves taken toward current goal
     segment_lengths = []  # Track segment lengths for current goal (keep as list for extend)
     agency_values = []  # Track sigma (agency) values for current goal (keep as list for extend)
@@ -226,13 +256,20 @@ def train_actor(inference_engine, actor, config=None):
     # Main training loop: run for total_moves
     while move_count < total_moves:
         # 1. INFER: Convert raw world data to latent situation
-        raw_obs = sim.get_raw_observation(current_pos, target_pos, max_obstacles=max_observed_obstacles)  # (raw_ctx_dim,)
+        raw_obs = sim.get_raw_observation(
+            current_pos, 
+            active_goals=active_goals, 
+            max_obstacles=max_observed_obstacles,
+            max_observed_goals=max_observed_goals
+        )  # (raw_ctx_dim,)
         raw_obs = raw_obs.unsqueeze(0)  # (1, raw_ctx_dim) for batch dimension
         
         # Process through tkn (always enabled)
-        # Pass max_observed_obstacles so tokenizer can extract obstacle directions from raw_obs
+        # Pass max_observed_obstacles and max_observed_goals so tokenizer can extract obstacle/goal directions from raw_obs
         tkn_output = tkn_processor.process_observation(
-            current_pos, raw_obs.squeeze(0), obstacles, max_observed_obstacles=max_observed_obstacles
+            current_pos, raw_obs.squeeze(0), obstacles, 
+            max_observed_obstacles=max_observed_obstacles,
+            max_observed_goals=max_observed_goals
         )
         
         # Extract relative goal
@@ -295,7 +332,10 @@ def train_actor(inference_engine, actor, config=None):
                     f.write('\n')
             tkn_log_buffer.clear()
         
-        rel_goal = target_pos - current_pos 
+        # Extract rel_goal from tkn_output (extracted from nearest goal in observation)
+        # Actor will eventually learn to infer this from observation, but for now we use extracted rel_goal
+        rel_goal = tkn_output["rel_goal"]  # (state_dim,) - Already extracted from nearest goal in observation
+        rel_goal_batched = rel_goal.unsqueeze(0)  # (1, state_dim) - Add batch dimension for Actor
         
         # 2. ACT: Propose affordances based on latent situation x_n
         # Actor operates on latent representation, not raw spatial features
@@ -305,7 +345,7 @@ def train_actor(inference_engine, actor, config=None):
         current_pos_np = current_pos.squeeze().cpu().numpy() if isinstance(current_pos, torch.Tensor) else current_pos
         
         logits, mu_t, sigma_t, knot_mask, basis_weights = actor(
-            x_n, rel_goal, previous_velocity=previous_velocity, situation_sequence=situation_sequence,
+            x_n, rel_goal_batched, previous_velocity=previous_velocity, situation_sequence=situation_sequence,
             markov_lattice=markov_lattice, current_pos=current_pos_np
         )
         
@@ -343,7 +383,7 @@ def train_actor(inference_engine, actor, config=None):
         actual_p = sim.execute(selected_tube, selected_sigma_scalar, current_pos)
         
         # 3. PRINCIPLED TAM LOSS: Computed by Actor based on binding outcomes
-        # The Actor computes its own loss from binding failure, agency, and geometry
+        # The Actor computes its own loss from binding failure and agency
         # This is dimension-agnostic and principled based on the TAM framework
         # Binding failure naturally captures all contradictions, including energy depletion:
         # - If energy runs out, actual_path is shorter than proposed_tube
@@ -353,8 +393,8 @@ def train_actor(inference_engine, actor, config=None):
         # Get knot mask for selected port (if available)
         selected_knot_mask = knot_mask[0, idx_int] if knot_mask is not None else None
         
-        # Compute binding loss, agency cost, and geometry cost within Actor
-        binding_loss, agency_cost, geometry_cost = actor.compute_binding_loss(
+        # Compute binding loss, agency cost within Actor
+        binding_loss, agency_cost = actor.compute_binding_loss(
             selected_tube, actual_p, selected_sigma, current_pos.squeeze(), 
             knot_mask=selected_knot_mask
         )
@@ -364,13 +404,13 @@ def train_actor(inference_engine, actor, config=None):
         if surprise_mask is not None:
             surprise_multiplier = 1.0 + surprise_factor * surprise_mask.float().mean().item()  # 1.0 to 1.0+surprise_factor multiplier
             agency_cost = agency_cost / surprise_multiplier
-
         
         # Principled TAM Loss: Based on binding failure and agency
         # Energy minimization emerges naturally:
         # - Binding failures = wasted energy (binding_loss)
         # - Wide cones = low agency = wasted energy (agency_cost)
-        # - Intent loss = direct supervision to move toward goal
+        # - Goal proximity reward = positive signal for moving toward goals
+        # - Execution reward = positive signal for completing moves
         # 
         # The environment teaches everything else through binding failures:
         # - Knot count: Too many/few knots → binding failures → actor learns optimal count
@@ -381,7 +421,6 @@ def train_actor(inference_engine, actor, config=None):
         # - Fewer moves emerge from selecting ports that reach goals without binding failures
         loss = (loss_weights["binding_loss"] * binding_loss
                + loss_weights["agency_cost"] * agency_cost
-               + loss_weights["geometry_cost"] * geometry_cost  # Will be 0.0, kept for interface compatibility
                )
         
         optimizer.zero_grad()
@@ -402,20 +441,21 @@ def train_actor(inference_engine, actor, config=None):
         memory_context = new_memory_context.detach()
         h_state = h_state.detach()
         
-        # Handle energy depletion: if energy depleted, reset episode
+        # Handle energy depletion: if energy depleted, reset position and PARTIAL energy (not full)
+        # This makes energy depletion costly, not rewarding
         # Binding failure already captured the contradiction - no special "death" concept needed
+        # Goal stays in place until reached - actor must learn to reach it to survive
         if sim.is_dead or sim.current_energy <= 0:
-            print(f"Move {move_count}/{total_moves} | Energy depleted! Episode ended.")
-            # Reset energy for next episode
-            sim.reset_energy()
+            print(f"Move {move_count}/{total_moves} | Energy depleted! Resetting position and PARTIAL energy, keeping goal.")
+            # Reset energy to PARTIAL amount (not full) - makes depletion costly
+            # This prevents the agent from learning that depletion is rewarding
+            sim.current_energy = sim.initial_energy * 0.3  # Only 30% energy on reset (not 100%)
+            sim.is_dead = False
             # Reset position to origin
             current_pos = torch.zeros((1, state_dim))
-            # Generate new goal
-            new_goal = torch.tensor([
-                random.uniform(bounds['min'][i] + 0.5, bounds['max'][i] - 0.5) 
-                for i in range(state_dim)
-            ])
-            target_pos = new_goal
+            # Keep the same goal - don't generate a new one
+            # This forces the actor to learn to reach the goal to avoid repeated energy depletion
+            # Reset goal tracking counters (but keep target_pos unchanged)
             goal_start_pos = current_pos.clone()
             goal_start_move = move_count
             moves_to_current_goal = 0
@@ -437,20 +477,30 @@ def train_actor(inference_engine, actor, config=None):
         # Record data for visualization (no rendering during training - zero overhead)
         if plotter is not None and move_count % plot_update_frequency == 0:
             plotter.update(selected_tube, selected_sigma, actual_p, current_pos, 
-                         episode=0, step=move_count, goal_pos=target_pos,
+                         episode=0, step=move_count, active_goals=active_goals,
                          energy=sim.current_energy, max_energy=sim.max_energy,
                          loss=loss.item())
         
-        # Check if goal is reached - if so, log goal statistics and generate new goal
-        # Optimized: compute distance once and reuse
-        goal_distance = torch.norm(current_pos.squeeze() - target_pos).item()
-        if goal_distance < goal_reached_threshold:
+        # Check if any goal is reached - check all active goals
+        reached_goal = None
+        reached_goal_idx = None
+        for idx, goal_pos in enumerate(active_goals):
+            goal_distance = torch.norm(current_pos.squeeze() - goal_pos).item()
+            if goal_distance < goal_reached_threshold:
+                reached_goal = goal_pos
+                reached_goal_idx = idx
+                break
+        
+        if reached_goal is not None:
+            # Remove reached goal from active goals
+            active_goals.pop(reached_goal_idx)
+            
             # Replenish energy when goal is reached
             sim.replenish_energy(energy_replenish_amount)
             
             # Mark goal as reached in plotter (increments goal counter)
             if plotter is not None:
-                plotter.mark_goal_reached(target_pos)
+                plotter.mark_goal_reached(reached_goal)
             
             # Calculate statistics for this goal (optimized: compute all stats in one pass)
             if len(segment_lengths) > 0:
@@ -478,7 +528,7 @@ def train_actor(inference_engine, actor, config=None):
             goal_stats = {
                 "goal_number": goal_number,
                 "start_position": goal_start_pos.squeeze().tolist(),
-                "goal_position": target_pos.tolist(),
+                "goal_position": reached_goal.tolist(),
                 "moves_taken": moves_to_current_goal,
                 "segment_lengths": {
                     "mean": seg_mean,
@@ -501,45 +551,34 @@ def train_actor(inference_engine, actor, config=None):
                 json.dump(goal_stats, f)
                 f.write('\n')
             
-            # Goal statistics logged to JSONL file only
+            # Replenishment logic: only start replenishing after all original goals are gone
+            # Then replenish decreasing number of goals until reaching 1 new goal per completed goal
+            if len(active_goals) == 0:
+                # All original goals are gone - start replenishment
+                if not goals_replenished:
+                    goals_replenished = True
+                    print(f"Move {move_count}/{total_moves} | All original goals reached! Starting replenishment.")
+                
+                # Calculate how many goals to replenish (decreasing schedule)
+                # Start with initial_goal_count/2, then decrease by half each time until reaching 1
+                replenish_count = max(2, initial_goal_count // (2 ** goal_number))
+                
+                # Generate new goals
+                for _ in range(replenish_count):
+                    new_goal = generate_random_goal()
+                    active_goals.append(new_goal)
+                
+                print(f"Move {move_count}/{total_moves} | Replenished {replenish_count} goal(s). Active goals: {len(active_goals)}")
             
-            # Record goal reached (will be visualized during replay)
-            # Note: mark_goal_reached is for live mode, we'll handle this in replay
-            
-            # Generate a new random goal (avoiding obstacles, current position, and respecting boundaries)
-            margin = goal_gen_config.get("margin", 0.5)
-            min_bounds = [b + margin for b in bounds['min']]
-            max_bounds = [b - margin for b in bounds['max']]
-            
-            new_goal = torch.tensor([
-                random.uniform(min_bounds[i], max_bounds[i]) for i in range(state_dim)
-            ])
-            
-            # Ensure new goal is not too close to current position or obstacles
-            min_dist_from_current = goal_gen_config.get("min_dist_from_current", 3.0)
-            min_dist_from_obstacles = goal_gen_config.get("min_dist_from_obstacles", 1.0)
-            max_attempts = goal_gen_config.get("max_attempts", 50)
-            attempts = 0
-            while (torch.norm(new_goal - current_pos.squeeze()) < min_dist_from_current or
-                   any(torch.norm(new_goal - torch.tensor(obs[0])) < obs[1] + min_dist_from_obstacles 
-                       for obs in obstacles)) and attempts < max_attempts:
-                new_goal = torch.tensor([
-                    random.uniform(min_bounds[i], max_bounds[i]) for i in range(state_dim)
-                ])
-                attempts += 1
-            
-            # Reset goal tracking for new goal
-            target_pos = new_goal
+            # Reset goal tracking for next goal
             goal_start_pos = current_pos.clone()
-            goal_start_move = move_count
             moves_to_current_goal = 0
             segment_lengths = []
             agency_values = []
             
-            # Goal position tracking (visualization disabled)
-            
             # Print goal reached summary
             print(f"Move {move_count}/{total_moves} | Goal reached! | Moves: {goal_stats['moves_taken']} | "
+                  f"Active goals: {len(active_goals)} | "
                   f"Segments: {seg_mean:.3f}±{seg_std:.3f} | Agency: {agency_mean:.3f}±{agency_std:.3f}")
     
     # Flush any remaining buffered tkn logs

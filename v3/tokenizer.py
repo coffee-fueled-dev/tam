@@ -489,17 +489,21 @@ class UnifiedTknProcessor:
         self.head_names = [f"dim_{i}" for i in range(state_dim)] + ["proximity", "energy"]
         self.lattice = MarkovLattice(self.head_names, vocab_size=self.vocab_size, hub_threshold=self.hub_threshold)
     
-    def process_observation(self, current_pos, raw_obs, obstacles, max_observed_obstacles=10):
+    def process_observation(self, current_pos, raw_obs, obstacles, max_observed_obstacles=10, max_observed_goals=10):
         """
         Process observation using unified head for all dimensions.
         
         Args:
             current_pos: (state_dim,) current position tensor
             raw_obs: Raw observation tensor (raw_ctx_dim,)
-                     Structure: [rel_goal (state_dim), rel_obs_0 (state_dim), radius_0 (1), 
-                                rel_obs_1 (state_dim), radius_1 (1), ...]
+                     Structure: [rel_obs_0 (state_dim), radius_0 (1), color_0 (1), 
+                                rel_obs_1 (state_dim), radius_1 (1), color_1 (1), ...,
+                                rel_goal_0 (state_dim), radius_goal_0 (1), color_goal_0 (1), ...,
+                                boundaries (2*state_dim), energy_value (1), energy_normalized (1)]
+                     Obstacles have color = 1.0, goals have color = -1.0
             obstacles: List of (position, radius) tuples (for proximity calculation)
             max_observed_obstacles: Maximum number of obstacles in observation
+            max_observed_goals: Maximum number of goals in observation
             
         Returns:
             dict with:
@@ -507,7 +511,7 @@ class UnifiedTknProcessor:
                 - dimension_traits: List of (B, 2) traits per dimension [hub_count, surprise]
                 - proximity_token: (B,) token ID for proximity
                 - proximity_traits: (B, 2) traits for proximity
-                - rel_goal: (state_dim,) relative goal vector
+                - rel_goal: (state_dim,) relative goal vector (extracted from nearest goal)
                 - lattice_tokens: (num_heads,) legacy format (for compatibility)
                 - surprise_mask: (num_heads,) legacy format
                 - metadata: Dict with processing details
@@ -526,35 +530,31 @@ class UnifiedTknProcessor:
         inferred_state_dim = len(current_pos_np)
         self._ensure_initialized(inferred_state_dim)
         
-        # Extract relative goal
+        # Convert raw_obs to numpy
         if isinstance(raw_obs, torch.Tensor):
             raw_obs_np = raw_obs.cpu().numpy()
         else:
             raw_obs_np = np.array(raw_obs)
         
-        rel_goal_np = raw_obs_np[:inferred_state_dim]
-        if rel_goal_np.ndim == 0:
-            rel_goal_np = np.array([rel_goal_np])
-        elif rel_goal_np.ndim > 1:
-            rel_goal_np = rel_goal_np.flatten()
-        
         # Extract obstacle relative positions from raw_obs
-        # Structure: [rel_goal (state_dim), rel_obs_0 (state_dim), radius_0 (1), ...]
+        # Structure: [rel_obs_0 (state_dim), radius_0 (1), color_0 (1), ...]
         obstacle_directions = []  # List of (state_dim,) arrays
-        obs_start_idx = inferred_state_dim
-        obstacle_size = inferred_state_dim + 1  # rel_pos (state_dim) + radius (1)
+        obs_start_idx = 0
+        obstacle_size = inferred_state_dim + 2  # rel_pos (state_dim) + radius (1) + color (1)
         
         for i in range(max_observed_obstacles):
             obs_pos_start = obs_start_idx + i * obstacle_size
             obs_pos_end = obs_pos_start + inferred_state_dim
             obs_radius_idx = obs_pos_end
+            obs_color_idx = obs_pos_end + 1
             
-            if obs_radius_idx < len(raw_obs_np):
+            if obs_color_idx < len(raw_obs_np):
                 rel_obs_pos = raw_obs_np[obs_pos_start:obs_pos_end]
                 obs_radius = raw_obs_np[obs_radius_idx]
+                obs_color = raw_obs_np[obs_color_idx]
                 
-                # Only process if obstacle exists (radius > small threshold to avoid floating point issues)
-                if obs_radius > 1e-6:
+                # Only process if obstacle exists (radius > small threshold and color = 1.0 for obstacles)
+                if obs_radius > 1e-6 and abs(obs_color - 1.0) < 1e-6:
                     obstacle_directions.append(rel_obs_pos)
         
         # Find nearest obstacle direction (for per-dimension tokenization)
@@ -565,9 +565,38 @@ class UnifiedTknProcessor:
             nearest_idx = np.argmin(distances)
             nearest_obs_dir = obstacle_directions[nearest_idx]
         
+        # Extract goal relative positions from raw_obs
+        # Structure: [..., rel_goal_0 (state_dim), radius_goal_0 (1), color_goal_0 (1), ...]
+        goal_directions = []  # List of (state_dim,) arrays
+        goal_start_idx = max_observed_obstacles * obstacle_size
+        goal_size = inferred_state_dim + 2  # rel_pos (state_dim) + radius (1) + color (1)
+        
+        for i in range(max_observed_goals):
+            goal_pos_start = goal_start_idx + i * goal_size
+            goal_pos_end = goal_pos_start + inferred_state_dim
+            goal_radius_idx = goal_pos_end
+            goal_color_idx = goal_pos_end + 1
+            
+            if goal_color_idx < len(raw_obs_np):
+                rel_goal_pos = raw_obs_np[goal_pos_start:goal_pos_end]
+                goal_radius = raw_obs_np[goal_radius_idx]
+                goal_color = raw_obs_np[goal_color_idx]
+                
+                # Only process if goal exists (radius > small threshold and color = -1.0 for goals)
+                if goal_radius > 1e-6 and abs(goal_color - (-1.0)) < 1e-6:
+                    goal_directions.append(rel_goal_pos)
+        
+        # Extract nearest goal's relative position for backward compatibility (rel_goal)
+        rel_goal_np = np.zeros(inferred_state_dim)
+        if goal_directions:
+            # Find goal with minimum distance (most relevant for pursuit)
+            distances = [np.linalg.norm(goal_dir) for goal_dir in goal_directions]
+            nearest_idx = np.argmin(distances)
+            rel_goal_np = goal_directions[nearest_idx]
+        
         # Extract boundary distances from raw_obs
         # Structure: [..., boundaries: dist_to_min_0, dist_to_max_0, dist_to_min_1, dist_to_max_1, ...]
-        boundary_start_idx = inferred_state_dim + max_observed_obstacles * obstacle_size
+        boundary_start_idx = max_observed_obstacles * obstacle_size + max_observed_goals * goal_size
         boundary_distances = None
         if boundary_start_idx < len(raw_obs_np):
             boundary_end_idx = boundary_start_idx + 2 * inferred_state_dim
@@ -579,7 +608,7 @@ class UnifiedTknProcessor:
         # Extract energy values from raw_obs (last 2 elements: energy_value, energy_normalized)
         energy_value = None
         energy_normalized = None
-        energy_start_idx = inferred_state_dim + max_observed_obstacles * obstacle_size + 2 * inferred_state_dim
+        energy_start_idx = boundary_start_idx + 2 * inferred_state_dim
         if energy_start_idx < len(raw_obs_np) and len(raw_obs_np) >= energy_start_idx + 2:
             energy_value = float(raw_obs_np[energy_start_idx])
             energy_normalized = float(raw_obs_np[energy_start_idx + 1])

@@ -57,7 +57,7 @@ class SimulationWrapper:
         self.current_energy = self.initial_energy
         self.is_dead = False  # Track death state
     
-    def get_raw_observation(self, current_pos, target_pos, max_obstacles=10):
+    def get_raw_observation(self, current_pos, active_goals=None, max_obstacles=10, max_observed_goals=10):
         """
         Get RAW context observation (for InferenceEngine).
         
@@ -66,27 +66,25 @@ class SimulationWrapper:
         
         Args:
             current_pos: (1, state_dim) or (state_dim,) current position tensor
-            target_pos: (state_dim,) or (1, state_dim) target position tensor
+            active_goals: List of goal positions, each (state_dim,) tensor or array
+                         Goals appear in observation with color property (color = -1.0)
             max_obstacles: Maximum number of obstacles to include (default: 10)
                           Observation is always this size, padded with zeros if fewer obstacles
+            max_observed_goals: Maximum number of goals to include (default: 10)
+                               Goals are sorted by distance and nearest are included
         
         Returns:
             raw_ctx: torch.Tensor of shape (raw_ctx_dim,)
-            raw_ctx_dim = state_dim (rel_goal) 
-                        + max_obstacles * (state_dim + 1) (rel_obs_pos + obs_radius)
+            raw_ctx_dim = max_obstacles * (state_dim + 2) (rel_obs_pos + obs_radius + color)
+                        + max_observed_goals * (state_dim + 2) (rel_goal_pos + goal_radius + color)
                         + 2 * state_dim (boundary distances: dist_to_min, dist_to_max per dimension)
+                        + 2 (energy_value, energy_normalized)
         """
         # Ensure current_pos is (state_dim,)
         if current_pos.dim() > 1:
             current_pos_flat = current_pos.squeeze(0)
         else:
             current_pos_flat = current_pos
-        
-        # Ensure target_pos is (state_dim,)
-        if target_pos.dim() > 1:
-            target_pos_flat = target_pos.squeeze(0)
-        else:
-            target_pos_flat = target_pos
         
         # Ensure dimensions match state_dim
         if current_pos_flat.shape[0] != self.state_dim:
@@ -98,20 +96,14 @@ class SimulationWrapper:
             else:
                 current_pos_flat = current_pos_flat[:self.state_dim]
         
-        if target_pos_flat.shape[0] != self.state_dim:
-            if target_pos_flat.shape[0] < self.state_dim:
-                padding = torch.zeros(self.state_dim - target_pos_flat.shape[0],
-                                    dtype=target_pos_flat.dtype, device=target_pos_flat.device)
-                target_pos_flat = torch.cat([target_pos_flat, padding])
-            else:
-                target_pos_flat = target_pos_flat[:self.state_dim]
+        # Handle active_goals (default to empty list if None)
+        if active_goals is None:
+            active_goals = []
         
-        # Relative goal vector
-        rel_goal = target_pos_flat - current_pos_flat  # (state_dim,)
-        
-        # Get obstacle context: relative positions and radii
-        # Sort obstacles by distance to current position (nearest first)
         device = current_pos_flat.device if hasattr(current_pos_flat, 'device') else None
+        
+        # Get obstacle context: relative positions, radii, and color
+        # Sort obstacles by distance to current position (nearest first)
         obstacle_info = []
         for obs_p, obs_r in self.obstacles:
             obs_pos = torch.tensor(obs_p, dtype=torch.float32, device=device)
@@ -125,30 +117,81 @@ class SimulationWrapper:
             
             rel_obs_pos = obs_pos - current_pos_flat  # (state_dim,)
             obs_radius = torch.tensor([obs_r], dtype=torch.float32, device=device)  # (1,)
+            obs_color = torch.tensor([1.0], dtype=torch.float32, device=device)  # Obstacles: color = 1.0
             distance = torch.norm(rel_obs_pos)
-            obstacle_info.append((distance.item(), rel_obs_pos, obs_radius))
+            obstacle_info.append((distance.item(), rel_obs_pos, obs_radius, obs_color))
         
         # Sort by distance and take nearest max_obstacles
         obstacle_info.sort(key=lambda x: x[0])
         obstacle_info = obstacle_info[:max_obstacles]
         
-        # Build obstacle features: [rel_pos (state_dim), radius] for each obstacle
-        obs_parts = [rel_goal]
-        for _, rel_obs_pos, obs_radius in obstacle_info:
+        # Build obstacle features: [rel_pos (state_dim), radius (1), color (1)] for each obstacle
+        obs_parts = []
+        for _, rel_obs_pos, obs_radius, obs_color in obstacle_info:
             obs_parts.append(rel_obs_pos)  # (state_dim,)
             obs_parts.append(obs_radius)   # (1,)
+            obs_parts.append(obs_color)    # (1,) - color = 1.0 for obstacles
         
         # Pad with zeros if we have fewer than max_obstacles
         # The actor can learn to ignore zero-padded obstacles (radius=0 means no obstacle)
         # This decouples observation from exact obstacle count - add/remove obstacles freely!
         num_obstacles_present = len(obstacle_info)
         if num_obstacles_present < max_obstacles:
-            # Pad with zero vectors: [0, ..., 0, 0] for each missing obstacle
+            # Pad with zero vectors: [0, ..., 0, 0, 0] for each missing obstacle
             zeros_state = torch.zeros(self.state_dim, dtype=torch.float32, device=device)
             zeros_1d = torch.zeros(1, dtype=torch.float32, device=device)
             for _ in range(max_obstacles - num_obstacles_present):
                 obs_parts.append(zeros_state)  # Zero relative position
-                obs_parts.append(zeros_1d)  # Zero radius (indicates no obstacle - actor learns to ignore)
+                obs_parts.append(zeros_1d)     # Zero radius (indicates no obstacle)
+                obs_parts.append(zeros_1d)     # Zero color (indicates no obstacle)
+        
+        # Get goal context: relative positions, radii, and color
+        # Sort goals by distance to current position (nearest first)
+        goal_info = []
+        for goal_pos in active_goals:
+            # Convert goal_pos to tensor if needed
+            if isinstance(goal_pos, torch.Tensor):
+                goal_pos_tensor = goal_pos
+            else:
+                goal_pos_tensor = torch.tensor(goal_pos, dtype=torch.float32, device=device)
+            
+            # Ensure goal position matches state_dim
+            if goal_pos_tensor.dim() > 1:
+                goal_pos_tensor = goal_pos_tensor.squeeze(0)
+            if goal_pos_tensor.shape[0] != self.state_dim:
+                if goal_pos_tensor.shape[0] < self.state_dim:
+                    padding = torch.zeros(self.state_dim - goal_pos_tensor.shape[0], 
+                                        dtype=goal_pos_tensor.dtype, device=device)
+                    goal_pos_tensor = torch.cat([goal_pos_tensor, padding])
+                else:
+                    goal_pos_tensor = goal_pos_tensor[:self.state_dim]
+            
+            rel_goal_pos = goal_pos_tensor - current_pos_flat  # (state_dim,)
+            goal_radius = torch.tensor([0.5], dtype=torch.float32, device=device)  # Default goal radius
+            goal_color = torch.tensor([-1.0], dtype=torch.float32, device=device)  # Goals: color = -1.0
+            distance = torch.norm(rel_goal_pos)
+            goal_info.append((distance.item(), rel_goal_pos, goal_radius, goal_color))
+        
+        # Sort by distance and take nearest max_observed_goals
+        goal_info.sort(key=lambda x: x[0])
+        goal_info = goal_info[:max_observed_goals]
+        
+        # Build goal features: [rel_pos (state_dim), radius (1), color (1)] for each goal
+        goal_parts = []
+        for _, rel_goal_pos, goal_radius, goal_color in goal_info:
+            goal_parts.append(rel_goal_pos)  # (state_dim,)
+            goal_parts.append(goal_radius)  # (1,)
+            goal_parts.append(goal_color)    # (1,) - color = -1.0 for goals
+        
+        # Pad with zeros if we have fewer than max_observed_goals
+        num_goals_present = len(goal_info)
+        if num_goals_present < max_observed_goals:
+            zeros_state = torch.zeros(self.state_dim, dtype=torch.float32, device=device)
+            zeros_1d = torch.zeros(1, dtype=torch.float32, device=device)
+            for _ in range(max_observed_goals - num_goals_present):
+                goal_parts.append(zeros_state)  # Zero relative position
+                goal_parts.append(zeros_1d)      # Zero radius (indicates no goal)
+                goal_parts.append(zeros_1d)     # Zero color (indicates no goal)
         
         # Add boundary information: distance to each boundary per dimension
         # This enables proactive boundary avoidance (same principle as obstacles)
@@ -166,9 +209,15 @@ class SimulationWrapper:
         energy_value = torch.tensor([self.current_energy], dtype=torch.float32, device=device)
         energy_normalized = torch.tensor([self.current_energy / self.max_energy], dtype=torch.float32, device=device)
         
-        # Concatenate all parts: [rel_goal, obstacles..., boundaries, energy_value, energy_normalized]
-        raw_ctx = torch.cat([torch.cat(obs_parts, dim=0), boundary_tensor, energy_value, energy_normalized], dim=0)
-        # Shape: (state_dim + max_obstacles*(state_dim+1) + 2*state_dim + 2,)
+        # Concatenate all parts: [obstacles..., goals..., boundaries, energy_value, energy_normalized]
+        raw_ctx = torch.cat([
+            torch.cat(obs_parts, dim=0) if obs_parts else torch.tensor([], dtype=torch.float32, device=device),
+            torch.cat(goal_parts, dim=0) if goal_parts else torch.tensor([], dtype=torch.float32, device=device),
+            boundary_tensor, 
+            energy_value, 
+            energy_normalized
+        ], dim=0)
+        # Shape: (max_obstacles*(state_dim+2) + max_observed_goals*(state_dim+2) + 2*state_dim + 2,)
         
         return raw_ctx
     

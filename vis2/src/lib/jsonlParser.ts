@@ -59,25 +59,41 @@ export function parseJSONL(
 
 /**
  * Build a map of reached goals per frame (cumulative).
+ * Tracks goals that have been reached (removed from active_goals).
  */
 export function buildReachedGoalsByFrame(frames: Frame[]): Record<number, number[][]> {
   const reachedGoalsByFrame: Record<number, number[][]> = {};
   const cumulativeReachedGoals: number[][] = [];
+  const seenGoals = new Set<string>(); // Track goals we've seen
 
-  frames.forEach((frame, idx) => {
-    if (frame.goal_reached && frame.goal_pos) {
-      // Check if this goal is new (not already in cumulative list)
-      const goalKey = frame.goal_pos.join(",");
-      const isNewGoal = !cumulativeReachedGoals.some(
-        (g) => g.join(",") === goalKey
-      );
-      if (isNewGoal) {
-        cumulativeReachedGoals.push([...frame.goal_pos]);
+    frames.forEach((frame, idx) => {
+      // Track goals that were active in previous frame but are no longer active
+      // This indicates they were reached
+      if (idx > 0) {
+        const prevFrame = frames[idx - 1];
+        if (prevFrame) {
+          const prevActiveGoals = prevFrame.active_goals || [];
+          const currActiveGoals = frame.active_goals || [];
+          
+          // Find goals that were in previous frame but not in current frame
+          prevActiveGoals.forEach((prevGoal) => {
+            const goalKey = prevGoal.join(",");
+            const stillActive = currActiveGoals.some(
+              (currGoal) => currGoal.join(",") === goalKey
+            );
+            
+            if (!stillActive && !seenGoals.has(goalKey)) {
+              // Goal was reached (removed from active list)
+              seenGoals.add(goalKey);
+              cumulativeReachedGoals.push([...prevGoal]);
+            }
+          });
+        }
       }
-    }
-    // Store cumulative reached goals for this frame
-    reachedGoalsByFrame[idx] = [...cumulativeReachedGoals];
-  });
+      
+      // Store cumulative reached goals for this frame
+      reachedGoalsByFrame[idx] = [...cumulativeReachedGoals];
+    });
 
   return reachedGoalsByFrame;
 }

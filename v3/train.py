@@ -16,7 +16,7 @@ if __name__ == "__main__":
     STATE_DIM = 3  # Dimension of state space (change this to switch between 3D, 6D, etc.)
     LATENT_DIM = 128  # Dimension of latent situation space
     VOCAB_SIZE = 65536  # Token vocabulary size
-    TOKEN_EMBED_DIM = 64  # Embedding dimension per token (transformer uses larger embeddings)
+    TOKEN_EMBED_DIM = 64  # Embedding dimension per token
     
     # Transformer Inference Engine Configuration
     TRANSFORMER_CONFIG = {
@@ -53,7 +53,7 @@ if __name__ == "__main__":
         
         # Obstacle generation parameters
         "obstacles": {
-            "num_obstacles": 60,  # More obstacles = harder
+            "num_obstacles": 40,  # More obstacles = harder
             "min_radius": .5,
             "max_radius": 2,
             "packing_threshold": 0.1,  # 10% gap between obstacles (ensures spacing)
@@ -77,6 +77,10 @@ if __name__ == "__main__":
         # Goal reaching threshold
         "goal_reached_threshold": 0.5,  # Consider goal "reached" if within this distance
         
+        # Multi-goal environment configuration
+        "initial_goal_count": 20,  # Number of goals at session start
+        "max_observed_goals": 15,  # Maximum goals in observation (can add/remove goals freely!)
+        
         # Observation configuration
         "max_observed_obstacles": 10,  # Maximum obstacles in observation (can add/remove obstacles freely!)
         
@@ -85,7 +89,7 @@ if __name__ == "__main__":
             "max_energy": 100.0,  # Maximum energy capacity
             "initial_energy": 100.0,  # Starting energy (default: max_energy)
             "energy_per_unit_distance": 2.5,  # Energy cost per unit distance traveled (increased for faster depletion)
-            "energy_replenish_amount": 20.0  # Energy restored when goal reached
+            "energy_replenish_amount": 50.0  # Energy restored when goal reached
         }
     }
     
@@ -93,28 +97,17 @@ if __name__ == "__main__":
     # TRAINING CONFIGURATION
     # ============================================================================
     TRAINING_CONFIG = {
-        "total_moves": 500,  # Total number of moves
+        "total_moves": 1500,  # Total number of moves
         "learning_rate": 1e-3,
         
         # Loss weights (principled TAM loss components)
         "loss_weights": {
-            "binding_loss": 1.0,  # Contradiction: binding failure = wasted energy
-            "agency_cost": 0.1,  # Agency: narrow cones = high agency = efficient
-            "geometry_cost": 0.05,  # Geometry: fewer knots + smoother paths = simpler
-            "intent_loss": 0.0  # Intent: goal-directed supervision (set to 0.0 to test pure energy mechanics)
-                                 # With energy mechanics, agent should learn: energy depletion → episode reset → negative signal
-                                 # Goal reached → energy replenished → positive signal
+            "binding_loss": 1.0,  # Contradiction: produce cones which are not contradicted by the environment
+            "agency_cost": 0.1,  # Agency: produce the tightest cones possible subject to binding failure
         },
         
         # Surprise modulation (for novel patterns)
         "surprise_factor": 0.3,  # Multiplier for agency cost when novel patterns detected (1.0 to 1.3)
-        
-        # Intent bias (adaptive goal-reaching)
-        "intent_bias": {
-            "close_threshold": 1.0,  # Distance threshold for "close" to goal
-            "close_factor": 1.0,  # Push factor when close (100% toward goal)
-            "far_factor": 0.5  # Push factor when far (50% toward goal)
-        }
     }
     
     # ============================================================================
@@ -157,13 +150,6 @@ if __name__ == "__main__":
     }
     
     # ============================================================================
-    # SYSTEM CONFIGURATION
-    # ============================================================================
-    SYSTEM_CONFIG = {
-        # Always uses TransformerInferenceEngine (HybridInferenceEngine removed)
-    }
-    
-    # ============================================================================
     # INITIALIZE MODELS
     # ============================================================================
     print("=" * 80)
@@ -178,16 +164,13 @@ if __name__ == "__main__":
     print(f"  - Token embeddings: {TRANSFORMER_CONFIG['token_embed_dim']} dim")
     print(f"  - Transformer layers: {TRANSFORMER_CONFIG['n_layers']}")
     print(f"  - Attention heads: {TRANSFORMER_CONFIG['n_heads']}")
-    print(f"  - Native sequence processing: no padding needed")
     
-    # Initialize Actor with cross-attention (for transformer architecture)
     actor = Actor(**ACTOR_CONFIG)
     print(f"\nActor Configuration:")
     print(f"  - Latent dimension: {ACTOR_CONFIG['latent_dim']}")
     print(f"  - Ports: {ACTOR_CONFIG['n_ports']}")
     print(f"  - Knots per tube: {ACTOR_CONFIG['n_knots']}")
     print(f"  - Basis functions: {ACTOR_CONFIG['n_basis']}")
-    print(f"  - Cross-attention: Enabled (transformer architecture)")
     
     print(f"\nEnvironment Configuration:")
     print(f"  - State dimension: {STATE_DIM}")
@@ -203,12 +186,7 @@ if __name__ == "__main__":
     print(f"  - Total moves: {TRAINING_CONFIG['total_moves']}")
     print(f"  - Learning rate: {TRAINING_CONFIG['learning_rate']}")
     print(f"  - Loss weights: binding={TRAINING_CONFIG['loss_weights']['binding_loss']}, "
-          f"agency={TRAINING_CONFIG['loss_weights']['agency_cost']}, "
-          f"geometry={TRAINING_CONFIG['loss_weights']['geometry_cost']}, "
-          f"intent={TRAINING_CONFIG['loss_weights']['intent_loss']}")
-    
-    print(f"\nVisualization Configuration:")
-    print(f"  - Visualization files disabled (using web-based viewer)")
+          f"agency={TRAINING_CONFIG['loss_weights']['agency_cost']}")
     
     print("=" * 80)
     
@@ -226,7 +204,6 @@ if __name__ == "__main__":
             "tokenizer": TOKENIZER_CONFIG,
             "visualization": VISUALIZATION_CONFIG,
             "logging": LOGGING_CONFIG,
-            "system": SYSTEM_CONFIG,
             "hub_graph": HUB_GRAPH_CONFIG
         }
     )

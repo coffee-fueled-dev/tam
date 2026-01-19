@@ -211,24 +211,16 @@ class Actor(nn.Module):
         # Ensure knots are exactly (B, M, n_knots, state_dim)
         assert knots.shape[-1] == state_dim, f"knots last dim should be {state_dim}, got {knots.shape[-1]}"
         
-        # LEARNABLE INTENT BIAS: Model learns how much to bias knots toward goal
-        # This is learnable (not fixed) - model discovers optimal bias through training
-        # Compute intent distance for bias factor
+        # INTENT BIAS: Bias the last knot toward the goal
+        # This provides a useful inductive bias for goal-directed behavior
+        # The learnable intent_bias_head adapts the bias strength based on goal distance
         intent_distance = torch.norm(intent, dim=-1, keepdim=True)  # (B, 1)
+        intent_bias_factor = self.intent_bias_head(intent_distance)  # (B, 1) - learnable factor in [0, 1]
+        intent_bias = intent.view(B, 1, state_dim)  # (B, 1, state_dim) - goal direction
         
-        # Learnable bias factor: model learns optimal bias based on distance
-        # Close to goal → might bias more/less (model decides)
-        # Far from goal → might bias more/less (model decides)
-        intent_bias_factor = self.intent_bias_head(intent_distance)  # (B, 1)
-        
-        # Apply learnable bias to last knot: push toward intent
-        # Model learns the optimal bias strength through intent_loss + binding failures
-        intent_sliced = intent[:, :state_dim] if intent.shape[-1] > state_dim else intent  # (B, state_dim)
-        intent_bias = intent_sliced.view(B, 1, state_dim)  # (B, 1, state_dim)
-        
-        # Apply learnable bias: knots_last = knots_last + intent_bias * learned_factor
-        # The learned factor can be 0 (no bias) to 1 (full bias), or anywhere in between
-        knots_last = knots[:, :, -1:, :] + intent_bias.unsqueeze(2) * intent_bias_factor.unsqueeze(-1)  # (B, M, 1, state_dim)
+        # Apply bias to last knot: push it toward goal direction
+        # The bias strength is learned by intent_bias_head based on goal distance
+        knots_last = knots[:, :, -1:, :] + intent_bias.unsqueeze(2) * intent_bias_factor.unsqueeze(-1)
         knots = torch.cat([knots[:, :, :-1, :], knots_last], dim=2)
         
         # Note: No causal anchoring - environment teaches through binding failures
@@ -389,8 +381,8 @@ class Actor(nn.Module):
         # - No special cases needed - binding failure is the universal mechanism
         binding_loss = torch.mean(weighted_deviation.sum(dim=-1))
         
-        # If actual path is shorter than planned, add penalty for unexecuted portion
-        # This handles energy depletion and other early termination naturally
+        # If actual path is shorter than planned, add REDUCED penalty for unexecuted portion
+        # Scale down the penalty to avoid discouraging movement - only penalize if tube was clearly too ambitious
         if len(actual_path) < len(proposed_tube):
             # Calculate deviation for unexecuted portion
             # Use the last actual position vs. remaining planned positions
@@ -401,7 +393,6 @@ class Actor(nn.Module):
             expected_remaining_global = remaining_planned + current_pos  # (T_remaining, state_dim)
             
             # Deviation for unexecuted portion: distance from last actual to each expected
-            # This creates a penalty proportional to how much wasn't executed
             unexecuted_deviations = torch.norm(
                 expected_remaining_global - last_actual_global.unsqueeze(0), 
                 dim=-1
@@ -411,21 +402,17 @@ class Actor(nn.Module):
             sigma_remaining = sigma_t[len(actual_path):].mean(dim=-1)  # (T_remaining,)
             weighted_unexecuted = (unexecuted_deviations**2) / (sigma_remaining + 1e-6)  # (T_remaining,)
             
-            # Add unexecuted penalty to binding loss
-            unexecuted_penalty = torch.mean(weighted_unexecuted)
+            # REDUCED penalty: Scale down by execution ratio to avoid harsh penalties
+            # If agent executed 50% of tube, only penalize 50% of unexecuted portion
+            execution_ratio = len(actual_path) / len(proposed_tube)  # [0, 1]
+            unexecuted_penalty = torch.mean(weighted_unexecuted) * (1.0 - execution_ratio) * 0.3  # Scale down by 0.3x
             binding_loss = binding_loss + unexecuted_penalty
         
         # Agency cost: cone width (sigma) - narrower cones = higher agency
         # This is dimension-agnostic: works for any state_dim
         agency_cost = torch.mean(sigma_t**2)  # Mean across all dimensions and time
         
-        # Geometry cost removed - environment teaches knot count through binding failures
-        # - Too many knots → more opportunities for binding failures → actor learns to use fewer
-        # - Too few knots → can't navigate complex paths → actor learns to use more
-        # - Optimal knot count emerges naturally from binding feedback
-        geometry_cost = torch.tensor(0.0, device=device)
-        
-        return binding_loss, agency_cost, geometry_cost
+        return binding_loss, agency_cost
     
     def select_port(self, logits, mu_t, intent_target):
         """

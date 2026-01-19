@@ -17,12 +17,12 @@ class VisualizationRecorder:
     Provides the same interface as WebPlotter/LivePlotter for drop-in replacement.
     """
     
-    def __init__(self, obstacles, target_pos, bounds=None, max_history=5, 
+    def __init__(self, obstacles, active_goals=None, bounds=None, max_history=5, 
                  artifacts_dir=None, config=None, world_seed=None):
         """
         Args:
             obstacles: List of (position, radius) tuples
-            target_pos: Initial target position
+            active_goals: List of goal positions (each is a tensor or array)
             bounds: Optional dict with 'min' and 'max' keys for bounding box
             max_history: Maximum number of moves to display (for compatibility, not used)
             artifacts_dir: Directory to save output files
@@ -30,7 +30,7 @@ class VisualizationRecorder:
             world_seed: Random seed used for obstacle generation
         """
         self.obstacles = obstacles
-        self.target_pos = target_pos
+        self.active_goals = active_goals if active_goals is not None else []
         self.max_history = max_history
         
         # Set default bounds if not provided
@@ -67,7 +67,7 @@ class VisualizationRecorder:
         self.previous_frame = None
     
     def update(self, mu_t, sigma_t, actual_path, current_pos, episode, step, 
-               goal_pos=None, energy=None, max_energy=None, loss=None):
+               active_goals=None, energy=None, max_energy=None, loss=None):
         """
         Record a frame of training data.
         
@@ -78,7 +78,7 @@ class VisualizationRecorder:
             current_pos: (1, state_dim) or (state_dim,) current position
             episode: current episode number
             step: current step number
-            goal_pos: Optional current goal position
+            active_goals: Optional list of active goal positions (each is a tensor or array)
             energy: Optional current energy value
             max_energy: Optional maximum energy value
             loss: Optional loss value for this move
@@ -99,14 +99,17 @@ class VisualizationRecorder:
         elif current_pos_np.ndim > 1:
             current_pos_np = current_pos_np.flatten()
         
-        goal_pos_np = None
-        if goal_pos is not None:
-            if isinstance(goal_pos, torch.Tensor):
-                goal_pos_np = goal_pos.detach().cpu().numpy() if goal_pos.requires_grad else goal_pos.cpu().numpy()
-            else:
-                goal_pos_np = np.array(goal_pos)
-            if goal_pos_np.ndim > 1:
-                goal_pos_np = goal_pos_np.squeeze()
+        # Convert active_goals to list of numpy arrays
+        active_goals_np = []
+        if active_goals is not None:
+            for goal in active_goals:
+                if isinstance(goal, torch.Tensor):
+                    goal_np = goal.detach().cpu().numpy() if goal.requires_grad else goal.cpu().numpy()
+                else:
+                    goal_np = np.array(goal)
+                if goal_np.ndim > 1:
+                    goal_np = goal_np.squeeze()
+                active_goals_np.append(goal_np.tolist())
         
         # Calculate agency statistics from sigma_t
         # sigma_t is (T, state_dim) - flatten to get all sigma values
@@ -128,7 +131,7 @@ class VisualizationRecorder:
             'sigma_t': sigma_t_np.tolist(),
             'actual_path': actual_path_np.tolist(),
             'current_pos': current_pos_np.tolist(),
-            'goal_pos': goal_pos_np.tolist() if goal_pos_np is not None else None,
+            'active_goals': active_goals_np,  # List of goal positions
             'energy': float(energy) if energy is not None else None,
             'max_energy': float(max_energy) if max_energy is not None else None,
             'goal_reached': False,  # Will be set by mark_goal_reached()

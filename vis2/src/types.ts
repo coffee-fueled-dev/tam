@@ -10,7 +10,7 @@ export interface Frame {
   sigma_t: number[][]; // (T, state_dim) tube radii (per-dimension)
   actual_path: number[][]; // (T, state_dim) actual path taken
   current_pos: number[]; // (state_dim,) current position
-  goal_pos: number[] | null; // (state_dim,) current goal position
+  active_goals: number[][]; // List of active goal positions, each (state_dim,)
   energy: number | null;
   max_energy: number | null;
   goal_reached: boolean;
