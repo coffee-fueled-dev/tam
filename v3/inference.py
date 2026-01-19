@@ -3,13 +3,14 @@ import torch.nn as nn
 
 class TransformerInferenceEngine(nn.Module):
     """
-    Transformer-based inference engine that processes dimensions as sequences.
+    Transformer-based inference engine that processes dimensions as variable-length sequences.
     
-    Processes dimensions as variable-length sequences with attention, eliminating
-    the need for padding. Each dimension is treated as a "geometric motif" in
-    a sequence that the transformer attends to dynamically.
+    Processes dimensions as variable-length motif sequences with attention. Each dimension
+    can have 1-N tokens representing discovered geometric motifs. Tokens within a dimension
+    are aggregated (mean pooling) before being passed to the transformer, which then
+    attends across dimensions.
     
-    Input: Sequence of dimension-tokens (variable length based on state_dim)
+    Input: Variable-length token sequences per dimension (1-N tokens per dimension)
     Output: Latent situation (fixed size) + dimension sequence (for Actor attention)
     """
     def __init__(self, vocab_size=65536, token_embed_dim=64, 
@@ -69,12 +70,12 @@ class TransformerInferenceEngine(nn.Module):
     
     def forward(self, dimension_tokens, dimension_traits, rel_goal, h_prev=None, memory_context=None):
         """
-        Process dimensions as a sequence.
+        Process dimensions as variable-length sequences.
         
         Args:
-            dimension_tokens: List of token IDs per dimension
-                           Each element: (B,) tensor of token IDs for that dimension
-                           OR (B, num_heads_per_dim) if multiple tokens per dimension
+            dimension_tokens: List of variable-length token tensors per dimension
+                           Each element: (N,) tensor where N can vary (1-N tokens per dimension)
+                           Supports variable-length motif sequences per dimension
             dimension_traits: List of traits per dimension
                             Each element: (B, 2) tensor of [hub_count, surprise]
             rel_goal: (B, state_dim) relative goal vector
@@ -83,42 +84,59 @@ class TransformerInferenceEngine(nn.Module):
             
         Returns:
             situation: (B, latent_dim) latent situation
-            situation_sequence: (B, state_dim, token_embed_dim) sequence for Actor attention
+            situation_sequence: (B, state_dim, token_embed_dim) sequence for Actor attention (aggregated per dimension)
             new_memory_context: (B, memory_window, token_embed_dim) updated memory context
         """
         B = rel_goal.shape[0]
         state_dim = rel_goal.shape[-1]
         device = rel_goal.device
         
-        # Build sequence: one token per dimension
-        # Each dimension gets: [token_embed + dim_embed + trait_embed + intent_embed]
+        # Build sequence: handle variable-length tokens per dimension
+        # Each dimension can have 1-N tokens (motifs), which we aggregate into a single per-dimension representation
         sequence_tokens = []
         
         for dim_idx in range(state_dim):
-            # Get token IDs for this dimension
+            # Get token IDs for this dimension (can be variable-length)
             if isinstance(dimension_tokens, list):
-                # UnifiedTknProcessor returns list of (1,) tensors
-                dim_token_tensor = dimension_tokens[dim_idx]  # (1,) from UnifiedTknProcessor
-                # Ensure it's 1D, then expand to batch size
-                if dim_token_tensor.dim() == 0:
-                    dim_token_tensor = dim_token_tensor.unsqueeze(0)  # (1,)
-                # Expand to batch size: (1,) -> (B,)
-                if dim_token_tensor.shape[0] == 1:
-                    dim_token_ids = dim_token_tensor.expand(B)  # (B,)
+                # UnifiedTknProcessor returns list of variable-length tensors: (N,) where N can vary
+                dim_token_tensor = dimension_tokens[dim_idx]  # (N,) where N >= 1
+                
+                # Handle variable-length sequences: embed each token and aggregate
+                num_tokens = dim_token_tensor.shape[0]
+                dim_token_embeds = []
+                
+                for token_idx in range(num_tokens):
+                    token_id = dim_token_tensor[token_idx].item()
+                    # Expand to batch size for embedding
+                    token_id_batch = torch.tensor([token_id] * B, device=device)  # (B,)
+                    token_embed = self.token_embedding(token_id_batch)  # (B, token_embed_dim)
+                    dim_token_embeds.append(token_embed)
+                
+                # Aggregate multiple tokens per dimension (mean pooling)
+                if len(dim_token_embeds) > 1:
+                    token_embed = torch.stack(dim_token_embeds, dim=0).mean(dim=0)  # (B, token_embed_dim)
                 else:
-                    dim_token_ids = dim_token_tensor  # Already (B,)
-                # Add dimension for embedding: (B,) -> (B, 1)
-                dim_token_ids = dim_token_ids.unsqueeze(-1)  # (B, 1)
+                    token_embed = dim_token_embeds[0]  # (B, token_embed_dim)
             else:
                 # Fallback: if passed as tensor, assume it's per-dimension
+                # Handle variable-length case if needed
                 dim_token_ids = dimension_tokens[:, dim_idx] if dimension_tokens.dim() > 1 else dimension_tokens
-                if dim_token_ids.dim() == 1:
-                    dim_token_ids = dim_token_ids.unsqueeze(-1)  # (B, 1)
-            
-            # Token embedding (from tkn processor)
-            # dim_token_ids should be (B, 1) now
-            token_embeds = self.token_embedding(dim_token_ids)  # (B, 1, token_embed_dim)
-            token_embed = token_embeds.squeeze(1)  # (B, token_embed_dim)
+                if dim_token_ids.dim() == 1 and dim_token_ids.shape[0] > 1:
+                    # Variable-length: aggregate multiple tokens
+                    num_tokens = dim_token_ids.shape[0]
+                    token_embeds_list = []
+                    for token_idx in range(num_tokens):
+                        token_id = dim_token_ids[token_idx].unsqueeze(0).expand(B)  # (B,)
+                        token_embed_single = self.token_embedding(token_id)  # (B, token_embed_dim)
+                        token_embeds_list.append(token_embed_single)
+                    if len(token_embeds_list) > 1:
+                        token_embed = torch.stack(token_embeds_list, dim=0).mean(dim=0)  # (B, token_embed_dim)
+                    else:
+                        token_embed = token_embeds_list[0]  # (B, token_embed_dim)
+                else:
+                    dim_token_ids = dim_token_ids.unsqueeze(-1) if dim_token_ids.dim() == 1 else dim_token_ids  # (B, 1)
+                    token_embeds = self.token_embedding(dim_token_ids)  # (B, 1, token_embed_dim)
+                    token_embed = token_embeds.squeeze(1)  # (B, token_embed_dim)
             
             # Dimension positional embedding
             dim_pos = self.dim_embedding(torch.tensor(dim_idx, device=device))  # (token_embed_dim,)

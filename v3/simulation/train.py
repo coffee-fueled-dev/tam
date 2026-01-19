@@ -64,7 +64,6 @@ def train_actor(inference_engine, actor, config=None):
         "binding_loss": 1.0,
         "agency_cost": 0.1,
         "geometry_cost": 0.05,
-        "intent_loss": 0.3
     })
     surprise_factor = training_config.get("surprise_factor", 0.3)
     intent_bias_config = training_config.get("intent_bias", {
@@ -264,9 +263,16 @@ def train_actor(inference_engine, actor, config=None):
             if markov_lattice and hasattr(markov_lattice, 'query_structural_analogies'):
                 # Query for structural analogies to inform transformer
                 query_embedding = situation_sequence.mean(dim=1)  # (1, token_embed_dim)
-                analogies = markov_lattice.query_structural_analogies(
-                    dimension_tokens, query_embedding, k=5
-                )
+                # Use first dimension's tokens for query (or first token of first dimension if variable-length)
+                query_token = dimension_tokens[0] if dimension_tokens and len(dimension_tokens) > 0 else None
+                if query_token is not None and isinstance(query_token, torch.Tensor) and query_token.numel() > 0:
+                    # Extract first token from variable-length sequence
+                    query_token_id = query_token.flatten()[0].item()
+                    analogies = markov_lattice.query_structural_analogies(
+                        query_token_id, query_embedding, k=5
+                    )
+                else:
+                    analogies = []
                 # Note: Analogies can be used to modulate attention or add context
                 # For now, we just track them (can be enhanced later)
         
@@ -353,30 +359,12 @@ def train_actor(inference_engine, actor, config=None):
             knot_mask=selected_knot_mask
         )
         
-        # MODULATE AGENCY WITH SURPRISE: Novel patterns require wider cones (lower agency)
+        # MODULATE AGENCY WITH SURPRISE: Novel patterns reduce agency cost penalty, allowing wider cones (lower precision) until learned
         # This is principled: novel situations require wider cones until learned
         if surprise_mask is not None:
             surprise_multiplier = 1.0 + surprise_factor * surprise_mask.float().mean().item()  # 1.0 to 1.0+surprise_factor multiplier
-            agency_cost = agency_cost * surprise_multiplier
-        
-        # INTENT LOSS: Direct supervision to move toward goal
-        # This is not strictly TAM-principled (it's external supervision), but necessary
-        # for goal-directed behavior. The Actor learns to select ports that move toward
-        # the goal to minimize binding failures over the long term.
-        tube_endpoint_global = selected_tube[-1] + current_pos.squeeze()
-        goal_distance = torch.norm(tube_endpoint_global - target_pos)
-        
-        # Principled intent loss: penalize distance, but don't penalize overshooting
-        # If tube reaches or overshoots goal (distance < threshold), reward it
-        # This encourages the Actor to make tubes that actually reach the goal
-        # Dimension-agnostic: uses norm which works in any dimension
-        if goal_distance < goal_reached_threshold:
-            # Goal reached: minimal penalty (or even reward for efficiency)
-            # The closer to goal, the better (but we don't want to penalize overshooting)
-            intent_loss = goal_distance**2  # Quadratic penalty, but small when close
-        else:
-            # Goal not reached: standard MSE loss
-            intent_loss = F.mse_loss(tube_endpoint_global, target_pos)
+            agency_cost = agency_cost / surprise_multiplier
+
         
         # Principled TAM Loss: Based on binding failure and agency
         # Energy minimization emerges naturally:
@@ -387,7 +375,6 @@ def train_actor(inference_engine, actor, config=None):
         # The environment teaches everything else through binding failures:
         # - Knot count: Too many/few knots → binding failures → actor learns optimal count
         # - Tube start: Doesn't start at current position → binding failure → actor learns to start at origin
-        # - Tube end: Doesn't reach goal → intent_loss + inefficient paths → actor learns to aim for goal
         # - Path smoothness: Sharp turns cause collisions → binding failures → actor learns smooth paths
         # - Complex paths that cause binding failures will be avoided through learning
         # - The Actor learns to select simpler ports naturally via binding feedback
@@ -395,7 +382,7 @@ def train_actor(inference_engine, actor, config=None):
         loss = (loss_weights["binding_loss"] * binding_loss
                + loss_weights["agency_cost"] * agency_cost
                + loss_weights["geometry_cost"] * geometry_cost  # Will be 0.0, kept for interface compatibility
-               + loss_weights["intent_loss"] * intent_loss)
+               )
         
         optimizer.zero_grad()
         loss.backward()

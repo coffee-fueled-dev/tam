@@ -64,12 +64,14 @@ if __name__ == "__main__":
         # Initial target position
         "initial_target": [10.0] * STATE_DIM,
         
-        # Goal generation (when goal is reached)
+        # Goal generation (when goal is reached) - Curriculum Learning
         "goal_generation": {
             "margin": 0.5,  # Margin from boundaries when generating new goals
-            "min_dist_from_current": 3.0,  # Minimum distance from current position
+            "min_dist_from_current": 1.0,  # Minimum distance from current position (start close)
             "min_dist_from_obstacles": 1.0,  # Minimum distance from obstacles (added to radius)
-            "max_attempts": 50  # Maximum attempts to find valid goal position
+            "max_attempts": 100,  # Maximum attempts to find valid goal position (increased for distance constraint)
+            "initial_max_goal_distance": 2.0,  # Start with goals within 2.0 units (easy)
+            "distance_increase_per_goal": None  # Auto-calculated: reaches max diagonal in ~50 goals
         },
         
         # Goal reaching threshold
@@ -99,7 +101,9 @@ if __name__ == "__main__":
             "binding_loss": 1.0,  # Contradiction: binding failure = wasted energy
             "agency_cost": 0.1,  # Agency: narrow cones = high agency = efficient
             "geometry_cost": 0.05,  # Geometry: fewer knots + smoother paths = simpler
-            "intent_loss": 0.3  # Intent: goal-directed (supervision, not TAM-principled)
+            "intent_loss": 0.0  # Intent: goal-directed supervision (set to 0.0 to test pure energy mechanics)
+                                 # With energy mechanics, agent should learn: energy depletion → episode reset → negative signal
+                                 # Goal reached → energy replenished → positive signal
         },
         
         # Surprise modulation (for novel patterns)

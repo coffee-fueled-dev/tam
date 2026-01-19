@@ -126,11 +126,11 @@ class Actor(nn.Module):
         Generate affordance tubes using basis function projection.
         
         Args:
-            latent_situation: (B, latent_dim) latent situation from InferenceEngine
+            latent_situation: (B, latent_dim) latent situation from InferenceEngine - projected and combined with attended features
             intent: (B, state_dim) intent/target direction tensor - INFERS state_dim from this!
             previous_velocity: Optional (B, state_dim) or (state_dim,) tensor (kept for interface compatibility, not used)
             situation_sequence: (B, state_dim, token_embed_dim) sequence from transformer
-                             Required for cross-attention
+                             Required for cross-attention - used to generate attended features
             markov_lattice: Optional MarkovLattice for look-ahead queries
             current_pos: Optional (state_dim,) current position for look-ahead queries
         
@@ -160,9 +160,16 @@ class Actor(nn.Module):
         # Aggregate attended features (mean or weighted by attention)
         attended_feat = attended.mean(dim=1)  # (B, token_embed_dim)
         
+        # Project latent situation to same space as attended features
+        latent_proj = self.situation_proj(latent_situation)  # (B, token_embed_dim)
+        
+        # Combine attended features with latent situation projection
+        # Use addition to merge information from both sources
+        combined_feat = attended_feat + latent_proj  # (B, token_embed_dim)
+        
         # Include intent norm in port selection (model learns to use it, but not explicitly biased)
         intent_norm = torch.norm(intent, dim=-1, keepdim=True)  # (B, 1)
-        port_input = torch.cat([attended_feat, intent_norm], dim=-1)  # (B, token_embed_dim + 1)
+        port_input = torch.cat([combined_feat, intent_norm], dim=-1)  # (B, token_embed_dim + 1)
         
         # Project through port head
         situation = self.port_head(port_input)  # (B, 256)

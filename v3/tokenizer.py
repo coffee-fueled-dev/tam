@@ -322,11 +322,35 @@ class MarkovLattice:
         - Similar transition patterns (neighbors)
         - Embedding similarity (if embeddings available)
         
+        Args:
+            query_tokens: Can be a single token ID (int), a tensor with one element, or a variable-length tensor
+                         For variable-length tensors, uses the first token
+        
         Returns top-k hubs sorted by combined similarity score.
         """
         # For each hub, compute similarity score
         similarities = []
-        query_importance = self.get_hub_importance(query_tokens[0].item()) if query_tokens and len(query_tokens) > 0 else 0.0
+        # Handle variable-length tokens: extract first token if tensor, otherwise use directly
+        if query_tokens is not None:
+            if isinstance(query_tokens, torch.Tensor):
+                if query_tokens.numel() > 0:
+                    # Variable-length: use first token
+                    first_token = query_tokens.flatten()[0].item()
+                    query_importance = self.get_hub_importance(first_token)
+                else:
+                    query_importance = 0.0
+            elif isinstance(query_tokens, (list, tuple)) and len(query_tokens) > 0:
+                # List of tokens: use first one
+                first_token = query_tokens[0]
+                if isinstance(first_token, torch.Tensor):
+                    query_importance = self.get_hub_importance(first_token.item())
+                else:
+                    query_importance = self.get_hub_importance(first_token)
+            else:
+                # Single value
+                query_importance = self.get_hub_importance(query_tokens)
+        else:
+            query_importance = 0.0
         
         for hub_id, hub_data in self.hub_graph.items():
             # Importance similarity (hubs with similar importance are analogous)
@@ -739,11 +763,39 @@ class UnifiedTknProcessor:
             surprise_mask = torch.zeros(len(self.head_names), dtype=torch.bool)
         
         # Extract dimension tokens from lattice (excluding proximity and energy)
+        # Support variable-length sequences: each dimension can have multiple tokens (motifs)
         dimension_tokens = []
         for i, name in enumerate(self.head_names):
             if name != "proximity" and name != "energy":
-                token_id = lattice_tokens[i].item()
-                dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))
+                # Get the pattern that was tokenized for this dimension
+                emission_data = head_emissions.get(name)
+                if emission_data is not None and self.lattice is not None:
+                    pattern, _ = emission_data
+                    if pattern is not None and len(pattern) > 1:
+                        # Variable-length sequence: convert each element of the pattern to a token
+                        dim_tokens = []
+                        previous_token = self.lattice.current_lattice[i].item() if hasattr(self.lattice, 'current_lattice') else None
+                        for pattern_element in pattern:
+                            # Create a single-element pattern for tokenization
+                            single_pattern = [pattern_element]
+                            # Get hub_count and surprise for this dimension
+                            hub_count = hub_counts_dict.get(name, 0.0)
+                            surprise = surprises_dict.get(name, 0.0)
+                            # Tokenize this pattern element using Markov transition
+                            token_id, _ = self.lattice.tokenize_with_markov(
+                                name, single_pattern, hub_count, surprise, previous_token
+                            )
+                            dim_tokens.append(token_id)
+                            previous_token = token_id
+                        dimension_tokens.append(torch.tensor(dim_tokens, dtype=torch.long))  # Variable length: (N,)
+                    else:
+                        # Single token: use token from lattice
+                        token_id = lattice_tokens[i].item()
+                        dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))  # (1,)
+                else:
+                    # Fallback: use single token from lattice
+                    token_id = lattice_tokens[i].item()
+                    dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))  # (1,)
         
         # Extract proximity token
         proximity_token_idx = self.head_names.index("proximity")
