@@ -518,7 +518,7 @@ class UnifiedTknProcessor:
         """
         # Infer state_dim from current_pos
         if isinstance(current_pos, torch.Tensor):
-            current_pos_np = current_pos.squeeze().cpu().numpy()
+            current_pos_np = current_pos.squeeze().detach().cpu().numpy()
         else:
             current_pos_np = np.array(current_pos)
         
@@ -532,7 +532,7 @@ class UnifiedTknProcessor:
         
         # Convert raw_obs to numpy
         if isinstance(raw_obs, torch.Tensor):
-            raw_obs_np = raw_obs.cpu().numpy()
+            raw_obs_np = raw_obs.detach().cpu().numpy()
         else:
             raw_obs_np = np.array(raw_obs)
         
@@ -666,32 +666,44 @@ class UnifiedTknProcessor:
             # Get head state (traits) - use delta pattern state
             buffer_hash, hub_count, surprise = self.unified_head.get_head_state()
             
-            # Select primary pattern for tokenization (delta is primary)
-            primary_pattern = None
-            is_novel_primary = False
-            if delta_pattern is not None:
-                primary_pattern = delta_pattern
-                is_novel_primary = delta_novel
-            elif goal_pattern is not None:
-                primary_pattern = goal_pattern
-                is_novel_primary = goal_novel
-            elif obs_dir_pattern is not None:
-                primary_pattern = obs_dir_pattern
-                is_novel_primary = obs_dir_novel
-            else:
-                # No emission yet, use quantized value as single-element pattern
-                primary_pattern = [delta_q]
-                is_novel_primary = False
-            
-            # Store for lattice.update() - use head name matching lattice head_names
+            # Tokenize ALL patterns for this dimension (no primary pattern selection)
+            # Collect all patterns in order: delta, goal, obstacle, boundary
             head_name = f"dim_{dim_idx}"
-            head_emissions[head_name] = (primary_pattern, is_novel_primary)
+            all_patterns = []
+            all_novels = []
+            
+            # Collect patterns in priority order (but all will be tokenized)
+            if delta_pattern is not None:
+                all_patterns.append(("delta", delta_pattern, delta_novel))
+            if goal_pattern is not None:
+                all_patterns.append(("goal", goal_pattern, goal_novel))
+            if obs_dir_pattern is not None:
+                all_patterns.append(("obs_dir", obs_dir_pattern, obs_dir_novel))
+            if boundary_pattern is not None:
+                all_patterns.append(("boundary", boundary_pattern, boundary_novel))
+            
+            # If no patterns, use delta quantized value as fallback
+            if not all_patterns:
+                all_patterns.append(("delta", [delta_q], False))
+            
+            # Store all patterns for this dimension head
+            # We'll tokenize them sequentially, maintaining Markov transitions
+            # Store as a combined pattern sequence for the dimension head
+            combined_pattern = []
+            combined_novel = False
+            for pattern_type, pattern, is_novel in all_patterns:
+                if pattern is not None:
+                    combined_pattern.extend(pattern)
+                    combined_novel = combined_novel or is_novel
+            
+            # Store combined pattern for lattice.update()
+            head_emissions[head_name] = (combined_pattern if combined_pattern else [delta_q], combined_novel)
             hub_counts_dict[head_name] = hub_count
             surprises_dict[head_name] = surprise
             
             dimension_traits.append(torch.tensor([[hub_count, surprise]], dtype=torch.float32))  # (1, 2)
             
-            # Track emissions for metadata (legacy format)
+            # Track individual pattern emissions for metadata (legacy format)
             if delta_pattern is not None:
                 head_emissions[f"{head_name}_delta"] = (delta_pattern, delta_novel)
             if goal_pattern is not None:
@@ -792,39 +804,98 @@ class UnifiedTknProcessor:
             surprise_mask = torch.zeros(len(self.head_names), dtype=torch.bool)
         
         # Extract dimension tokens from lattice (excluding proximity and energy)
-        # Support variable-length sequences: each dimension can have multiple tokens (motifs)
+        # Tokenize ALL patterns (delta, goal, obstacle, boundary) for each dimension
+        # Support variable-length sequences: each dimension can have multiple tokens from all patterns
         dimension_tokens = []
+        dimension_structural_props = []  # List of lists of dicts: one list per dimension, one dict per token
+        
         for i, name in enumerate(self.head_names):
             if name != "proximity" and name != "energy":
-                # Get the pattern that was tokenized for this dimension
+                # Get the combined pattern that was tokenized for this dimension
                 emission_data = head_emissions.get(name)
+                dim_tokens = []
+                dim_struct_props = []
+                
                 if emission_data is not None and self.lattice is not None:
                     pattern, _ = emission_data
-                    if pattern is not None and len(pattern) > 1:
-                        # Variable-length sequence: convert each element of the pattern to a token
-                        dim_tokens = []
+                    if pattern is not None and len(pattern) > 0:
+                        # Tokenize each element of the pattern sequentially (maintaining Markov transitions)
                         previous_token = self.lattice.current_lattice[i].item() if hasattr(self.lattice, 'current_lattice') else None
+                        hub_count = hub_counts_dict.get(name, 0.0)
+                        surprise = surprises_dict.get(name, 0.0)
+                        
                         for pattern_element in pattern:
                             # Create a single-element pattern for tokenization
                             single_pattern = [pattern_element]
-                            # Get hub_count and surprise for this dimension
-                            hub_count = hub_counts_dict.get(name, 0.0)
-                            surprise = surprises_dict.get(name, 0.0)
                             # Tokenize this pattern element using Markov transition
                             token_id, _ = self.lattice.tokenize_with_markov(
                                 name, single_pattern, hub_count, surprise, previous_token
                             )
                             dim_tokens.append(token_id)
+                            
+                            # Extract structural properties for this token
+                            hub_importance = self.lattice.get_hub_importance(token_id)
+                            is_hub = token_id in self.lattice.hub_graph
+                            hub_count_prop = 0.0
+                            in_degree = 0.0
+                            if is_hub:
+                                hub_data = self.lattice.hub_graph[token_id]
+                                hub_count_prop = float(hub_data.get('hub_count', 0))
+                                in_degree = float(hub_data.get('in_degree', 0))
+                            
+                            dim_struct_props.append({
+                                'hub_importance': float(hub_importance),
+                                'hub_count': hub_count_prop,
+                                'in_degree': in_degree,
+                                'is_hub': 1.0 if is_hub else 0.0
+                            })
+                            
                             previous_token = token_id
+                        
                         dimension_tokens.append(torch.tensor(dim_tokens, dtype=torch.long))  # Variable length: (N,)
+                        dimension_structural_props.append(dim_struct_props)
                     else:
-                        # Single token: use token from lattice
+                        # Fallback: use single token from lattice
                         token_id = lattice_tokens[i].item()
                         dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))  # (1,)
+                        
+                        # Extract structural properties for fallback token
+                        hub_importance = self.lattice.get_hub_importance(token_id) if self.lattice else 0.0
+                        is_hub = token_id in self.lattice.hub_graph if self.lattice else False
+                        hub_count_prop = 0.0
+                        in_degree = 0.0
+                        if is_hub and self.lattice:
+                            hub_data = self.lattice.hub_graph[token_id]
+                            hub_count_prop = float(hub_data.get('hub_count', 0))
+                            in_degree = float(hub_data.get('in_degree', 0))
+                        
+                        dimension_structural_props.append([{
+                            'hub_importance': float(hub_importance),
+                            'hub_count': hub_count_prop,
+                            'in_degree': in_degree,
+                            'is_hub': 1.0 if is_hub else 0.0
+                        }])
                 else:
                     # Fallback: use single token from lattice
                     token_id = lattice_tokens[i].item()
                     dimension_tokens.append(torch.tensor([token_id], dtype=torch.long))  # (1,)
+                    
+                    # Extract structural properties for fallback token
+                    hub_importance = self.lattice.get_hub_importance(token_id) if self.lattice else 0.0
+                    is_hub = token_id in self.lattice.hub_graph if self.lattice else False
+                    hub_count_prop = 0.0
+                    in_degree = 0.0
+                    if is_hub and self.lattice:
+                        hub_data = self.lattice.hub_graph[token_id]
+                        hub_count_prop = float(hub_data.get('hub_count', 0))
+                        in_degree = float(hub_data.get('in_degree', 0))
+                    
+                    dimension_structural_props.append([{
+                        'hub_importance': float(hub_importance),
+                        'hub_count': hub_count_prop,
+                        'in_degree': in_degree,
+                        'is_hub': 1.0 if is_hub else 0.0
+                    }])
         
         # Extract proximity token
         proximity_token_idx = self.head_names.index("proximity")
@@ -837,8 +908,9 @@ class UnifiedTknProcessor:
         
         # Build output
         return {
-            "dimension_tokens": dimension_tokens,  # List of (1,) tensors
+            "dimension_tokens": dimension_tokens,  # List of variable-length tensors (N,) - now includes all patterns
             "dimension_traits": dimension_traits,  # List of (1, 2) tensors
+            "dimension_structural_props": dimension_structural_props,  # List of lists of dicts: structural properties per token
             "proximity_token": proximity_token,  # (1,) tensor
             "proximity_traits": proximity_traits,  # (1, 2) tensor
             "rel_goal": torch.tensor(rel_goal_np, dtype=torch.float32),  # (state_dim,)
@@ -878,201 +950,3 @@ class UnifiedTknProcessor:
         self.unified_head = TknHead("unified", self.quantization_bins, self.quant_range, self.vocab_size)
         self.proximity_head = TknHead("proximity", self.quantization_bins, 
                                      quant_range=(-5.0, 10.0), vocab_size=self.vocab_size)
-
-
-class TknProcessor:
-    """
-    DEPRECATED: Use UnifiedTknProcessor for transformer-based architecture.
-    
-    Legacy per-dimension head processor. Kept for backward compatibility.
-    """
-    def __init__(self, state_dim=3, quantization_bins=11, quant_range=(-2.0, 2.0), vocab_size=65536):
-        import warnings
-        warnings.warn("TknProcessor is deprecated. Use UnifiedTknProcessor for transformer architecture.", DeprecationWarning)
-        """
-        Args:
-            state_dim: Dimension of state space (e.g., 3 for 3D, 6 for 6D robotic arm)
-            quantization_bins: Number of quantization bins per head
-            quant_range: Default quantization range (min, max)
-            vocab_size: Token vocabulary size
-        """
-        self.state_dim = state_dim
-        self.quantization_bins = quantization_bins
-        self.quant_range = quant_range
-        self.vocab_size = vocab_size
-        
-        # Dynamically create heads based on state_dim
-        self.heads = {}
-        
-        # Delta heads: one per dimension (movement direction)
-        for i in range(state_dim):
-            head_name = f"delta_{i}"
-            self.heads[head_name] = TknHead(head_name, quantization_bins, quant_range, vocab_size)
-        
-        # Proximity head: distance to nearest obstacle
-        self.heads["proximity"] = TknHead("proximity", quantization_bins, quant_range=(-5.0, 10.0), vocab_size=vocab_size)
-        
-        # Goal direction heads: one per dimension
-        for i in range(state_dim):
-            head_name = f"goal_dir_{i}"
-            self.heads[head_name] = TknHead(head_name, quantization_bins, quant_range, vocab_size)
-        
-        self.head_names = list(self.heads.keys())
-        self.previous_pos = None
-        self.previous_rel_goal = None
-        
-        # Initialize Markov lattice
-        self.lattice = MarkovLattice(self.head_names, vocab_size=vocab_size, hub_threshold=3)
-        
-    def process_observation(self, current_pos, raw_obs, obstacles):
-        """
-        Process a raw observation through tkn heads and update invariant lattice.
-        
-        Args:
-            current_pos: Current position (state_dim,) tensor
-            raw_obs: Raw observation tensor (raw_ctx_dim,)
-            obstacles: List of (position, radius) tuples where position is (state_dim,) array
-            
-        Returns:
-            dict with:
-                - lattice_tokens: (num_heads,) tensor of token IDs
-                - surprise_mask: (num_heads,) bool tensor indicating novel patterns
-                - lattice_traits: (num_heads, 2) tensor of [hub_count, surprise] per head
-                - buffer_hashes: (num_heads,) tensor of buffer hash IDs
-                - metadata: Dict with quantized values, emissions, etc.
-        """
-        current_pos_np = current_pos.squeeze().cpu().numpy() if isinstance(current_pos, torch.Tensor) else current_pos
-        
-        # Ensure current_pos_np is the right shape
-        if current_pos_np.ndim == 0:
-            current_pos_np = np.array([current_pos_np])
-        elif current_pos_np.ndim > 1:
-            current_pos_np = current_pos_np.flatten()
-        
-        # Extract relative goal from raw_obs (first state_dim elements)
-        rel_goal = raw_obs[:self.state_dim].cpu().numpy() if isinstance(raw_obs, torch.Tensor) else raw_obs[:self.state_dim]
-        
-        # Ensure rel_goal is the right shape
-        if rel_goal.ndim == 0:
-            rel_goal = np.array([rel_goal])
-        elif rel_goal.ndim > 1:
-            rel_goal = rel_goal.flatten()
-        
-        # Calculate deltas (change in position)
-        if self.previous_pos is not None:
-            delta = current_pos_np - self.previous_pos
-        else:
-            delta = np.zeros(self.state_dim)
-        
-        # Quantize and process deltas (one head per dimension)
-        head_emissions = {}
-        quantized_values = {}
-        
-        for i in range(self.state_dim):
-            head_name = f"delta_{i}"
-            delta_q = self.heads[head_name].quantize(delta[i])
-            delta_pattern, delta_novel = self.heads[head_name].process(delta_q)
-            head_emissions[head_name] = (delta_pattern, delta_novel) if delta_pattern is not None else None
-            quantized_values[head_name] = int(delta_q)
-        
-        # Calculate proximity to nearest obstacle
-        min_proximity = float('inf')
-        if obstacles:
-            for obs_p, obs_r in obstacles:
-                obs_pos = np.array(obs_p)
-                # Ensure obs_pos matches state_dim
-                if obs_pos.ndim == 0:
-                    obs_pos = np.array([obs_pos])
-                elif obs_pos.ndim > 1:
-                    obs_pos = obs_pos.flatten()
-                # Pad or truncate to match state_dim
-                if len(obs_pos) < self.state_dim:
-                    obs_pos = np.pad(obs_pos, (0, self.state_dim - len(obs_pos)), mode='constant')
-                elif len(obs_pos) > self.state_dim:
-                    obs_pos = obs_pos[:self.state_dim]
-                
-                distance = np.linalg.norm(current_pos_np - obs_pos) - obs_r
-                min_proximity = min(min_proximity, distance)
-        else:
-            min_proximity = 10.0  # No obstacles
-        
-        # Quantize and process proximity
-        proximity_q = self.heads["proximity"].quantize(min_proximity)
-        proximity_pattern, proximity_novel = self.heads["proximity"].process(proximity_q)
-        head_emissions["proximity"] = (proximity_pattern, proximity_novel) if proximity_pattern is not None else None
-        quantized_values["proximity"] = int(proximity_q)
-        
-        # Quantize and process goal direction (one head per dimension)
-        for i in range(self.state_dim):
-            head_name = f"goal_dir_{i}"
-            goal_dir_q = self.heads[head_name].quantize(rel_goal[i] if i < len(rel_goal) else 0.0)
-            goal_dir_pattern, goal_dir_novel = self.heads[head_name].process(goal_dir_q)
-            head_emissions[head_name] = (goal_dir_pattern, goal_dir_novel) if goal_dir_pattern is not None else None
-            quantized_values[head_name] = int(goal_dir_q)
-        
-        # Collect lattice traits from all heads (epistemic status)
-        buffer_hashes = []
-        hub_counts_dict = {}
-        surprises_dict = {}
-        
-        for head_name in self.head_names:
-            buffer_hash, hub_count, surprise = self.heads[head_name].get_head_state()
-            buffer_hashes.append(buffer_hash)
-            hub_counts_dict[head_name] = float(hub_count)
-            surprises_dict[head_name] = float(surprise)
-        
-        # Update Markov lattice with hub_counts and surprises
-        lattice_tokens, surprise_mask = self.lattice.update(
-            head_emissions,
-            hub_counts=hub_counts_dict,
-            surprises=surprises_dict,
-            current_pos=current_pos_np
-        )
-        
-        # Convert hub_counts and surprises to lists for compatibility
-        hub_counts = [hub_counts_dict[name] for name in self.head_names]
-        surprises = [surprises_dict[name] for name in self.head_names]
-        
-        # Convert to tensors
-        buffer_hashes_tensor = torch.tensor(buffer_hashes, dtype=torch.long)  # (num_heads,)
-        lattice_traits = torch.stack([
-            torch.tensor(hub_counts, dtype=torch.float32),  # Hub-ness (confidence)
-            torch.tensor(surprises, dtype=torch.float32)     # Surprise (boundary)
-        ], dim=1)  # (num_heads, 2)
-        
-        # Update state
-        self.previous_pos = current_pos_np.copy()
-        self.previous_rel_goal = rel_goal.copy()
-        
-        # Build output
-        return {
-            "lattice_tokens": lattice_tokens,  # (num_heads,) tensor of token IDs
-            "surprise_mask": surprise_mask,  # (num_heads,) bool tensor
-            "lattice_traits": lattice_traits,  # (num_heads, 2) tensor [hub_count, surprise]
-            "buffer_hashes": buffer_hashes_tensor,  # (num_heads,) tensor of buffer hash IDs
-            "rel_goal": torch.tensor(rel_goal, dtype=torch.float32),  # (state_dim,) high-fidelity intent
-            "metadata": {
-                "timestamp": datetime.now().isoformat(),
-                "current_pos": current_pos_np.tolist(),
-                "rel_goal": rel_goal.tolist(),
-                "delta": delta.tolist(),
-                "min_proximity": float(min_proximity),
-                "quantized": quantized_values,
-                "emissions": {k: (v[0] if v is not None else None) 
-                             for k, v in head_emissions.items()},
-                "has_emissions": any(v is not None for v in head_emissions.values()),
-                "has_surprise": surprise_mask.any().item() if isinstance(surprise_mask, torch.Tensor) else any(surprise_mask),
-                "lattice_traits": {
-                    "buffer_hashes": buffer_hashes,
-                    "hub_counts": hub_counts,
-                    "surprises": surprises
-                }
-            }
-        }
-    
-    def reset_episode(self):
-        """Reset state at start of new episode."""
-        self.previous_pos = None
-        self.previous_rel_goal = None
-        self.lattice.reset_episode()
-

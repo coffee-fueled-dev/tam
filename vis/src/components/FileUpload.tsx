@@ -39,6 +39,11 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
         (f) => f.name.includes("visualization_metadata") && f.name.endsWith(".json")
       );
 
+      // Find training config file (optional) - can contain obstacles and environment config
+      const trainingConfigFile = Array.from(files).find(
+        (f) => f.name.includes("training_config") && f.name.endsWith(".json")
+      );
+
       // Find training metrics file (optional) - try multiple patterns
       const trainingMetricsFile = Array.from(files).find(
         (f) => {
@@ -48,10 +53,31 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
         }
       );
 
+      // Find training stats file (optional) - contains move, binding_loss, agency_cost
+      const trainingStatsFile = Array.from(files).find(
+        (f) => {
+          const name = f.name.toLowerCase();
+          return (name.includes("training_stats") || name.includes("training-stats")) && 
+                 name.endsWith(".jsonl");
+        }
+      );
+
+      // Find environment data file (optional) - contains step-by-step environment state
+      const environmentDataFile = Array.from(files).find(
+        (f) => {
+          const name = f.name.toLowerCase();
+          return (name.includes("environment_data") || name.includes("environment-data")) && 
+                 name.endsWith(".jsonl");
+        }
+      );
+
       // Read files
       const jsonlContent = await readFileAsText(jsonlFile);
       const metadataContent = metadataFile
         ? await readFileAsText(metadataFile)
+        : null;
+      const trainingConfigContent = trainingConfigFile
+        ? await readFileAsText(trainingConfigFile)
         : null;
       
       let trainingMetricsContent: string | null = null;
@@ -103,11 +129,29 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
         console.log("To see training plots, upload a goal_stats_*.jsonl file along with the visualization files.");
       }
 
+      // Read environment data file if available
+      const environmentDataContent = environmentDataFile
+        ? await readFileAsText(environmentDataFile)
+        : null;
+
+      // Read training stats file if available (for trajectory data)
+      const trainingStatsContent = trainingStatsFile
+        ? await readFileAsText(trainingStatsFile)
+        : null;
+
+      // If we have environment_data, use training_stats for trajectory data
+      // Otherwise, use trainingMetricsContent for goal_stats
+      const effectiveTrainingMetricsContent = environmentDataContent && trainingStatsContent
+        ? trainingStatsContent  // Use training_stats when environment_data is present
+        : trainingMetricsContent; // Fall back to goal_stats otherwise
+
       // Parse data
       const data = await parseVisualizationData(
         jsonlContent,
         metadataContent,
-        trainingMetricsContent
+        effectiveTrainingMetricsContent,
+        trainingConfigContent,
+        environmentDataContent
       );
 
       onDataLoaded(data);
@@ -124,10 +168,12 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
       <CardHeader>
         <CardTitle>Upload Visualization Files</CardTitle>
         <CardDescription>
-          Select visualization_data_*.jsonl and optionally visualization_metadata_*.json
+          Select visualization_data_*.jsonl and optionally visualization_metadata_*.json or training_config_*.json
           <br />
           <span className="text-xs text-muted-foreground">
-            Tip: Also upload goal_stats_*.jsonl to see training plots
+            Tip: Also upload goal_stats_*.jsonl to see training plots. Upload training_config_*.json to load obstacles and environment settings.
+            <br />
+            For new format: Upload environment_data_*.jsonl and training_stats_*.jsonl for step-by-step visualization.
           </span>
         </CardDescription>
       </CardHeader>

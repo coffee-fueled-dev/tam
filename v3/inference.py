@@ -45,6 +45,9 @@ class TransformerInferenceEngine(nn.Module):
         # Trait embedding: hub-ness + surprise -> features
         self.trait_proj = nn.Linear(2, token_embed_dim)
         
+        # Structural property embedding: hub_importance, hub_count, in_degree, is_hub -> features
+        self.struct_prop_proj = nn.Linear(4, token_embed_dim)
+        
         # Intent embedding: rel_goal components -> features (per-dimension)
         self.intent_proj = nn.Linear(1, token_embed_dim)
         
@@ -68,7 +71,7 @@ class TransformerInferenceEngine(nn.Module):
         # CLS token for aggregation (learned)
         self.cls_token = nn.Parameter(torch.randn(1, 1, token_embed_dim))
     
-    def forward(self, dimension_tokens, dimension_traits, rel_goal, h_prev=None, memory_context=None):
+    def forward(self, dimension_tokens, dimension_traits, rel_goal, h_prev=None, memory_context=None, dimension_structural_props=None):
         """
         Process dimensions as variable-length sequences.
         
@@ -81,6 +84,9 @@ class TransformerInferenceEngine(nn.Module):
             rel_goal: (B, state_dim) relative goal vector
             h_prev: Optional, kept for interface compatibility (not used in transformer)
             memory_context: Optional (B, memory_window, token_embed_dim) sliding window of recent situations
+            dimension_structural_props: Optional list of lists of dicts per dimension
+                                      Each dict contains: hub_importance, hub_count, in_degree, is_hub
+                                      One dict per token in the dimension's sequence
             
         Returns:
             situation: (B, latent_dim) latent situation
@@ -105,11 +111,30 @@ class TransformerInferenceEngine(nn.Module):
                 num_tokens = dim_token_tensor.shape[0]
                 dim_token_embeds = []
                 
+                # Get structural properties for this dimension (if available)
+                dim_struct_props = None
+                if dimension_structural_props is not None and dim_idx < len(dimension_structural_props):
+                    dim_struct_props = dimension_structural_props[dim_idx]
+                
                 for token_idx in range(num_tokens):
                     token_id = dim_token_tensor[token_idx].item()
                     # Expand to batch size for embedding
                     token_id_batch = torch.tensor([token_id] * B, device=device)  # (B,)
                     token_embed = self.token_embedding(token_id_batch)  # (B, token_embed_dim)
+                    
+                    # Add structural property embedding if available
+                    if dim_struct_props is not None and token_idx < len(dim_struct_props):
+                        struct_prop_dict = dim_struct_props[token_idx]
+                        struct_prop_vec = torch.tensor([
+                            struct_prop_dict.get('hub_importance', 0.0),
+                            struct_prop_dict.get('hub_count', 0.0),
+                            struct_prop_dict.get('in_degree', 0.0),
+                            struct_prop_dict.get('is_hub', 0.0)
+                        ], device=device, dtype=torch.float32)  # (4,)
+                        struct_prop_vec = struct_prop_vec.unsqueeze(0).expand(B, -1)  # (B, 4)
+                        struct_embed = self.struct_prop_proj(struct_prop_vec)  # (B, token_embed_dim)
+                        token_embed = token_embed + struct_embed  # Combine structural properties with token embedding
+                    
                     dim_token_embeds.append(token_embed)
                 
                 # Aggregate multiple tokens per dimension (mean pooling)

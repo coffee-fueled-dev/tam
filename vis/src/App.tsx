@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { FileUpload } from "./components/FileUpload";
 import { Scene3D } from "./components/Scene3D";
+import { Scene2D } from "./components/Scene2D";
 import { Controls } from "./components/Controls";
 import { TrainingPlots } from "./components/TrainingPlots";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
@@ -114,7 +115,9 @@ export function App() {
         <Tabs defaultValue="visualization" className="h-full flex flex-col">
           <div className="flex-shrink-0 border-b px-4">
             <TabsList>
-              <TabsTrigger value="visualization">3D Visualization</TabsTrigger>
+              <TabsTrigger value="visualization">
+                {data.metadata.state_dim === 2 ? "2D Visualization" : "3D Visualization"}
+              </TabsTrigger>
               <TabsTrigger value="plots">Training Plots</TabsTrigger>
             </TabsList>
           </div>
@@ -156,15 +159,25 @@ export function App() {
               </div>
             </div>
             
-            {/* 3D Scene */}
+            {/* 3D/2D Scene */}
             <div className="flex-1 w-full relative overflow-hidden">
-              <Scene3D
-                frames={data.frames}
-                metadata={data.metadata}
-                currentFrameIndex={currentFrame}
-                maxHistory={MAX_HISTORY}
-                reachedGoalsByFrame={data.reachedGoalsByFrame}
-              />
+              {data.metadata.state_dim === 2 ? (
+                <Scene2D
+                  frames={data.frames}
+                  metadata={data.metadata}
+                  currentFrameIndex={currentFrame}
+                  maxHistory={MAX_HISTORY}
+                  reachedGoalsByFrame={data.reachedGoalsByFrame}
+                />
+              ) : (
+                <Scene3D
+                  frames={data.frames}
+                  metadata={data.metadata}
+                  currentFrameIndex={currentFrame}
+                  maxHistory={MAX_HISTORY}
+                  reachedGoalsByFrame={data.reachedGoalsByFrame}
+                />
+              )}
             </div>
           </TabsContent>
           

@@ -6,11 +6,12 @@ export interface Obstacle {
 export interface Frame {
   step: number;
   episode: number;
-  mu_t: number[][]; // (T, state_dim) planned tube trajectory (relative)
+  mu_t: number[][]; // (T, state_dim) planned tube trajectory (relative to move_start_pos)
   sigma_t: number[][]; // (T, state_dim) tube radii (per-dimension)
   actual_path: number[][]; // (T, state_dim) actual path taken
   current_pos: number[]; // (state_dim,) current position
   active_goals: number[][]; // List of active goal positions, each (state_dim,)
+  move_start_pos?: number[]; // (state_dim,) agent position at start of move
   energy: number | null;
   max_energy: number | null;
   goal_reached: boolean;

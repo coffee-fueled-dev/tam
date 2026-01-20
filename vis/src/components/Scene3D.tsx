@@ -42,6 +42,7 @@ export function Scene3D({
   const activeGoalMarkersRef = useRef<THREE.Mesh[]>([]);
   const goalMarkersRef = useRef<THREE.Mesh[]>([]);
   const sceneCenterRef = useRef<[number, number, number]>([0, 0, 0]);
+  const tubeObjectsRef = useRef<Map<number, THREE.Object3D[]>>(new Map()); // Track tube objects per move
 
   // Initialize scene
   useEffect(() => {
@@ -397,11 +398,11 @@ export function Scene3D({
       return;
     }
 
-    // Convert relative to global coordinates
+    // mu_t is now in absolute coordinates (converted from relative to move start in parser)
     const globalPoints = mu_t.map((pt) => [
-      (pt[0] ?? 0) + (current_pos[0] ?? 0),
-      (pt[1] ?? 0) + (current_pos[1] ?? 0),
-      (pt[2] ?? 0) + (current_pos[2] ?? 0),
+      pt[0] ?? 0,
+      pt[1] ?? 0,
+      pt[2] ?? 0,
     ]);
 
     const points = globalPoints.map(
