@@ -1,11 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { FileUpload } from "./components/FileUpload";
-import { Scene3D } from "./components/Scene3D";
 import { Scene2D } from "./components/Scene2D";
 import { Controls } from "./components/Controls";
-import { TrainingPlots } from "./components/TrainingPlots";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
-import { Slider } from "./components/ui/slider";
 import type { VisualizationData, Frame } from "./types";
 import "./index.css";
 import { Progress } from "./components/ui/progress";
@@ -116,51 +113,45 @@ export function App() {
           <div className="flex-shrink-0 border-b px-4">
             <TabsList>
               <TabsTrigger value="visualization">
-                {data.metadata.state_dim === 2 ? "2D Visualization" : "3D Visualization"}
+                Visualization
               </TabsTrigger>
-              <TabsTrigger value="plots">Training Plots</TabsTrigger>
             </TabsList>
           </div>
-          
+
           <TabsContent value="visualization" className="flex-1 m-0 overflow-hidden flex flex-col">
-            {/* Energy Slider - Full width above 3D scene */}
             <div className="w-full px-4 py-2 border-b bg-card flex-shrink-0">
               <div className="flex items-center gap-3">
                 <span className="text-sm font-medium text-muted-foreground whitespace-nowrap">
                   Energy:
                 </span>
                 <div className="flex-1">
-                <Progress value={currentFrameData?.energy !== null &&
-                  currentFrameData?.energy !== undefined &&
-                  currentFrameData?.max_energy !== null &&
-                  currentFrameData?.max_energy !== undefined
+                  <Progress value={currentFrameData?.energy !== null &&
+                    currentFrameData?.energy !== undefined &&
+                    currentFrameData?.max_energy !== null &&
+                    currentFrameData?.max_energy !== undefined
                     ? (currentFrameData.energy / currentFrameData.max_energy) * 100
-                        : 0} 
-                        className="w-full"
-                />
-                  
+                    : 0}
+                    className="w-full"
+                  />
+
                 </div>
                 <span className="text-sm font-medium text-foreground whitespace-nowrap min-w-[120px] text-right">
                   {currentFrameData?.energy !== null &&
-                  currentFrameData?.energy !== undefined
-                    ? `${currentFrameData.energy.toFixed(1)}/${
-                        currentFrameData.max_energy
-                          ? currentFrameData.max_energy.toFixed(1)
-                          : "--"
-                      } (${
-                        currentFrameData.max_energy
-                          ? Math.round(
-                              (currentFrameData.energy / currentFrameData.max_energy) * 100
-                            )
-                          : 0
-                      }%)`
+                    currentFrameData?.energy !== undefined
+                    ? `${currentFrameData.energy.toFixed(1)}/${currentFrameData.max_energy
+                      ? currentFrameData.max_energy.toFixed(1)
+                      : "--"
+                    } (${currentFrameData.max_energy
+                      ? Math.round(
+                        (currentFrameData.energy / currentFrameData.max_energy) * 100
+                      )
+                      : 0
+                    }%)`
                     : "--"}
                 </span>
               </div>
             </div>
-            
-            {/* 3D/2D Scene */}
-            <div className="flex-1 w-full relative overflow-hidden">
+            <div className="flex-1 w-full relative overflow-hidden p-6">
               {data.metadata.state_dim === 2 ? (
                 <Scene2D
                   frames={data.frames}
@@ -170,26 +161,11 @@ export function App() {
                   reachedGoalsByFrame={data.reachedGoalsByFrame}
                 />
               ) : (
-                <Scene3D
-                  frames={data.frames}
-                  metadata={data.metadata}
-                  currentFrameIndex={currentFrame}
-                  maxHistory={MAX_HISTORY}
-                  reachedGoalsByFrame={data.reachedGoalsByFrame}
-                />
+                <>Wrong dimension</>
               )}
             </div>
           </TabsContent>
-          
-          <TabsContent value="plots" className="flex-1 m-0 overflow-auto">
-            <div className="h-full p-6">
-              <TrainingPlots 
-                trainingMetrics={data.trainingMetrics}
-                frames={data.frames}
-                reachedGoalsByFrame={data.reachedGoalsByFrame}
-              />
-            </div>
-          </TabsContent>
+
         </Tabs>
       </div>
     </div>

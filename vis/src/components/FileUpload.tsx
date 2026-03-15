@@ -25,8 +25,8 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
     try {
       // Find JSONL file (prioritize visualization_data files)
       const jsonlFile = Array.from(files).find(
-        (f) => (f.name.includes("visualization_data") || f.name.includes("visualization-data")) && 
-               (f.name.endsWith(".jsonl") || f.name.endsWith(".jsonl.gz"))
+        (f) => (f.name.includes("visualization_data") || f.name.includes("visualization-data")) &&
+          (f.name.endsWith(".jsonl") || f.name.endsWith(".jsonl.gz"))
       ) || Array.from(files).find(
         (f) => f.name.endsWith(".jsonl") || f.name.endsWith(".jsonl.gz")
       );
@@ -48,8 +48,8 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
       const trainingMetricsFile = Array.from(files).find(
         (f) => {
           const name = f.name.toLowerCase();
-          return (name.includes("goal_stats") || name.includes("goal-stats")) && 
-                 (name.endsWith(".jsonl") || name.endsWith(".json"));
+          return (name.includes("goal_stats") || name.includes("goal-stats")) &&
+            (name.endsWith(".jsonl") || name.endsWith(".json"));
         }
       );
 
@@ -57,8 +57,8 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
       const trainingStatsFile = Array.from(files).find(
         (f) => {
           const name = f.name.toLowerCase();
-          return (name.includes("training_stats") || name.includes("training-stats")) && 
-                 name.endsWith(".jsonl");
+          return (name.includes("training_stats") || name.includes("training-stats")) &&
+            name.endsWith(".jsonl");
         }
       );
 
@@ -66,8 +66,8 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
       const environmentDataFile = Array.from(files).find(
         (f) => {
           const name = f.name.toLowerCase();
-          return (name.includes("environment_data") || name.includes("environment-data")) && 
-                 name.endsWith(".jsonl");
+          return (name.includes("environment_data") || name.includes("environment-data")) &&
+            name.endsWith(".jsonl");
         }
       );
 
@@ -79,7 +79,7 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
       const trainingConfigContent = trainingConfigFile
         ? await readFileAsText(trainingConfigFile)
         : null;
-      
+
       let trainingMetricsContent: string | null = null;
       if (trainingMetricsFile) {
         try {
@@ -106,15 +106,15 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
               }
             })
             .filter((stat) => stat !== null);
-          
+
           console.log(`Loaded ${goalStats.length} goal stats entries`);
-          
+
           // Loss is now per-frame in visualization_data, not in metadata or goal_stats
           trainingMetricsContent = JSON.stringify({
             goal_stats: goalStats,
             loss_history: [], // Loss is per-frame, not aggregated here
           });
-          
+
           console.log("Training metrics prepared:", {
             goalStatsCount: goalStats.length,
             sampleGoalStat: goalStats[0],
@@ -167,15 +167,6 @@ export function FileUpload({ onDataLoaded }: FileUploadProps) {
     <Card className="w-full max-w-2xl">
       <CardHeader>
         <CardTitle>Upload Visualization Files</CardTitle>
-        <CardDescription>
-          Select visualization_data_*.jsonl and optionally visualization_metadata_*.json or training_config_*.json
-          <br />
-          <span className="text-xs text-muted-foreground">
-            Tip: Also upload goal_stats_*.jsonl to see training plots. Upload training_config_*.json to load obstacles and environment settings.
-            <br />
-            For new format: Upload environment_data_*.jsonl and training_stats_*.jsonl for step-by-step visualization.
-          </span>
-        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-col gap-4">

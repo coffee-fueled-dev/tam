@@ -67,27 +67,40 @@ export function buildReachedGoalsByFrame(frames: Frame[]): Record<number, number
   const seenGoals = new Set<string>(); // Track goals we've seen
 
     frames.forEach((frame, idx) => {
-      // Track goals that were active in previous frame but are no longer active
-      // This indicates they were reached
-      if (idx > 0) {
-        const prevFrame = frames[idx - 1];
-        if (prevFrame) {
-          const prevActiveGoals = prevFrame.active_goals || [];
-          const currActiveGoals = frame.active_goals || [];
-          
-          // Find goals that were in previous frame but not in current frame
-          prevActiveGoals.forEach((prevGoal) => {
-            const goalKey = prevGoal.join(",");
-            const stillActive = currActiveGoals.some(
-              (currGoal) => currGoal.join(",") === goalKey
-            );
+      // First, check if frame has explicit reached_goals field (from environment data)
+      if ((frame as any).reached_goals && Array.isArray((frame as any).reached_goals)) {
+        // Use explicit reached_goals from environment
+        const frameReachedGoals = (frame as any).reached_goals as number[][];
+        frameReachedGoals.forEach((goal) => {
+          const goalKey = goal.join(",");
+          if (!seenGoals.has(goalKey)) {
+            seenGoals.add(goalKey);
+            cumulativeReachedGoals.push([...goal]);
+          }
+        });
+      } else {
+        // Fallback: Track goals that were active in previous frame but are no longer active
+        // This indicates they were reached
+        if (idx > 0) {
+          const prevFrame = frames[idx - 1];
+          if (prevFrame) {
+            const prevActiveGoals = prevFrame.active_goals || [];
+            const currActiveGoals = frame.active_goals || [];
             
-            if (!stillActive && !seenGoals.has(goalKey)) {
-              // Goal was reached (removed from active list)
-              seenGoals.add(goalKey);
-              cumulativeReachedGoals.push([...prevGoal]);
-            }
-          });
+            // Find goals that were in previous frame but not in current frame
+            prevActiveGoals.forEach((prevGoal) => {
+              const goalKey = prevGoal.join(",");
+              const stillActive = currActiveGoals.some(
+                (currGoal) => currGoal.join(",") === goalKey
+              );
+              
+              if (!stillActive && !seenGoals.has(goalKey)) {
+                // Goal was reached (removed from active list)
+                seenGoals.add(goalKey);
+                cumulativeReachedGoals.push([...prevGoal]);
+              }
+            });
+          }
         }
       }
       
@@ -104,6 +117,7 @@ export function buildReachedGoalsByFrame(frames: Frame[]): Record<number, number
 function parseEnvironmentData(content: string): Array<{
   agent_position: number[];
   active_goals: number[][];
+  reached_goals?: number[][];
   obstacles?: number[][];
   energy?: number;
   max_energy?: number;

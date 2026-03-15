@@ -1,584 +1,567 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from v3.geometry import CausalSpline
+from typing import Optional, Dict, Any
+from v3.goal_motif import GoalMotif
 
 
 class Actor(nn.Module):
     """
-    Fibration Actor: Basis-Projection Actor with cross-attention.
+    Fibration Actor: Next-step Actor with cross-attention.
     Key features:
-    - Basis function weights instead of raw offsets
-    - Per-dimension precision (sigma vector) for anisotropic affordance tubes
+    - Generates single next step per port
+    - Per-dimension precision (sigma vector) for anisotropic affordance
     - Dimension-agnostic: infers state_dim from intent.shape
-    - Optional cross-attention for transformer-based architecture
+    - Cross-attention for transformer-based architecture
     """
-    def __init__(self, latent_dim, n_ports=4, n_knots=6, n_basis=8, interp_res=40,
-                 token_embed_dim=64, n_attention_heads=8, stepwise_knot_generation=False):
+
+    def __init__(self, latent_dim, n_ports=4, token_embed_dim=64, n_attention_heads=8):
         """
         Args:
             latent_dim: Dimension of latent situation space
             n_ports: Number of affordance ports to propose
-            n_knots: Number of knots per tube (max knots if stepwise=True)
-            n_basis: Number of basis functions for knot generation
-            interp_res: Resolution for spline interpolation
             token_embed_dim: Embedding dimension from transformer
             n_attention_heads: Number of attention heads
-            stepwise_knot_generation: If True, generate one knot at a time with stop decision
         """
         super().__init__()
+        self.latent_dim = latent_dim
         self.n_ports = n_ports
-        self.n_knots = n_knots
-        self.n_basis = n_basis
-        self.interp_res = interp_res
         self.token_embed_dim = token_embed_dim
-        self.stepwise_knot_generation = stepwise_knot_generation
-        
+
         # Cross-attention: Actor queries situation transformer keys
         self.cross_attention = nn.MultiheadAttention(
-            embed_dim=token_embed_dim,
-            num_heads=n_attention_heads,
-            batch_first=True
+            embed_dim=token_embed_dim, num_heads=n_attention_heads, batch_first=True
         )
-        
+
         # Intent projection: maps intent to query space (per-dimension)
         self.intent_proj = nn.Linear(1, token_embed_dim)
-        
+
         # Situation projection: maps latent situation to key/value space
         self.situation_proj = nn.Linear(latent_dim, token_embed_dim)
-        
+
         # Output projection: attended features + intent -> port outputs
         # Intent is included so model can learn to use it for port selection
-        # (but we don't explicitly bias - model learns the association)
         self.port_head = nn.Sequential(
             nn.Linear(token_embed_dim + 1, 256),  # +1 for intent norm
             nn.LayerNorm(256),
             nn.GELU(),
-            nn.Linear(256, 256)
+            nn.Linear(256, 256),
         )
-        
-        # Port output head: generates logits, basis weights, and sigmas
+
+        # Port output head: generates logits, next step, and sigmas
+        # Output: logits (1) + next_step (max_supported_dim) + sigmas (max_supported_dim)
         max_supported_dim = 12
-        self.port_output_head = nn.Linear(256, n_ports * (1 + n_basis + max_supported_dim))
-        
-        # Learnable intent bias: learns how much to bias knots toward goal
+        self.port_output_head = nn.Linear(
+            256, n_ports * (1 + max_supported_dim + max_supported_dim)
+        )
+
+        # Learnable intent bias: learns how much to bias next step toward goal
         # Takes intent distance and outputs a bias factor (0 = no bias, 1 = full bias)
         self.intent_bias_head = nn.Sequential(
             nn.Linear(1, 32),  # Intent distance -> hidden
             nn.LayerNorm(32),
             nn.GELU(),
             nn.Linear(32, 1),  # -> bias factor
-            nn.Sigmoid()  # Constrain to [0, 1]
+            nn.Sigmoid(),  # Constrain to [0, 1]
         )
-        
-        # Basis functions: define a set of basis functions for knot generation
-        # These represent the "Fibers" - geometric patterns the Actor can select from
-        # We initialize with geometric patterns (smooth curves) rather than pure noise
-        # Each basis function maps knot_index -> contribution to state_dim coordinates
-        # Will be sliced to inferred state_dim in forward()
-        basis_init = torch.zeros(n_basis, n_knots, max_supported_dim)
-        
-        # Initialize with smooth geometric patterns
-        for b_idx in range(n_basis):
-            # Create smooth patterns using sinusoidal and polynomial bases
-            t = torch.linspace(0, 1, n_knots)
-            
-            # Different patterns for different basis functions
-            if b_idx % 3 == 0:
-                # Linear patterns in different directions
-                dim = b_idx % max_supported_dim
-                basis_init[b_idx, :, dim] = t - 0.5  # Centered linear
-            elif b_idx % 3 == 1:
-                # Sinusoidal patterns
-                freq = (b_idx // 3) + 1
-                dim = b_idx % max_supported_dim
-                basis_init[b_idx, :, dim] = 0.3 * torch.sin(2 * np.pi * freq * t)
-            else:
-                # Polynomial patterns
-                dim = b_idx % max_supported_dim
-                basis_init[b_idx, :, dim] = 0.2 * (t - 0.5) ** 2
-        
-        # Add small random noise for diversity
-        basis_init = basis_init + torch.randn(n_basis, n_knots, max_supported_dim) * 0.05
-        
-        self.basis_functions = nn.Parameter(basis_init)
-        
-        # Knot existence mask generator (optional, for variable-length knots)
-        self.knot_existence_head = nn.Linear(256, n_ports * n_knots)
-        
-        # For stepwise generation: stop decision head (decides whether to continue after each knot)
-        if stepwise_knot_generation:
-            self.knot_stop_head = nn.Linear(256, n_ports)  # One stop decision per port
-        
-        # Learnable weights for intent-aligned port selection
-        # These weights control the trade-off between affordance (logits), intent alignment, and agency
-        self.intent_bias_weight = nn.Parameter(torch.tensor(2.0))
-        self.agency_bias_weight = nn.Parameter(torch.tensor(1.0))
-        
-    def _generate_basis_functions(self):
-        """
-        Generate basis functions for knot construction.
-        
-        Returns:
-            basis: (n_basis, n_knots, state_dim) tensor of basis function values
-        """
-        # Use learned basis functions
-        return self.basis_functions
-    
+
+        # Learnable weights for port selection
+        # These control how much intent alignment and agency influence port selection
+        self.intent_bias_weight = nn.Parameter(
+            torch.tensor(2.0)
+        )  # Weight for intent alignment in port selection
+        self.agency_bias_weight = nn.Parameter(
+            torch.tensor(1.0)
+        )  # Weight for agency score in port selection
+
+        # Universal Goal Matcher: learns to match current state to goal motifs
+        # Input: aggregated TKN properties (64) + goal embedding (latent_dim) + current situation (latent_dim)
+        # Output: match score (0-1)
+        self.goal_matcher = nn.Sequential(
+            nn.Linear(
+                64 + latent_dim + latent_dim, 256
+            ),  # TKN features + goal embedding + current situation
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.GELU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid(),  # Match score [0, 1]
+        )
+
+        # Universal Intent Generator: learns to generate navigation direction from goal motifs
+        # Input: goal motif + current situation + current TKN properties
+        # Output: intent vector (state_dim,)
+        max_supported_state_dim = 12
+        self.intent_generator = nn.Sequential(
+            nn.Linear(
+                latent_dim + latent_dim + 64, 256
+            ),  # goal_embedding + current_situation + tkn_features
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Linear(
+                256, max_supported_state_dim
+            ),  # Output intent (will be sliced to actual state_dim)
+        )
+
     def forward(self, latent_situation, intent, situation_sequence=None):
         """
-        Generate affordance tubes using basis function projection.
-        
+        Generate next step for each port with anisotropic sigma.
+
         Args:
-            latent_situation: (B, latent_dim) latent situation from InferenceEngine - projected and combined with attended features
+            latent_situation: (B, latent_dim) latent situation from InferenceEngine
             intent: (B, state_dim) intent/target direction tensor - INFERS state_dim from this!
-            previous_velocity: Optional (B, state_dim) or (state_dim,) tensor (kept for interface compatibility, not used)
             situation_sequence: (B, state_dim, token_embed_dim) sequence from transformer
                              Required for cross-attention - used to generate attended features
-            markov_lattice: Optional MarkovLattice for look-ahead queries
-            current_pos: Optional (state_dim,) current position for look-ahead queries
-        
+
         Returns:
             logits: (B, M) port selection logits
-            mu_t: (B, M, T, state_dim) interpolated tube trajectories
-            sigma_t: (B, M, T, state_dim) per-dimension precision (sigma vector)
-            knot_mask: (B, M, K) knot existence mask
-            basis_weights: (B, M, n_basis) basis function weights (for analysis)
+            mu_next: (B, M, state_dim) next step for each port
+            sigma_next: (B, M, state_dim) per-dimension precision (sigma vector)
         """
         B = latent_situation.size(0)
-        
+
         # INFER state_dim from intent shape
         state_dim = intent.shape[-1]
-        
+
         # Cross-attention: Actor queries situation transformer keys
         # Project intent to queries (one per dimension)
-        intent_queries = self.intent_proj(intent.unsqueeze(-1))  # (B, state_dim, token_embed_dim)
-        
+        intent_queries = self.intent_proj(
+            intent.unsqueeze(-1)
+        )  # (B, state_dim, token_embed_dim)
+
         # Cross-attend: queries attend to situation sequence
         if situation_sequence is None:
             raise ValueError("situation_sequence is required for Actor cross-attention")
-        
+
         # Debug: check shapes match
         if intent_queries.shape[1] != situation_sequence.shape[1]:
-            raise ValueError(f"Shape mismatch: intent_queries has {intent_queries.shape[1]} dims, "
-                           f"situation_sequence has {situation_sequence.shape[1]} dims")
-        
+            raise ValueError(
+                f"Shape mismatch: intent_queries has {intent_queries.shape[1]} dims, "
+                f"situation_sequence has {situation_sequence.shape[1]} dims"
+            )
+
         attended, attention_weights = self.cross_attention(
             query=intent_queries,  # (B, state_dim, token_embed_dim)
             key=situation_sequence,  # (B, state_dim, token_embed_dim)
-            value=situation_sequence  # (B, state_dim, token_embed_dim)
+            value=situation_sequence,  # (B, state_dim, token_embed_dim)
         )
-        
+
         # Aggregate attended features (mean or weighted by attention)
         attended_feat = attended.mean(dim=1)  # (B, token_embed_dim)
-        
+
         # Project latent situation to same space as attended features
         latent_proj = self.situation_proj(latent_situation)  # (B, token_embed_dim)
-        
+
         # Combine attended features with latent situation projection
         # Use addition to merge information from both sources
         combined_feat = attended_feat + latent_proj  # (B, token_embed_dim)
-        
-        # Include intent norm in port selection (model learns to use it, but not explicitly biased)
+
+        # Include intent norm in port selection
         intent_norm = torch.norm(intent, dim=-1, keepdim=True)  # (B, 1)
-        port_input = torch.cat([combined_feat, intent_norm], dim=-1)  # (B, token_embed_dim + 1)
-        
+        port_input = torch.cat(
+            [combined_feat, intent_norm], dim=-1
+        )  # (B, token_embed_dim + 1)
+
         # Project through port head
         situation = self.port_head(port_input)  # (B, 256)
-        
+
         # Generate port outputs
         raw_out = self.port_output_head(situation).view(B, self.n_ports, -1)
         logits = raw_out[:, :, 0]  # (B, M)
-        
-        # Extract basis weights and precision (sigma) vector
-        basis_weights = raw_out[:, :, 1:1+self.n_basis]  # (B, M, n_basis)
-        sigma_raw = raw_out[:, :, 1+self.n_basis:1+self.n_basis+state_dim]  # (B, M, state_dim) - slice to inferred dim
-        
-        # Normalize basis weights to prevent extreme values
-        # This ensures the Actor selects from the fiber space smoothly
-        basis_weights = torch.tanh(basis_weights)  # Constrain to [-1, 1]
-        
-        # Per-dimension precision: one sigma per dimension (anisotropic affordance tube)
-        # Use exp for stability (log-space precision)
-        # Each dimension gets its own precision, allowing hyperellipsoid affordance tubes
-        sigmas = torch.exp(sigma_raw) + 0.1  # (B, M, state_dim) - per-dimension precision
-        
-        # Generate knots: either all at once (default) or stepwise (one at a time with stop decisions)
-        if self.stepwise_knot_generation:
-            # Stepwise generation: generate one knot at a time, with stop decision after each
-            knots_list = []
-            knot_mask_list = []
-            
-            # Start with first knot (always generated)
-            # Use first knot's basis weights
-            basis_full = self._generate_basis_functions()  # (n_basis, n_knots, max_supported_dim)
-            basis_first = basis_full[:, 0:1, :state_dim]  # (n_basis, 1, state_dim) - first knot only
-            
-            # Generate first knot
-            knots_first = torch.einsum('bmn, nkd -> bmkd', basis_weights, basis_first)  # (B, M, 1, state_dim)
-            knots_list.append(knots_first.squeeze(2))  # (B, M, state_dim)
-            
-            # First knot always exists (mask = 1.0)
-            knot_mask_list.append(torch.ones(B, self.n_ports, 1, device=knots_first.device))
-            
-            # Generate remaining knots one at a time with stop decisions
-            last_knot = knots_first  # (B, M, 1, state_dim)
-            for k_idx in range(1, self.n_knots):
-                # Compute stop decision based on current situation and last knot
-                last_knot_flat = last_knot.squeeze(2)  # (B, M, state_dim)
-                # Average across ports for stop decision input (or use per-port)
-                stop_input = situation  # (B, 256) - use situation for stop decision
-                stop_logits = self.knot_stop_head(stop_input)  # (B, n_ports)
-                stop_probs = torch.sigmoid(stop_logits)  # (B, n_ports) - probability of stopping
-                
-                # Generate next knot only if not stopping (for each port independently)
-                # Use basis function for this knot index
-                basis_k = basis_full[:, k_idx:k_idx+1, :state_dim]  # (n_basis, 1, state_dim)
-                knots_k = torch.einsum('bmn, nkd -> bmkd', basis_weights, basis_k)  # (B, M, 1, state_dim)
-                
-                # Mask: knot exists if we didn't stop
-                knot_exists = (1.0 - stop_probs).unsqueeze(-1)  # (B, n_ports, 1)
-                knots_list.append(knots_k.squeeze(2))  # (B, M, state_dim)
-                knot_mask_list.append(knot_exists)
-                
-                # Update last_knot for next iteration (use weighted average if stopping)
-                last_knot = knots_k * knot_exists.unsqueeze(-1) + last_knot * (1.0 - knot_exists.unsqueeze(-1))
-            
-            # Concatenate all knots
-            knots = torch.stack(knots_list, dim=2)  # (B, M, K, state_dim)
-            knot_mask = torch.cat(knot_mask_list, dim=2)  # (B, M, K)
-            
-            # Apply intent bias to last generated knot (if any knots exist)
-            intent_distance = torch.norm(intent, dim=-1, keepdim=True)  # (B, 1)
-            intent_bias_factor = self.intent_bias_head(intent_distance)  # (B, 1)
-            intent_bias = intent.view(B, 1, state_dim)  # (B, 1, state_dim)
-            # Apply bias to last knot
-            knots_last = knots[:, :, -1:, :] + intent_bias.unsqueeze(2) * intent_bias_factor.unsqueeze(-1)
-            knots = torch.cat([knots[:, :, :-1, :], knots_last], dim=2)
-        else:
-            # Standard generation: all knots at once
-            knot_existence_logits = self.knot_existence_head(situation).view(B, self.n_ports, self.n_knots)
-            knot_mask = torch.sigmoid(knot_existence_logits)  # (B, M, K)
-            
-            # Generate knots from basis functions
-            basis_full = self._generate_basis_functions()  # (n_basis, n_knots, max_supported_dim)
-            basis = basis_full[:, :, :state_dim]  # (n_basis, n_knots, state_dim) - slice to inferred dim
-            
-            # Weighted combination: (B, M, n_basis) @ (n_basis, n_knots, state_dim)
-            knots = torch.einsum('bmn, nkd -> bmkd', basis_weights, basis)  # (B, M, n_knots, state_dim)
-            
-            # INTENT BIAS: Bias the last knot toward the goal
-            intent_distance = torch.norm(intent, dim=-1, keepdim=True)  # (B, 1)
-            intent_bias_factor = self.intent_bias_head(intent_distance)  # (B, 1)
-            intent_bias = intent.view(B, 1, state_dim)  # (B, 1, state_dim)
-            knots_last = knots[:, :, -1:, :] + intent_bias.unsqueeze(2) * intent_bias_factor.unsqueeze(-1)
-            knots = torch.cat([knots[:, :, :-1, :], knots_last], dim=2)
-        
-        # Note: No causal anchoring - environment teaches through binding failures
-        # - If tube doesn't start at current position → binding failure
-        # - Actor learns to start at origin naturally
-        
-        # Interpolate knots to dense trajectories
-        mu_dense_list = []
-        sigma_dense_list = []
-        
-        # Use knot_mask values directly as weights (no binary thresholding)
-        # This allows smooth learning of knot importance and variable knot counts
-        epsilon = 1e-3  # Small threshold for filtering out effectively zero-weight knots
-        
-        for b in range(B):
-            for m in range(self.n_ports):
-                port_knot_mask = knot_mask[b, m]  # (K,)
-                device = knots.device
-                
-                # Find knots with meaningful contribution (mask > epsilon)
-                # This filters out knots that are effectively unused while maintaining gradients
-                meaningful_mask = port_knot_mask > epsilon
-                meaningful_indices = torch.where(meaningful_mask)[0]
-                
-                # Handle edge cases: need at least 2 knots for interpolation
-                if len(meaningful_indices) == 0:
-                    # No meaningful knots - use first and last as fallback (but with low weight)
-                    # This creates a binding failure if tube doesn't start at origin or reach goal
-                    meaningful_indices = torch.tensor([0, self.n_knots - 1], device=device)
-                    # Set fallback mask values to small positive value to maintain gradients
-                    port_knot_mask = port_knot_mask.clone()
-                    port_knot_mask[0] = max(port_knot_mask[0].item(), epsilon)
-                    port_knot_mask[-1] = max(port_knot_mask[-1].item(), epsilon)
-                elif len(meaningful_indices) == 1:
-                    # Only one meaningful knot - duplicate it for interpolation
-                    # This will cause binding failure, teaching actor to use more knots
-                    meaningful_indices = torch.cat([meaningful_indices, meaningful_indices])
-                else:
-                    # Multiple meaningful knots - use as-is
-                    meaningful_indices = torch.unique(torch.sort(meaningful_indices)[0])
-                
-                # Get knots and their mask weights
-                active_knots = knots[b, m, meaningful_indices, :].unsqueeze(0)  # (1, K_active, state_dim)
-                active_mask_weights = port_knot_mask[meaningful_indices].unsqueeze(0)  # (1, K_active)
-                
-                # Per-dimension sigma interpolation for true anisotropic affordance tubes
-                # Each dimension maintains its own precision throughout the trajectory
-                port_sigma = sigmas[b, m]  # (state_dim,) - per-dimension precision
-                
-                # Weight knots by their mask values for interpolation
-                # Knots with higher mask values contribute more to the trajectory
-                # This allows smooth learning of knot importance
-                
-                # Normalize mask weights to ensure stable interpolation
-                # Normalize so that the sum of weights equals the number of knots used
-                # This preserves the scale of the trajectory
-                normalized_weights = active_mask_weights / (active_mask_weights.sum() + 1e-6) * len(meaningful_indices)
-                
-                # Weight knots by their normalized mask values
-                # This allows low-weight knots to contribute less to the trajectory
-                weighted_knots = active_knots * normalized_weights.unsqueeze(-1)  # (1, K_active, state_dim)
-                
-                # Create sigma tensor: (1, K_active, state_dim) - one sigma per dimension per knot
-                # Weight sigmas by mask values too (knots with low masks have less precision)
-                active_sigmas = port_sigma.unsqueeze(0).unsqueeze(0).expand(1, len(meaningful_indices), state_dim)  # (1, K_active, state_dim)
-                weighted_sigmas = active_sigmas * normalized_weights.unsqueeze(-1)  # (1, K_active, state_dim)
-                
-                # Interpolate trajectory (CausalSpline expects (B, K, 1) sigmas, so we'll handle per-dim separately)
-                # Use mean sigma for spline interpolation, then expand per-dimension
-                mean_sigma_per_knot = weighted_sigmas.mean(dim=-1, keepdim=True)  # (1, K_active, 1)
-                
-                # Interpolate using weighted knots
-                mu_dense_port, sigma_dense_mean = CausalSpline.interpolate(
-                    weighted_knots, mean_sigma_per_knot, resolution=self.interp_res
-                )
-                
-                # Expand sigma to per-dimension: maintain anisotropic precision
-                # Each dimension gets its own sigma value, creating a hyperellipsoid affordance tube
-                T_dense = mu_dense_port.shape[1]
-                sigma_expanded = port_sigma.unsqueeze(0).expand(T_dense, state_dim)  # (T, state_dim)
-                
-                # Optionally: interpolate sigma per dimension if we had per-knot sigmas
-                # For now, constant per-dimension sigma is simpler and works well
-                
-                mu_dense_list.append(mu_dense_port.squeeze(0))  # (T, state_dim)
-                sigma_dense_list.append(sigma_expanded)  # (T, state_dim)
-        
-        # Pad to same length
-        max_T = max(m.shape[0] for m in mu_dense_list)
-        device = mu_dense_list[0].device
-        
-        mu_t_padded = []
-        sigma_t_padded = []
-        for mu, sigma in zip(mu_dense_list, sigma_dense_list):
-            T = mu.shape[0]
-            if T < max_T:
-                pad_mu = mu[-1:].repeat(max_T - T, 1)
-                pad_sigma = sigma[-1:].repeat(max_T - T, 1)
-                mu_padded = torch.cat([mu, pad_mu], dim=0)
-                sigma_padded = torch.cat([sigma, pad_sigma], dim=0)
-            else:
-                mu_padded = mu
-                sigma_padded = sigma
-            mu_t_padded.append(mu_padded)
-            sigma_t_padded.append(sigma_padded)
-        
-        # Stack and reshape
-        mu_t = torch.stack(mu_t_padded).view(B, self.n_ports, max_T, state_dim)
-        sigma_t = torch.stack(sigma_t_padded).view(B, self.n_ports, max_T, state_dim)
-        
-        # Note: No explicit look-ahead obstacle detection via graph queries
-        # The transformer learns obstacle avoidance through pattern recognition from tokenized observations
-        # Structural properties (hub importance, connectedness) help transformer weight important tokens
-        
-        return logits, mu_t, sigma_t, knot_mask, basis_weights
 
-    def compute_binding_loss(self, proposed_tube, actual_path, sigma_t, current_pos, knot_mask=None, intent_target=None, obstacle_proximity=None):
+        # Extract next step and precision (sigma) vector
+        max_supported_dim = 12
+        mu_next_raw = raw_out[
+            :, :, 1 : 1 + state_dim
+        ]  # (B, M, state_dim) - slice to inferred dim
+        sigma_raw = raw_out[
+            :, :, 1 + max_supported_dim : 1 + max_supported_dim + state_dim
+        ]  # (B, M, state_dim)
+
+        # Apply intent bias to next step
+        # Bias the proposed steps toward the goal direction
+        intent_distance = torch.norm(intent, dim=-1, keepdim=True)  # (B, 1)
+        intent_bias_factor = self.intent_bias_head(
+            intent_distance
+        )  # (B, 1) - learnable bias strength [0, 1]
+
+        # Normalize intent to get direction, then scale by average step size for proportional bias
+        intent_normalized = intent / (
+            intent_distance + 1e-6
+        )  # (B, state_dim) - normalized direction
+        avg_step_size = torch.mean(
+            torch.norm(mu_next_raw, dim=-1, keepdim=True), dim=1, keepdim=True
+        )  # (B, 1, 1) - average step size across ports
+        intent_bias = (
+            intent_normalized.view(B, 1, state_dim) * avg_step_size
+        )  # (B, 1, state_dim) - scaled direction
+
+        # Apply bias: stronger bias when intent_bias_factor is high (closer to goal)
+        # Broadcast: (B, 1, state_dim) * (B, 1, 1) -> (B, M, state_dim) via broadcasting
+        mu_next = mu_next_raw + intent_bias * intent_bias_factor.unsqueeze(
+            -1
+        )  # (B, M, state_dim)
+
+        # Per-dimension precision: one sigma per dimension (anisotropic affordance)
+        # Use exp for stability (log-space precision)
+        sigma_next = (
+            torch.exp(sigma_raw) + 0.1
+        )  # (B, M, state_dim) - per-dimension precision
+
+        return logits, mu_next, sigma_next
+
+    def compute_agency_reward(self, mu_next, sigma_next, step_size_factor=0.1):
         """
-        Compute principled TAM loss based on binding failure and trajectory geometry.
-        
-        This is the core TAM loss: binding succeeds when actual_path stays within
-        the affordance cone (sigma-weighted tube), fails otherwise.
-        
-        Additionally computes efficiency rewards:
-        - Segment length reward: Longer segments = more forward-looking planning
-        - Goal efficiency reward: Distance reduction per knot (fewer knots to reach goal)
-        
-        All costs are dimension-agnostic and environment-agnostic.
-        
-        The binding failure mechanism naturally captures all contradictions:
-        - If actual_path is shorter than proposed_tube (e.g., energy depletion),
-          the deviation at the unexecuted portion creates a natural penalty
-        - The severity of the penalty scales with how much of the planned path
-          couldn't be executed, making it principled and environment-agnostic
-        
+        Compute agency reward based on cone precision and horizon commitment.
+
         Args:
-            proposed_tube: (T, state_dim) relative tube trajectory
-            actual_path: (T_actual, state_dim) actual path taken from world
-            sigma_t: (T, state_dim) per-dimension precision (cone width)
+            mu_next: (state_dim,) relative next step
+            sigma_next: (state_dim,) per-dimension precision (cone width)
+            step_size_factor: Weight for horizon commitment (default 0.1)
+
+        Returns:
+            agency_reward: Scalar tensor - positive reward for agency
+                - Cone precision reward: -mean(sigma^2) (narrower cones = higher reward)
+                - Horizon commitment reward: +step_size_factor * ||mu_next|| (longer steps = higher reward)
+        """
+        # Cone precision reward: narrower cones (lower sigma) = higher reward
+        cone_precision_reward = -torch.mean(sigma_next**2)
+
+        # Horizon commitment reward: longer steps = higher reward
+        step_size = torch.norm(mu_next)
+        horizon_reward = step_size_factor * step_size
+
+        # Combined agency reward
+        agency_reward = cone_precision_reward + horizon_reward
+
+        return agency_reward
+
+    def compute_binding_loss(
+        self, proposed_next, actual_next, sigma_next, current_pos, intent_target=None
+    ):
+        """
+        Compute principled TAM loss based on binding failure for single next step.
+
+        This is the core TAM loss: binding succeeds when actual_next stays within
+        the affordance cone (sigma-weighted), fails otherwise.
+
+        Args:
+            proposed_next: (state_dim,) relative next step
+            actual_next: (state_dim,) actual next position taken from world (in global coordinates)
+            sigma_next: (state_dim,) per-dimension precision (cone width)
             current_pos: (state_dim,) or (1, state_dim) current position
-            knot_mask: Optional (K,) tensor indicating active knots (for knot count)
-            intent_target: Optional (state_dim,) target intent/goal position (for efficiency reward)
-            
+            intent_target: Optional (state_dim,) target intent/goal position (kept for interface compatibility, not used)
+
         Returns:
             binding_loss: Scalar tensor - weighted deviation from affordance cone
-            agency_cost: Scalar tensor - cone width cost (sigma^2)
-            efficiency_reward: Scalar tensor - reward for longer segments and goal efficiency (negative = cost)
+            agency_reward: Scalar tensor - agency reward (precision + horizon commitment)
         """
         # Ensure current_pos is (state_dim,)
         if current_pos.dim() > 1:
             current_pos = current_pos.squeeze()
-        
-        device = proposed_tube.device
-        state_dim = proposed_tube.shape[-1]
-        
-        # Topological binding: verify actual_path stays within affordance cone
-        min_len = min(len(actual_path), len(proposed_tube))
-        if min_len == 0:
-            return (torch.tensor(0.0, device=device), 
-                   torch.tensor(0.0, device=device),
-                   torch.tensor(0.0, device=device))
-        
-        # Expected path: proposed tube in global coordinates
-        expected_p_slice = proposed_tube[:min_len] + current_pos  # (T, state_dim)
-        actual_p_slice = actual_path[:min_len]  # (T, state_dim)
-        
-        # Per-dimension deviation from expected path
-        deviation_per_dim = (actual_p_slice - expected_p_slice)  # (T, state_dim)
-        
+
+        device = proposed_next.device
+
+        # Expected next position: proposed step in global coordinates
+        expected_next = proposed_next + current_pos  # (state_dim,)
+
+        # Per-dimension deviation from expected next step
+        deviation_per_dim = actual_next - expected_next  # (state_dim,)
+
         # Weight by per-dimension precision (sigma)
-        # Higher sigma = wider cone = more tolerance = lower penalty for deviation
-        # Lower sigma = narrower cone = less tolerance = higher penalty for deviation
-        # This implements the affordance cone: deviation weighted by cone width
-        sigma_slice = sigma_t[:min_len]  # (T, state_dim)
-        weighted_deviation = (deviation_per_dim**2) / (sigma_slice + 1e-6)  # (T, state_dim)
-        
-        # Binding loss: average weighted deviation (binding failure measure)
-        # This naturally captures all contradictions, including energy depletion:
-        # - If actual_path is shorter than proposed_tube, the deviation at the end
-        #   creates a penalty proportional to the unexecuted portion
-        # - The penalty scales automatically with path length and deviation magnitude
-        # - No special cases needed - binding failure is the universal mechanism
-        binding_loss = torch.mean(weighted_deviation.sum(dim=-1))
-        
-        # If actual path is shorter than planned, add REDUCED penalty for unexecuted portion
-        # Scale down the penalty to avoid discouraging movement - only penalize if tube was clearly too ambitious
-        if len(actual_path) < len(proposed_tube):
-            # Calculate deviation for unexecuted portion
-            # Use the last actual position vs. remaining planned positions
-            remaining_planned = proposed_tube[len(actual_path):]  # (T_remaining, state_dim) - relative coords
-            # actual_path is already in global coordinates (starts with current_state.clone())
-            last_actual_global = actual_path[-1]  # (state_dim,) - already global, don't add current_pos!
-            
-            # Expected positions for unexecuted portion (convert relative to global)
-            expected_remaining_global = remaining_planned + current_pos  # (T_remaining, state_dim)
-            
-            # Deviation for unexecuted portion: distance from last actual to each expected
-            unexecuted_deviations = torch.norm(
-                expected_remaining_global - last_actual_global.unsqueeze(0), 
-                dim=-1
-            )  # (T_remaining,)
-            
-            # Weight by sigma for unexecuted portion
-            sigma_remaining = sigma_t[len(actual_path):].mean(dim=-1)  # (T_remaining,)
-            weighted_unexecuted = (unexecuted_deviations**2) / (sigma_remaining + 1e-6)  # (T_remaining,)
-            
-            # REDUCED penalty: Scale down by execution ratio to avoid harsh penalties
-            # If agent executed 50% of tube, only penalize 50% of unexecuted portion
-            execution_ratio = len(actual_path) / len(proposed_tube)  # [0, 1]
-            unexecuted_penalty = torch.mean(weighted_unexecuted) * (1.0 - execution_ratio) * 0.3  # Scale down by 0.3x
-            binding_loss = binding_loss + unexecuted_penalty
-        
-        # Agency cost: cone width (sigma) - narrower cones = higher agency
-        # This is dimension-agnostic: works for any state_dim
-        agency_cost = torch.mean(sigma_t**2)  # Mean across all dimensions and time
-        
-        # Efficiency rewards: encourage longer segments and goal efficiency
-        # Positive values = reward (will be subtracted from loss)
-        efficiency_reward = torch.tensor(0.0, device=device)
-        
-        # 1. Segment length reward: reward longer average segment length
-        # This encourages forward-looking planning (fewer knots, longer segments)
-        if len(proposed_tube) > 1:
-            # Calculate segment lengths (distances between consecutive knots)
-            tube_segments = proposed_tube[1:] - proposed_tube[:-1]  # (T-1, state_dim)
-            segment_lengths = torch.norm(tube_segments, dim=-1)  # (T-1,)
-            mean_segment_length = torch.mean(segment_lengths)
-            # Reward longer segments more strongly
-            segment_length_reward = mean_segment_length * 0.5  # Increased from 0.1
-            efficiency_reward = efficiency_reward + segment_length_reward
-        
-        # 2. Goal efficiency reward: reward distance reduction per knot
-        # Fewer knots to reach goal = more efficient
-        if intent_target is not None:
-            # Calculate initial distance to goal
-            if current_pos.dim() > 1:
-                current_pos_flat = current_pos.squeeze()
-            else:
-                current_pos_flat = current_pos
-            
-            initial_distance = torch.norm(intent_target - current_pos_flat)
-            
-            # Calculate final distance to goal (tube endpoint in global coordinates)
-            tube_endpoint_global = proposed_tube[-1] + current_pos_flat  # (state_dim,)
-            final_distance = torch.norm(intent_target - tube_endpoint_global)
-            
-            # Distance reduction (positive = moved toward goal)
-            distance_reduction = initial_distance - final_distance
-            
-            # Count meaningful knots (knots with mask > epsilon)
-            # This penalizes using many knots, even if they have low weights
-            epsilon = 1e-3
-            if knot_mask is not None:
-                # Count knots with meaningful contribution
-                num_meaningful_knots = torch.sum((knot_mask > epsilon).float())
-                # Also penalize low-weight knots (sum of mask values below threshold)
-                low_weight_penalty = torch.sum(torch.clamp(epsilon - knot_mask, min=0.0))
-            else:
-                # Use tube length as proxy for knot count
-                num_meaningful_knots = torch.tensor(float(len(proposed_tube)), device=device)
-                low_weight_penalty = torch.tensor(0.0, device=device)
-            
-            # Efficiency: distance reduction per meaningful knot (higher is better)
-            # Strongly reward paths that make progress with fewer knots
-            if initial_distance > 1e-6 and num_meaningful_knots > 0:
-                # Normalized efficiency: distance_reduction / (num_knots * initial_distance)
-                # This is scale-invariant and in [0, 1] range typically
-                # Strongly reward paths that make progress with fewer knots
-                goal_efficiency_reward = (distance_reduction / (num_meaningful_knots + 1e-6)) * 1.0  # Increased from 0.1
-                efficiency_reward = efficiency_reward + goal_efficiency_reward
-                
-                # Penalize paths that don't make much progress (low distance reduction)
-                # This discourages triangular paths that don't move toward goal
-                if distance_reduction < initial_distance * 0.1:  # Less than 10% progress
-                    progress_penalty = (initial_distance * 0.1 - distance_reduction) * 0.5
-                    efficiency_reward = efficiency_reward - progress_penalty
-                
-                # Penalize using many knots (even if they're low-weight)
-                # This encourages the model to use fewer, more meaningful knots
-                knot_count_penalty = (num_meaningful_knots - 2.0) * 0.2  # Penalize if more than 2 knots
-                if knot_count_penalty > 0:
-                    efficiency_reward = efficiency_reward - knot_count_penalty
-                
-                # Penalize low-weight knots (encourages model to commit to knots or not use them)
-                efficiency_reward = efficiency_reward - low_weight_penalty * 0.1
-            else:
-                # Goal already reached or very close, or no knots
-                pass
-        
-        return binding_loss, agency_cost, efficiency_reward
-    
-    def select_port(self, logits, mu_t, intent_target):
+        # Penalty is inversely proportional to sigma^2 (narrowness squared)
+        # Higher sigma = wider cone = more tolerance = exponentially lower penalty
+        # Lower sigma = narrower cone = less tolerance = exponentially higher penalty
+        # This ensures that narrow commitments (small sigma) result in much higher
+        # penalties for deviations, preventing agents from using narrow tubes to
+        # offset binding failures through agency reward
+        weighted_deviation = (deviation_per_dim**2) / (
+            sigma_next**2 + 1e-6
+        )  # (state_dim,) - penalty ∝ 1/sigma^2
+
+        # Binding loss: sum of weighted deviations (binding failure measure)
+        binding_loss = torch.sum(weighted_deviation)
+
+        # Agency reward: computed using dedicated method
+        agency_reward = self.compute_agency_reward(
+            proposed_next, sigma_next, step_size_factor=0.1
+        )
+
+        return binding_loss, agency_reward
+
+    def match_goal_motif(
+        self,
+        current_tkn_props: Dict[str, Any],
+        goal_motif: GoalMotif,
+        current_situation: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Select port based on closest tube endpoint to target, weighted by logits.
-        
+        Universal goal matcher: learns to detect goal-like states.
+
+        Works with any GoalMotif form (structural properties, embeddings, etc.).
+
+        Args:
+            current_tkn_props: Dict with current TKN structural properties
+                - Can include: hub_importance, in_degree, hub_count, etc.
+                - Or 'dimension_structural_props' list format
+            goal_motif: GoalMotif to match against
+            current_situation: Optional (latent_dim,) or (1, latent_dim) current situation embedding
+
+        Returns:
+            match_score: Scalar tensor [0, 1] indicating how well current state matches goal
+        """
+        device = next(self.parameters()).device
+
+        # Aggregate current TKN properties into feature vector
+        tkn_features = []
+
+        # Extract structural properties
+        if isinstance(current_tkn_props, dict):
+            # Handle dimension_structural_props format
+            dim_props = current_tkn_props.get("dimension_structural_props", [])
+            hub_importances = []
+            in_degrees = []
+            hub_counts = []
+
+            if dim_props:
+                for dim_prop_list in dim_props:
+                    if isinstance(dim_prop_list, list):
+                        for token_props in dim_prop_list:
+                            if isinstance(token_props, dict):
+                                hub_importances.append(
+                                    token_props.get("hub_importance", 0.0)
+                                )
+                                in_degrees.append(token_props.get("in_degree", 0.0))
+                                hub_counts.append(token_props.get("hub_count", 0.0))
+
+            # Compute aggregate statistics
+            avg_hub_importance = (
+                sum(hub_importances) / max(len(hub_importances), 1.0)
+                if hub_importances
+                else 0.0
+            )
+            avg_in_degree = (
+                sum(in_degrees) / max(len(in_degrees), 1.0) if in_degrees else 0.0
+            )
+            avg_hub_count = (
+                sum(hub_counts) / max(len(hub_counts), 1.0) if hub_counts else 0.0
+            )
+
+            tkn_features = [avg_hub_importance, avg_in_degree, avg_hub_count]
+        else:
+            # Fallback: use zeros
+            tkn_features = [0.0, 0.0, 0.0]
+
+        # Pad/truncate to fixed size (64 features)
+        while len(tkn_features) < 64:
+            tkn_features.append(0.0)
+        tkn_features = tkn_features[:64]
+        tkn_feat_tensor = torch.tensor(
+            tkn_features, dtype=torch.float32, device=device
+        ).unsqueeze(0)  # (1, 64)
+
+        # Encode goal motif to unified representation
+        if goal_motif.has_learned_embedding():
+            # Use learned embedding directly
+            goal_embedding = goal_motif.learned_embedding.to(device)
+            if goal_embedding.dim() == 1:
+                goal_embedding = goal_embedding.unsqueeze(
+                    0
+                )  # (1, latent_dim or token_embed_dim)
+            # Project to match input size if needed
+            if goal_embedding.shape[1] != self.latent_dim:
+                # Use a simple projection if dimensions don't match
+                if not hasattr(self, "_goal_embedding_proj"):
+                    self._goal_embedding_proj = nn.Linear(
+                        goal_embedding.shape[1], self.latent_dim
+                    ).to(device)
+                goal_embedding = self._goal_embedding_proj(goal_embedding)
+        elif goal_motif.has_structural_properties():
+            # Encode structural properties to embedding
+            struct_features = []
+            for prop_name in ["hub_importance", "in_degree", "hub_count"]:
+                if prop_name in goal_motif.structural_properties:
+                    min_val, max_val = goal_motif.structural_properties[prop_name]
+                    struct_features.extend(
+                        [min_val, max_val, (min_val + max_val) / 2.0]
+                    )
+                else:
+                    struct_features.extend([0.0, 1.0, 0.5])
+
+            # Pad to latent_dim
+            while len(struct_features) < self.latent_dim:
+                struct_features.append(0.0)
+            struct_features = struct_features[: self.latent_dim]
+            goal_embedding = torch.tensor(
+                struct_features, dtype=torch.float32, device=device
+            ).unsqueeze(0)  # (1, latent_dim)
+        else:
+            # Fallback: use zeros
+            goal_embedding = torch.zeros(1, self.latent_dim, device=device)
+
+        # Prepare current situation
+        if current_situation is not None:
+            if current_situation.dim() == 1:
+                current_situation = current_situation.unsqueeze(0)  # (1, latent_dim)
+        else:
+            current_situation = torch.zeros(1, self.latent_dim, device=device)
+
+        # Combine inputs: tkn_features + goal_embedding + current_situation
+        matcher_input = torch.cat(
+            [tkn_feat_tensor, goal_embedding, current_situation], dim=-1
+        )  # (1, 64 + latent_dim + latent_dim)
+
+        # Compute match score
+        match_score = self.goal_matcher(matcher_input)  # (1, 1)
+
+        return match_score.squeeze(-1).squeeze(-1)  # Scalar
+
+    def generate_intent_from_motif(
+        self,
+        goal_motif: GoalMotif,
+        current_situation: torch.Tensor,
+        current_tkn_props: Optional[Dict[str, Any]] = None,
+        state_dim: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Universal intent generator: learns to produce navigation direction from goal motifs.
+
+        Works with any GoalMotif form and generates intent vector guiding toward goal-like states.
+
+        Args:
+            goal_motif: GoalMotif (any form) to navigate toward
+            current_situation: (latent_dim,) or (1, latent_dim) current situation embedding
+            current_tkn_props: Optional dict with current TKN properties
+            state_dim: Optional state dimension (if None, inferred from goal_motif or defaults)
+
+        Returns:
+            intent: (state_dim,) intent vector guiding toward goal pattern
+        """
+        device = next(self.parameters()).device
+
+        # Ensure current_situation has batch dimension
+        if current_situation.dim() == 1:
+            current_situation = current_situation.unsqueeze(0)  # (1, latent_dim)
+
+        # Infer state_dim if not provided
+        if state_dim is None:
+            if goal_motif.position_hint is not None:
+                state_dim = goal_motif.position_hint.shape[0]
+            else:
+                state_dim = 2  # Default fallback
+
+        # Encode goal motif to unified representation
+        if goal_motif.has_learned_embedding():
+            goal_embedding = goal_motif.learned_embedding.to(device)
+            if goal_embedding.dim() == 1:
+                goal_embedding = goal_embedding.unsqueeze(
+                    0
+                )  # (1, latent_dim or token_embed_dim)
+            # Project to latent_dim if needed
+            if goal_embedding.shape[1] != self.latent_dim:
+                if not hasattr(self, "_goal_embedding_proj_intent"):
+                    self._goal_embedding_proj_intent = nn.Linear(
+                        goal_embedding.shape[1], self.latent_dim
+                    ).to(device)
+                goal_embedding = self._goal_embedding_proj_intent(goal_embedding)
+        elif goal_motif.has_structural_properties():
+            # Encode structural properties to embedding
+            struct_features = []
+            for prop_name in ["hub_importance", "in_degree", "hub_count"]:
+                if prop_name in goal_motif.structural_properties:
+                    min_val, max_val = goal_motif.structural_properties[prop_name]
+                    struct_features.extend(
+                        [min_val, max_val, (min_val + max_val) / 2.0]
+                    )
+                else:
+                    struct_features.extend([0.0, 1.0, 0.5])
+
+            # Pad to latent_dim
+            while len(struct_features) < self.latent_dim:
+                struct_features.append(0.0)
+            struct_features = struct_features[: self.latent_dim]
+            goal_embedding = torch.tensor(
+                struct_features, dtype=torch.float32, device=device
+            ).unsqueeze(0)  # (1, latent_dim)
+        else:
+            # Fallback: use zeros
+            goal_embedding = torch.zeros(1, self.latent_dim, device=device)
+
+        # Aggregate current TKN properties
+        tkn_features = []
+        if current_tkn_props is not None and isinstance(current_tkn_props, dict):
+            dim_props = current_tkn_props.get("dimension_structural_props", [])
+            hub_importances = []
+            in_degrees = []
+            hub_counts = []
+
+            if dim_props:
+                for dim_prop_list in dim_props:
+                    if isinstance(dim_prop_list, list):
+                        for token_props in dim_prop_list:
+                            if isinstance(token_props, dict):
+                                hub_importances.append(
+                                    token_props.get("hub_importance", 0.0)
+                                )
+                                in_degrees.append(token_props.get("in_degree", 0.0))
+                                hub_counts.append(token_props.get("hub_count", 0.0))
+
+            avg_hub_importance = (
+                sum(hub_importances) / max(len(hub_importances), 1.0)
+                if hub_importances
+                else 0.0
+            )
+            avg_in_degree = (
+                sum(in_degrees) / max(len(in_degrees), 1.0) if in_degrees else 0.0
+            )
+            avg_hub_count = (
+                sum(hub_counts) / max(len(hub_counts), 1.0) if hub_counts else 0.0
+            )
+
+            tkn_features = [avg_hub_importance, avg_in_degree, avg_hub_count]
+        else:
+            tkn_features = [0.0, 0.0, 0.0]
+
+        # Pad to 64 features
+        while len(tkn_features) < 64:
+            tkn_features.append(0.0)
+        tkn_features = tkn_features[:64]
+        tkn_feat_tensor = torch.tensor(
+            tkn_features, dtype=torch.float32, device=device
+        ).unsqueeze(0)  # (1, 64)
+
+        # Combine inputs: goal_embedding + current_situation + tkn_features
+        intent_input = torch.cat(
+            [goal_embedding, current_situation, tkn_feat_tensor], dim=-1
+        )  # (1, latent_dim + latent_dim + 64)
+
+        # Generate intent
+        intent_raw = self.intent_generator(intent_input)  # (1, max_supported_state_dim)
+
+        # Slice to actual state_dim
+        intent = intent_raw[:, :state_dim]  # (1, state_dim)
+
+        return intent.squeeze(0)  # (state_dim,)
+
+    def select_port(self, logits, mu_next, intent_target):
+        """
+        Select port based on closest next step to target, weighted by logits.
+
         Args:
             logits: (B, M) port logits
-            mu_t: (B, M, T, state_dim) tube trajectories
+            mu_next: (B, M, state_dim) next step for each port
             intent_target: (B, state_dim) or (state_dim,) target intent vector
-            
+
         Returns:
             selected_indices: (B,) indices of selected ports
         """
-        end_points = mu_t[:, :, -1, :]  # (B, M, state_dim)
         if intent_target.dim() == 1:
             intent_target = intent_target.unsqueeze(0)  # (1, state_dim)
-        dist = torch.norm(end_points - intent_target.unsqueeze(1), dim=-1)  # (B, M)
+        dist = torch.norm(mu_next - intent_target.unsqueeze(1), dim=-1)  # (B, M)
         score = F.log_softmax(logits, dim=-1) - dist
         return torch.argmax(score, dim=-1)

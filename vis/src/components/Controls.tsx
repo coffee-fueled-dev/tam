@@ -44,7 +44,7 @@ export function Controls({
         <Button onClick={onPlayPause} variant="default" size="default">
           {isPlaying ? "Pause" : "Play"}
         </Button>
-        
+
         <div className="flex items-center gap-2">
           <span className="text-sm text-muted-foreground whitespace-nowrap">Speed:</span>
           <Select

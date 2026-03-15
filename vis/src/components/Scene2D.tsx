@@ -67,6 +67,36 @@ export function Scene2D({
     const toScreenX = (x: number) => x * scale + offsetX;
     const toScreenY = (y: number) => y * scale + offsetY;
 
+    // Helper function to draw ellipse (for anisotropic affordance cones)
+    const drawEllipse = (
+      ctx: CanvasRenderingContext2D,
+      centerX: number,
+      centerY: number,
+      radiusX: number,
+      radiusY: number,
+      fillStyle: string,
+      strokeStyle: string,
+      fillAlpha: number,
+      strokeAlpha: number
+    ) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+
+      // Fill
+      ctx.fillStyle = fillStyle;
+      ctx.globalAlpha = fillAlpha;
+      ctx.fill();
+
+      // Stroke
+      ctx.strokeStyle = strokeStyle;
+      ctx.globalAlpha = strokeAlpha;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.restore();
+    };
+
     const render = () => {
       // Clear canvas
       ctx.fillStyle = "#f5f5f5";
@@ -106,7 +136,7 @@ export function Scene2D({
 
       // Render history: show last N moves
       const historyStart = Math.max(0, currentFrameIndex - maxHistory + 1);
-      
+
       // Track which moves we've rendered tubes for (render once per move)
       const renderedMoves = new Set<number>();
 
@@ -117,72 +147,69 @@ export function Scene2D({
         const isCurrent = i === currentFrameIndex;
         const opacity = isCurrent ? 0.85 : 0.5;
         const moveNum = histFrame.episode;
-        
-        // Render planned trajectory (mu_t) once per move
-        // ENFORCE CAUSALITY: Skip k_0 (index 0) to match environment behavior
-        // The environment starts from current_state and moves to k_1, ignoring k_0
+
+        // Render planned next step (mu_t) once per move
+        // For single-step generation, mu_t is (1, state_dim) - single next step
         // mu_t is relative to move_start_pos, so add move_start_pos to convert to absolute
         if (histFrame.mu_t && Array.isArray(histFrame.mu_t) && histFrame.mu_t.length > 0 && !renderedMoves.has(moveNum)) {
           renderedMoves.add(moveNum);
-          
+
           // Get move start position (fallback to current_pos if not available)
           const moveStartPos = histFrame.move_start_pos || histFrame.current_pos || [0, 0];
-          
-          // Skip k_0 (index 0) - start from k_1 (index 1) to match environment
-          // The actual trajectory starts at current_state and moves to k_1, not k_0
-          const tubePoints = histFrame.mu_t.length > 1 ? histFrame.mu_t.slice(1) : [];
-          
-          if (tubePoints.length > 0) {
+
+          // For single-step generation, mu_t has one point (the next step)
+          const nextStep = histFrame.mu_t[0];
+          if (nextStep && Array.isArray(nextStep)) {
+            // Convert relative next step to absolute
+            const nextStepAbs = [
+              (nextStep[0] ?? 0) + (moveStartPos[0] ?? 0),
+              (nextStep[1] ?? 0) + (moveStartPos[1] ?? 0)
+            ];
+
+            // Draw line from start to next step
             ctx.strokeStyle = COLORS.trajectory;
             ctx.lineWidth = 2;
             ctx.globalAlpha = opacity;
             ctx.beginPath();
-            
-            // Start from move_start_pos (current_state) and draw to k_1, k_2, ...
-            // First point: move_start_pos (where actual trajectory starts)
             ctx.moveTo(toScreenX(moveStartPos[0] ?? 0), toScreenY(moveStartPos[1] ?? 0));
-            
-            // Then draw to k_1, k_2, ... (skipping k_0)
-            tubePoints.forEach((pt) => {
-              // Convert relative mu_t to absolute by adding move_start_pos
-              const x = (pt[0] ?? 0) + (moveStartPos[0] ?? 0);
-              const y = (pt[1] ?? 0) + (moveStartPos[1] ?? 0);
-              ctx.lineTo(toScreenX(x), toScreenY(y));
-            });
+            ctx.lineTo(toScreenX(nextStepAbs[0] ?? 0), toScreenY(nextStepAbs[1] ?? 0));
             ctx.stroke();
 
-            // Draw capsule around tube (simplified as circles along path)
-            // Skip k_0's sigma, start from k_1's sigma (index 1)
-            if (histFrame.sigma_t && Array.isArray(histFrame.sigma_t) && histFrame.sigma_t.length > 1) {
-              ctx.fillStyle = COLORS.trajectory;
-              ctx.globalAlpha = isCurrent ? 0.25 : 0.15;
-              
-              // Draw circle at move_start_pos (current_state) with k_1's sigma
-              const firstSigma = Array.isArray(histFrame.sigma_t[1])
-                ? Math.max(...histFrame.sigma_t[1])
-                : histFrame.sigma_t[1] ?? 0.1;
-              const firstRadius = Math.max(firstSigma * scale, 2);
-              ctx.beginPath();
-              ctx.arc(toScreenX(moveStartPos[0] ?? 0), toScreenY(moveStartPos[1] ?? 0), firstRadius, 0, Math.PI * 2);
-              ctx.fill();
-              
-              // Draw circles for k_1, k_2, ... (skipping k_0)
-              tubePoints.forEach((pt, idx) => {
-                const sigmaIdx = idx + 1; // +1 because we skipped k_0
-                if (sigmaIdx < histFrame.sigma_t.length) {
-                  // Convert relative mu_t to absolute by adding move_start_pos
-                  const x = (pt[0] ?? 0) + (moveStartPos[0] ?? 0);
-                  const y = (pt[1] ?? 0) + (moveStartPos[1] ?? 0);
-                  const sigma = Array.isArray(histFrame.sigma_t[sigmaIdx])
-                    ? Math.max(...histFrame.sigma_t[sigmaIdx])
-                    : histFrame.sigma_t[sigmaIdx] ?? 0.1;
-                  const radius = Math.max(sigma * scale, 2);
-                  ctx.beginPath();
-                  ctx.arc(toScreenX(x), toScreenY(y), radius, 0, Math.PI * 2);
-                  ctx.fill();
-                }
-              });
-              ctx.globalAlpha = 1.0;
+            // Draw anisotropic affordance cone as ellipse at next step
+            // sigma_t is (1, state_dim) - per-dimension precision [sigma_x, sigma_y]
+            if (histFrame.sigma_t && Array.isArray(histFrame.sigma_t) && histFrame.sigma_t.length > 0) {
+              const sigma = histFrame.sigma_t[0];
+
+              // Extract per-dimension sigma values for anisotropic affordance
+              let sigmaX = 0.1;
+              let sigmaY = 0.1;
+
+              if (Array.isArray(sigma)) {
+                // sigma is [sigma_x, sigma_y, ...] - anisotropic per-dimension precision
+                sigmaX = sigma[0] ?? 0.1;
+                sigmaY = sigma[1] ?? 0.1;
+              } else if (typeof sigma === 'number') {
+                // Fallback: isotropic if single value (shouldn't happen with anisotropic Actor)
+                sigmaX = sigmaY = sigma;
+              }
+
+              // Draw ellipse at next step position (projected affordance cone)
+              const centerX = toScreenX(nextStepAbs[0] ?? 0);
+              const centerY = toScreenY(nextStepAbs[1] ?? 0);
+              const radiusX = Math.max(sigmaX * scale, 2);
+              const radiusY = Math.max(sigmaY * scale, 2);
+
+              drawEllipse(
+                ctx,
+                centerX,
+                centerY,
+                radiusX,
+                radiusY,
+                COLORS.trajectory,
+                COLORS.trajectory,
+                isCurrent ? 0.25 : 0.15,
+                isCurrent ? 0.4 : 0.25
+              );
             }
           }
         }
@@ -284,7 +311,7 @@ export function Scene2D({
   return (
     <canvas
       ref={canvasRef}
-      className="w-full h-full absolute top-0 left-0 z-[1]"
+      className="w-full h-full"
       style={{ pointerEvents: "auto" }}
     />
   );
