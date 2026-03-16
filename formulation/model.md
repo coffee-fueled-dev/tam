@@ -11,6 +11,10 @@ The core cycle:
 
 Ports define affordance cones: trajectories $\mathsf{A}$ is willing to accept for a given mode of interaction. Binding succeeds when the outcome lands in the cone; it fails otherwise.
 
+This document gives the abstract formulation. For the practical architectural
+reading of TAM as an atlas over latent trajectory space, see
+`formulation/architecture.md`.
+
 ---
 
 ### Actor $\mathsf{A}$
@@ -64,6 +68,10 @@ $$
 \mathsf{Infer}_p : \mathcal{X} \times \mathcal{C}^* \to \mathcal{T}(\mathcal{X})
 $$
 
+Architecturally, it is also useful to treat `Infer` as the world-to-TAM bridge:
+the mapping that turns world-provided context into a latent situation, a query
+into the atlas, and a set of currently legal ports.
+
 As well as an affordance predicate on trajectories:
 
 $$
@@ -110,6 +118,9 @@ The index $n$ marks the step in the causal chain. Two situations $s_n$ and $s_m$
 In each situation $s_n$, there is a prior context $\vec{c}^{\,\text{prior}}_n \in \mathcal{C}^*$
 which is some subsequence of all context received up to that point.
 
+In the atlas reading, a situation is the base point from which local trajectory
+charts are retrieved.
+
 Each situation requires binding an afforded port, and each binding produces the next situation. A port is afforded in $s_n$ when its affordance cone is non-empty:
 
 $$
@@ -117,6 +128,10 @@ $$
 =
 \{ p \in \mathcal{P} \mid \Phi_p(x_n, \vec{c}^{\,\text{prior}}_n) \neq \emptyset \}
 $$
+
+In a practical agent architecture, this means the agent should not select from
+all conceivable ports. It should select only from the ports surfaced as legal by
+`Infer` in the current situation.
 
 ---
 
@@ -153,3 +168,10 @@ Binding fails when the inferred trajectory exits the cone:
 $$
 \hat{\tau}_n \notin \Phi_{p_n}(x_n, \vec{c}^{\,\text{post}}_n)
 $$
+
+In the architectural reading, binding must be causally relevant:
+
+- the agent commits to a port before acting
+- that choice shapes what the agent does next
+- the world response is evaluated against the committed port rather than against
+  a post-hoc reinterpretation
