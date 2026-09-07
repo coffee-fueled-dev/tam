@@ -1,0 +1,83 @@
+{
+  "name": "stage1e_commitment_ledger",
+  "purpose": "forecast_auditing_and_drift_detection",
+  "claims": [
+    "saved_cones_are_honest_pre_action_records",
+    "out_of_sample_coverage_with_useful_sharpness",
+    "binding_failures_identify_out_of_cone_outcomes",
+    "hash_chained_ledgers_support_replayable_audits"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "explanation_quality",
+    "durable_memory",
+    "grounding",
+    "tam_superiority"
+  ],
+  "ports": ["a", "b"],
+  "outcomes": [-1, 0, 1],
+  "commitment_mass": 0.9,
+  "smoothing_alpha": 0.5,
+  "window_size": 64,
+  "burn_in": 200,
+  "seeds": {"all": 100, "calibration": [0, 49], "evaluation": [50, 99]},
+  "scenarios": {
+    "stationary_A": {"length": 1500, "schedule": [["A", 1500]]},
+    "hidden_ABA": {"length": 1500, "schedule": [["A", 500], ["B", 500], ["A", 500]]},
+    "hidden_ADA": {"length": 1500, "schedule": [["A", 500], ["D", 500], ["A", 500]]}
+  },
+  "regimes": {
+    "A": {
+      "a": {"1": 0.8, "0": 0.15, "-1": 0.05},
+      "b": {"-1": 0.8, "0": 0.15, "1": 0.05}
+    },
+    "B": {
+      "a": {"-1": 0.8, "0": 0.15, "1": 0.05},
+      "b": {"1": 0.8, "0": 0.15, "-1": 0.05}
+    },
+    "D": {
+      "a": {"1": 0.55, "0": 0.4, "-1": 0.05},
+      "b": {"-1": 0.55, "0": 0.4, "1": 0.05}
+    }
+  },
+  "variants": ["window64", "cumulative", "frozen200", "full_domain"],
+  "detectors": {
+    "cone_miss": {"window": 10, "grid": [3, 4, 5, 6, 7, 8]},
+    "nll": {"window": 10, "grid": [8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]},
+    "raw_two_window": {"window": 20, "grid": [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5]}
+  },
+  "detector_false_alarm_budget_per_1000": 0.1,
+  "refractory_period": 20,
+  "evidence": {
+    "stationary": {
+      "coverage_min": 0.9,
+      "mean_cardinality_max": 2.1,
+      "set_calibration_gap_max": 0.03,
+      "ece_max": 0.04,
+      "brier_regret_max": 0.03,
+      "full_domain_cardinality": 3
+    },
+    "drift": {
+      "reversal_detection_within": 20,
+      "reversal_detection_rate_min": 0.95,
+      "false_alarms_per_1000_max": 0.1,
+      "first10_failure_lift_min": 0.5,
+      "inside_cone_detection_within": 100,
+      "cone_miss_inside_detection_max": 0.2,
+      "conventional_inside_detection_min": 0.9
+    },
+    "recovery": {
+      "stable_uses_per_port": 20,
+      "median_delay_max": 160,
+      "p90_delay_max": 220,
+      "a_return_extra_median_max": 40,
+      "final200_coverage_diff_max": 0.03,
+      "final200_brier_diff_max": 0.03,
+      "final200_cardinality_diff_max": 0.15
+    },
+    "accountability": {
+      "hindsight_disagreement_min": 0.3
+    }
+  }
+}
