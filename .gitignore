@@ -1,6 +1,4 @@
-.llm-context
 artifacts
-todo
 
 # dependencies (bun install)
 node_modules
