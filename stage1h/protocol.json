@@ -1,0 +1,77 @@
+{
+  "name": "stage1h_situational_cone_narrowing",
+  "purpose": "rolling_window_cone_expansion_and_contraction",
+  "claims": [
+    "recent_evidence_cones_can_widen_then_narrow",
+    "minimum_volume_at_matched_future_coverage",
+    "cumulative_cones_remain_wide_after_return_to_tight",
+    "frozen_cones_fail_during_expansion"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "multimodal_contraction",
+    "learned_continuous_situations",
+    "optimal_window_selection",
+    "port_proliferation",
+    "tam_superiority"
+  ],
+  "circle_degrees": 360,
+  "angle_resolution_degrees": 1,
+  "situation_label": "site",
+  "seeds": 100,
+  "burn_in": 64,
+  "rolling_coverage_window": 20,
+  "primary_window": 64,
+  "sensitivity_windows": [32, 128],
+  "learners": ["window64", "cumulative", "frozen_a1", "full_circle"],
+  "supports": {
+    "A": {"center": 0, "half_width": 10, "weight": 1.0},
+    "B": {"center": 0, "half_width": 45, "weight": 1.0}
+  },
+  "scenarios": {
+    "stationary_A": {
+      "length": 900,
+      "schedule": [["A", 900]]
+    },
+    "stationary_B": {
+      "length": 900,
+      "schedule": [["B", 900]]
+    },
+    "hidden_ABA": {
+      "length": 900,
+      "schedule": [["A", 300], ["B", 300], ["A", 300]],
+      "phase_names": ["A1", "B", "A2"]
+    }
+  },
+  "evidence": {
+    "post_contradiction_containment_min": 1.0,
+    "stationary": {
+      "coverage_min": 0.95,
+      "exact_coverage_min": 0.95,
+      "excess_max": 0.0
+    },
+    "expansion": {
+      "rolling_exact_coverage_min": 0.95,
+      "p90_delay_max": 100
+    },
+    "contraction": {
+      "rolling_exact_coverage_min": 0.95,
+      "measure_max": 25.0,
+      "p90_delay_max": 80
+    },
+    "final_a2": {
+      "empirical_coverage_min": 0.95,
+      "mean_measure_max": 22.0,
+      "last_n": 100
+    },
+    "cumulative_limitation": {
+      "final_a2_measure_min": 85.0,
+      "final_a2_excess_min": 60.0
+    },
+    "frozen_tradeoff": {
+      "b_exact_coverage_max": 0.35,
+      "a2_exact_coverage_min": 0.95
+    }
+  }
+}

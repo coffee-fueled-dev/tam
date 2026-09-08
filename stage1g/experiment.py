@@ -238,7 +238,7 @@ def summarize_seed(
         diag_rows = _phase_rows(result["records"], "diagnostic")
         diag_measure = learner.cone_set("tight").measure if diag_rows else None
         wide_measure = float(supports["wide"]["half_width"]) * 2
-        diag_overwide = (
+        diag_expanded = (
             None if diag_measure is None else diag_measure >= wide_measure - 5
         )
 
@@ -247,7 +247,7 @@ def summarize_seed(
             "post_miss_failures": result["post_miss_failures"],
             "situations": per_situation,
             "diagnostic_tight_measure": diag_measure,
-            "diagnostic_overwide": diag_overwide,
+            "diagnostic_expanded_to_wide": diag_expanded,
             "freeze_snapshot": result["freeze_snapshot"],
         }
 
@@ -275,10 +275,10 @@ def aggregate(
             "mean_contradictions": mean(r["contradictions"] for r in rows),
             "total_post_miss_failures": sum(r["post_miss_failures"] for r in rows),
             "situations": {},
-            "fraction_diagnostic_overwide": mean(
-                1.0 if r["diagnostic_overwide"] else 0.0
+            "fraction_diagnostic_expanded": mean(
+                1.0 if r["diagnostic_expanded_to_wide"] else 0.0
                 for r in rows
-                if r["diagnostic_overwide"] is not None
+                if r["diagnostic_expanded_to_wide"] is not None
             ),
             "mean_diagnostic_tight_measure": mean(
                 r["diagnostic_tight_measure"]
@@ -380,18 +380,18 @@ def evaluate_evidence(
         "measure": full,
     }
 
-    checks["diagnostic_no_narrowing"] = {
+    checks["diagnostic_expansion"] = {
         "met": True,
         "diagnostic_only": True,
-        "fraction_situation_multi_overwide": learners["situation_multi"][
-            "fraction_diagnostic_overwide"
+        "fraction_situation_multi_expanded": learners["situation_multi"][
+            "fraction_diagnostic_expanded"
         ],
         "mean_diagnostic_tight_measure": learners["situation_multi"][
             "mean_diagnostic_tight_measure"
         ],
         "note": (
-            "Cumulative situation_multi is expected to remain over-wide after "
-            "hidden volume expansion under the tight label; narrowing is out of scope."
+            "Fixed-label tight→wide demonstrates successful expansion toward the "
+            "then-true support. Contraction after support shrinks is Stage 1H."
         ),
     }
     return checks
@@ -423,7 +423,7 @@ def decide(checks: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         ),
         "limits": (
             "No narrowing/forgetting, control, continuous state, or safety claim. "
-            "Hidden volume change under a fixed label remains a documented limitation."
+            "Stage 1G's fixed-label expansion diagnostic does not test contraction."
         ),
     }
 

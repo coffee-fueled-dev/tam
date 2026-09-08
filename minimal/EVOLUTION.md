@@ -114,9 +114,12 @@ containment but can claim arbitrarily large union measure. Wide cones contain
 reality while predicting nothing specific. Situational cone volume is therefore
 required so commitments stay specific: the same port must claim different
 geometric measures in different observable situations. Categorical Stage 1B
-transfer does not by itself establish geometric volume conditioning. Narrowing
-and forgetting remain separate claims if cumulative situational stores stay
-over-wide after within-context support shrinks.
+transfer does not by itself establish geometric volume conditioning.
+
+Stage 1G's fixed-label `tight → wide` diagnostic shows successful expansion, not
+failure to narrow. Contraction after support shrinks under the same observable
+situation (`tight → wide → tight`) is a separate claim: adaptive specificity at
+matched future coverage, not permanent historical containment.
 
 ## Stage 2 — Neural representations and generalization
 

@@ -27,7 +27,8 @@ Observable label `s ∈ {tight, wide, shifted}`:
 
 Train: interleaved situations. Eval: held-out per situation with learning frozen.
 Diagnostic (not a pass gate): `tight` later emits `wide` support without
-relabeling, to document no-narrowing over-width.
+relabeling. This demonstrates successful **expansion** under a fixed label; it
+does **not** test contraction. Narrowing after support shrinks is Stage 1H.
 
 ## Evidence targets
 
