@@ -139,6 +139,13 @@ modes stay two cones, clearly overlapping or wide-unimodal supports merge to one
 and edge gaps near `split_gap` are an unstable boundary. Characterizing that
 regime is required before adaptive split or continuous situation models.
 
+Stationary separation regimes still hide drift: when an observable continuous
+situation moves mode centers so the edge gap sweeps through separate → boundary
+→ overlap, a single pooled sticky store mixes incompatible geometries. Situation-
+binned hysteresis (keyed by a coarse observable feature of the continuous
+situation) is the next fixed mechanism before adaptive `split_gap` or Stage 2
+neural predictors.
+
 ## Stage 2 — Neural representations and generalization
 
 1. **Demand:** Continuous inputs, nonlinear contextual effects, or sparse

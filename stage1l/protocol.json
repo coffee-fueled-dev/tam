@@ -1,0 +1,89 @@
+{
+  "name": "stage1l_continuous_edge_gap_drift",
+  "purpose": "expose_pooled_hysteresis_failure_under_continuous_edge_gap_drift",
+  "claims": [
+    "binned_hysteresis_keeps_tight_cones_in_separate_and_overlap_plateaus",
+    "pooled_hysteresis_overclaims_after_separate_to_overlap_drift",
+    "continuous_sweep_raises_pooled_excess_relative_to_binned",
+    "boundary_band_remains_a_known_limitation"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "adaptive_split_gap",
+    "learned_continuous_embeddings",
+    "port_proliferation",
+    "tam_superiority"
+  ],
+  "circle_degrees": 360,
+  "angle_resolution_degrees": 1,
+  "half_width": 10,
+  "center_a": 0,
+  "center_b_min": 25,
+  "center_b_max": 90,
+  "primary_split_gap": 30,
+  "primary_window": 48,
+  "grace_T": 64,
+  "seeds": 80,
+  "learners": [
+    "binned_hysteresis",
+    "pooled_hysteresis",
+    "pooled_single",
+    "full_circle"
+  ],
+  "regime_bins": {
+    "separate": {"edge_gap_min": 50},
+    "boundary": {"edge_gap_min": 15, "edge_gap_max": 50},
+    "overlap": {"edge_gap_max": 15}
+  },
+  "scenarios": {
+    "plateau_tour": {
+      "phases": [
+        {"name": "separate", "edge_gap": 70, "length": 320},
+        {"name": "boundary", "edge_gap": 30, "length": 320},
+        {"name": "overlap", "edge_gap": 5, "length": 320}
+      ],
+      "eval_tail": 200,
+      "overlap_transition": 80
+    },
+    "slow_sweep": {
+      "length": 900,
+      "edge_gap_start": 70,
+      "edge_gap_end": 5,
+      "burn_ends": 80
+    }
+  },
+  "evidence": {
+    "post_contradiction_containment_min": 1.0,
+    "plateau_tour": {
+      "separate": {
+        "binned_coverage_min": 0.95,
+        "binned_count_min": 1.8,
+        "binned_count_max": 2.2,
+        "binned_measure_max": 45.0,
+        "binned_excess_max": 5.0
+      },
+      "overlap": {
+        "binned_coverage_min": 0.95,
+        "binned_count_max": 1.2,
+        "binned_measure_max": 55.0,
+        "binned_excess_max": 5.0,
+        "pooled_transition_excess_min": 40.0
+      }
+    },
+    "slow_sweep": {
+      "separate_window": {
+        "binned_count_min": 1.8,
+        "binned_count_max": 2.2,
+        "binned_measure_max": 50.0,
+        "binned_coverage_min": 0.9
+      },
+      "overlap_window": {
+        "binned_count_max": 1.3,
+        "binned_measure_max": 60.0,
+        "binned_coverage_min": 0.9
+      },
+      "pooled_excess_gap_min": 10.0
+    }
+  }
+}
