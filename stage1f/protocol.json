@@ -1,0 +1,75 @@
+{
+  "name": "stage1f_geometric_cone_refinement",
+  "purpose": "literal_geometric_cones_over_directional_trajectories",
+  "claims": [
+    "cones_are_literal_angular_sectors",
+    "realized_trajectory_is_inside_or_outside_the_saved_cone_set",
+    "out_of_cone_outcomes_force_widen_or_add",
+    "multi_cone_is_tighter_than_single_widen_on_separated_modes"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "narrowing_or_forgetting",
+    "multi_step_trajectory_embeddings",
+    "contextual_cone_applicability",
+    "learned_refinement_policy",
+    "port_proliferation",
+    "tam_superiority"
+  ],
+  "circle_degrees": 360,
+  "angle_resolution_degrees": 1,
+  "split_gap_degrees": 30,
+  "burn_in": 50,
+  "seeds": 40,
+  "learners": ["single_widen", "multi_cone", "full_circle"],
+  "scenarios": {
+    "unimodal": {
+      "length": 400,
+      "eval_start": 200,
+      "modes": [
+        {"center": 0, "half_width": 15, "weight": 1.0}
+      ]
+    },
+    "bimodal": {
+      "length": 500,
+      "eval_start": 300,
+      "modes": [
+        {"center": 0, "half_width": 10, "weight": 0.5},
+        {"center": 180, "half_width": 10, "weight": 0.5}
+      ]
+    },
+    "emergence": {
+      "length": 500,
+      "phase1_end": 200,
+      "eval_start": 300,
+      "mode_a": {"center": 0, "half_width": 10, "weight": 1.0},
+      "mode_b": {"center": 180, "half_width": 10, "weight": 1.0},
+      "phase2_modes": [
+        {"center": 0, "half_width": 10, "weight": 0.5},
+        {"center": 180, "half_width": 10, "weight": 0.5}
+      ]
+    }
+  },
+  "evidence": {
+    "contradiction_post_containment_min": 1.0,
+    "held_out_coverage_min": 0.95,
+    "unimodal": {
+      "max_cones_multi": 1,
+      "max_cones_single": 1,
+      "max_excess_degrees": 5.0
+    },
+    "bimodal": {
+      "multi_cone_count": 2,
+      "union_ratio_max_vs_single": 0.55,
+      "max_excess_degrees_multi": 10.0
+    },
+    "emergence": {
+      "first_new_mode_is_contradiction": true,
+      "representation_delay_max": 0,
+      "multi_cone_count_after": 2,
+      "union_ratio_max_vs_single": 0.55
+    },
+    "full_circle_measure": 360
+  }
+}

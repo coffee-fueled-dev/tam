@@ -15,6 +15,18 @@ Core commitments that survive architectural changes:
   simulator gradient.
 - Ports remain modes of interaction with an inference rule and an affordance
   cone. A binding is judged against the saved pre-action cone.
+- Cones are geometric subsets of trajectory space: a claimed region that a
+  realized trajectory is either inside or outside. Earlier categorical cones
+  over discrete outcome labels are finite-set approximations of that role, not
+  a different concept. Stage 1D rejected using a 90% predictive set as a
+  standalone safety filter; it did not reject the geometric prediction role.
+- When a realized trajectory lies outside the claimed cone, the world
+  contradicts expectation. Refinement must adapt by widening an existing cone
+  to contain the trajectory, or by adding a new cone that contains it. The
+  goal is tight cones that still contain reality.
+- Adding a predictive cone inside one port's expectation is distinct from
+  Stage 4 port proliferation (new interaction modes with applicability
+  conditions).
 - A port's inference map remains fixed: learning changes what that port expects,
   not how an already-bound episode is interpreted. A materially different
   interpretation must be introduced and evaluated explicitly rather than
