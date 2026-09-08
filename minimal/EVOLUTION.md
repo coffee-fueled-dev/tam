@@ -128,6 +128,12 @@ the dead mode. Dropping a vanished mode (prune) is required for tight multimodal
 commitments. Predictive cone prune inside one port is distinct from Stage 4 port
 proliferation (new interaction modes with applicability conditions).
 
+Plain window rebuild prunes as soon as a mode leaves the rolling window. That
+fails under rapid birth/death flicker: repeated add/prune chatter and brief
+under-coverage when a mode returns. Sticky hysteresis (immediate add, delayed
+prune after grace `T`) is the next fixed refinement before continuous situations
+or neural predictors are warranted.
+
 ## Stage 2 — Neural representations and generalization
 
 1. **Demand:** Continuous inputs, nonlinear contextual effects, or sparse

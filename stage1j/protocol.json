@@ -1,0 +1,94 @@
+{
+  "name": "stage1j_mode_churn_hysteresis",
+  "purpose": "sticky_multi_cone_hysteresis_under_mode_flicker",
+  "claims": [
+    "hysteresis_keeps_modes_across_short_gaps",
+    "hysteresis_reduces_prune_churn_vs_window_multi",
+    "hysteresis_still_prunes_after_sustained_absence",
+    "window_multi_chatters_under_fast_churn"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "overlapping_modes",
+    "learned_continuous_situations",
+    "learned_W_or_T",
+    "port_proliferation",
+    "tam_superiority"
+  ],
+  "circle_degrees": 360,
+  "angle_resolution_degrees": 1,
+  "situation_label": "site",
+  "split_gap_degrees": 30,
+  "primary_window": 48,
+  "grace_T": 64,
+  "seeds": 100,
+  "burn_in": 64,
+  "rolling_coverage_window": 20,
+  "note": "W=48, T=64, off=56: window_multi loses B by gap end; hysteresis retains (miss streak << T); stationary coverage remains reliable.",
+  "learners": ["window_multi", "hysteresis_multi", "cumulative_multi", "full_circle"],
+  "modes": {
+    "A": {"center": 0, "half_width": 10, "weight": 1.0},
+    "B": {"center": 180, "half_width": 10, "weight": 1.0}
+  },
+  "regimes": {
+    "AB": ["A", "B"],
+    "A": ["A"],
+    "B": ["B"]
+  },
+  "scenarios": {
+    "stationary_AB": {
+      "length": 600,
+      "schedule": [["AB", 600]]
+    },
+    "sustained_drop": {
+      "length": 400,
+      "schedule": [["AB", 200], ["A", 200]],
+      "phase_names": ["AB", "post"]
+    },
+    "fast_churn": {
+      "length": 1120,
+      "warmup_AB": 128,
+      "off_len": 56,
+      "on_len": 24,
+      "cycles": 12
+    },
+    "slow_churn": {
+      "length": 1280,
+      "warmup_AB": 128,
+      "off_len": 96,
+      "on_len": 96,
+      "cycles": 6,
+      "diagnostic": true
+    }
+  },
+  "evidence": {
+    "post_contradiction_containment_min": 1.0,
+    "stationary_AB": {
+      "coverage_min": 0.95,
+      "count_min": 1.8,
+      "count_max": 2.2,
+      "measure_max": 45.0
+    },
+    "fast_churn": {
+      "hysteresis_gap_end_count_min": 1.8,
+      "hysteresis_onblock_b_coverage_min": 0.9,
+      "prune_rate_ratio_max": 0.5,
+      "gap_end_steps": 8
+    },
+    "window_multi_limitation": {
+      "gap_end_count_max": 1.1
+    },
+    "sustained_drop": {
+      "final_measure_max": 30.0,
+      "final_count_max": 1.2,
+      "empirical_coverage_min": 0.95,
+      "p90_delay_max": 130,
+      "last_n": 100
+    },
+    "cumulative_limitation": {
+      "final_count_min": 1.8,
+      "final_measure_min": 35.0
+    }
+  }
+}
