@@ -134,6 +134,11 @@ under-coverage when a mode returns. Sticky hysteresis (immediate add, delayed
 prune after grace `T`) is the next fixed refinement before continuous situations
 or neural predictors are warranted.
 
+Fixed `split_gap` clustering still defines a geometric regime: well-separated
+modes stay two cones, clearly overlapping or wide-unimodal supports merge to one,
+and edge gaps near `split_gap` are an unstable boundary. Characterizing that
+regime is required before adaptive split or continuous situation models.
+
 ## Stage 2 — Neural representations and generalization
 
 1. **Demand:** Continuous inputs, nonlinear contextual effects, or sparse

@@ -1,0 +1,83 @@
+{
+  "name": "stage1k_overlapping_mode_split",
+  "purpose": "characterize_fixed_split_gap_separation_regimes",
+  "claims": [
+    "well_separated_modes_keep_two_cones",
+    "overlapping_supports_merge_to_one_cone",
+    "wide_unimodal_does_not_false_split",
+    "boundary_edge_gap_is_a_known_limitation"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "adaptive_split_gap",
+    "learned_continuous_situations",
+    "port_proliferation",
+    "tam_superiority"
+  ],
+  "circle_degrees": 360,
+  "angle_resolution_degrees": 1,
+  "situation_label": "site",
+  "primary_split_gap": 30,
+  "sensitivity_gaps": [15, 45],
+  "primary_window": 48,
+  "grace_T": 64,
+  "seeds": 100,
+  "burn_in": 64,
+  "length": 600,
+  "learners": ["hysteresis_gap30", "window_single", "full_circle"],
+  "diagnostic_learners": ["hysteresis_gap15", "hysteresis_gap45"],
+  "scenarios": {
+    "separate70": {
+      "modes": [
+        {"center": 0, "half_width": 10, "weight": 0.5},
+        {"center": 90, "half_width": 10, "weight": 0.5}
+      ],
+      "edge_gap": 70
+    },
+    "boundary30": {
+      "modes": [
+        {"center": 0, "half_width": 10, "weight": 0.5},
+        {"center": 50, "half_width": 10, "weight": 0.5}
+      ],
+      "edge_gap": 30,
+      "diagnostic": true
+    },
+    "overlap5": {
+      "modes": [
+        {"center": 0, "half_width": 10, "weight": 0.5},
+        {"center": 25, "half_width": 10, "weight": 0.5}
+      ],
+      "edge_gap": 5
+    },
+    "wide_unimodal": {
+      "modes": [
+        {"center": 0, "half_width": 40, "weight": 1.0}
+      ],
+      "edge_gap": null
+    }
+  },
+  "evidence": {
+    "post_contradiction_containment_min": 1.0,
+    "separate70": {
+      "coverage_min": 0.95,
+      "count_min": 1.8,
+      "count_max": 2.2,
+      "measure_max": 45.0,
+      "excess_max": 5.0,
+      "single_measure_min": 70.0
+    },
+    "overlap5": {
+      "coverage_min": 0.95,
+      "count_max": 1.2,
+      "measure_max": 55.0,
+      "excess_max": 5.0
+    },
+    "wide_unimodal": {
+      "coverage_min": 0.95,
+      "count_max": 1.2,
+      "measure_max": 85.0,
+      "excess_max": 5.0
+    }
+  }
+}
