@@ -1,0 +1,63 @@
+{
+  "name": "stage1g_situational_cone_volumes",
+  "purpose": "situation_conditioned_geometric_cone_volumes",
+  "claims": [
+    "cone_volume_depends_on_observable_situation",
+    "situation_multi_matches_coverage_with_tighter_tight_claims",
+    "unconditional_pooling_overclaims_in_tight_situations",
+    "shifted_situation_keeps_local_cone_without_wide_volume"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "narrowing_or_forgetting",
+    "continuous_state_embeddings",
+    "port_proliferation",
+    "learned_refinement_policy",
+    "tam_superiority"
+  ],
+  "circle_degrees": 360,
+  "angle_resolution_degrees": 1,
+  "split_gap_degrees": 30,
+  "burn_in": 60,
+  "seeds": 40,
+  "learners": [
+    "unconditional_multi",
+    "situation_multi",
+    "unconditional_single",
+    "full_circle"
+  ],
+  "situations": ["tight", "wide", "shifted"],
+  "supports": {
+    "tight": {"center": 0, "half_width": 10, "weight": 1.0},
+    "wide": {"center": 0, "half_width": 45, "weight": 1.0},
+    "shifted": {"center": 180, "half_width": 15, "weight": 1.0}
+  },
+  "schedule": {
+    "train_length": 360,
+    "eval_length": 180,
+    "diagnostic_length": 120,
+    "interleave": ["tight", "wide", "shifted"]
+  },
+  "hidden_volume_change": {
+    "situation_label": "tight",
+    "support_like": "wide"
+  },
+  "evidence": {
+    "contradiction_post_containment_min": 1.0,
+    "situation_multi_coverage_min": 0.95,
+    "tight": {
+      "situation_multi_measure_max": 25.0,
+      "situation_multi_excess_max": 5.0,
+      "unconditional_multi_measure_min": 80.0,
+      "volume_gap_min": 50.0
+    },
+    "shifted": {
+      "situation_multi_measure_max": 35.0,
+      "situation_multi_excess_max": 5.0,
+      "center_near": 180.0,
+      "center_tolerance": 20.0
+    },
+    "full_circle_measure": 360
+  }
+}

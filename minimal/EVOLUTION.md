@@ -109,6 +109,15 @@ thresholds for environments that have not yet been built.
 8. **Not established:** Higher dimensions alone do not establish a need for
    deep learning or learned observation representations.
 
+After literal geometric cones (Stage 1F), unconditional widen/add restores
+containment but can claim arbitrarily large union measure. Wide cones contain
+reality while predicting nothing specific. Situational cone volume is therefore
+required so commitments stay specific: the same port must claim different
+geometric measures in different observable situations. Categorical Stage 1B
+transfer does not by itself establish geometric volume conditioning. Narrowing
+and forgetting remain separate claims if cumulative situational stores stay
+over-wide after within-context support shrinks.
+
 ## Stage 2 — Neural representations and generalization
 
 1. **Demand:** Continuous inputs, nonlinear contextual effects, or sparse
