@@ -1,0 +1,86 @@
+{
+  "name": "stage1i_multimodal_cone_pruning",
+  "purpose": "window_multi_cone_mode_disappearance",
+  "claims": [
+    "window_multi_drops_vanished_modes",
+    "window_single_bridges_empty_space",
+    "cumulative_multi_retains_dead_modes",
+    "minimum_union_measure_at_matched_coverage_after_prune"
+  ],
+  "non_claims": [
+    "control_or_selection_advantage",
+    "safety_filter",
+    "mode_birth_death_churn",
+    "overlapping_modes",
+    "learned_continuous_situations",
+    "learned_prune_or_window_policy",
+    "port_proliferation",
+    "tam_superiority"
+  ],
+  "circle_degrees": 360,
+  "angle_resolution_degrees": 1,
+  "situation_label": "site",
+  "split_gap_degrees": 30,
+  "seeds": 100,
+  "burn_in": 64,
+  "rolling_coverage_window": 20,
+  "primary_window": 64,
+  "sensitivity_windows": [32, 128],
+  "learners": ["window_multi", "window_single", "cumulative_multi", "full_circle"],
+  "modes": {
+    "A": {"center": 0, "half_width": 10, "weight": 1.0},
+    "B": {"center": 180, "half_width": 10, "weight": 1.0}
+  },
+  "regimes": {
+    "AB": ["A", "B"],
+    "A": ["A"],
+    "B": ["B"]
+  },
+  "scenarios": {
+    "stationary_AB": {
+      "length": 900,
+      "schedule": [["AB", 900]]
+    },
+    "hidden_AB_to_A": {
+      "length": 600,
+      "schedule": [["AB", 300], ["A", 300]],
+      "phase_names": ["AB", "post"]
+    },
+    "hidden_AB_to_B": {
+      "length": 600,
+      "schedule": [["AB", 300], ["B", 300]],
+      "phase_names": ["AB", "post"],
+      "diagnostic": true
+    }
+  },
+  "evidence": {
+    "post_contradiction_containment_min": 1.0,
+    "stationary_AB": {
+      "window_multi_count_min": 1.8,
+      "window_multi_count_max": 2.2,
+      "window_multi_measure_max": 45.0,
+      "coverage_min": 0.95,
+      "exact_coverage_min": 0.95,
+      "window_single_measure_min": 150.0
+    },
+    "prune": {
+      "rolling_exact_coverage_min": 0.95,
+      "measure_max": 25.0,
+      "count_target": 1,
+      "p90_delay_max": 80
+    },
+    "final_post": {
+      "empirical_coverage_min": 0.95,
+      "mean_measure_max": 22.0,
+      "mean_count_max": 1.05,
+      "last_n": 100
+    },
+    "cumulative_limitation": {
+      "final_measure_min": 35.0,
+      "final_count_min": 1.8
+    },
+    "single_limitation": {
+      "ab_phase_measure_min": 150.0
+    }
+  }
+}

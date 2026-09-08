@@ -121,6 +121,13 @@ failure to narrow. Contraction after support shrinks under the same observable
 situation (`tight → wide → tight`) is a separate claim: adaptive specificity at
 matched future coverage, not permanent historical containment.
 
+After unimodal rolling-window narrowing (Stage 1H), multimodal disappearance is
+still unsolved: when separated modes `A∪B` become `A` alone, a single connected
+window cone bridges empty angular space, while a cumulative multi-cone retains
+the dead mode. Dropping a vanished mode (prune) is required for tight multimodal
+commitments. Predictive cone prune inside one port is distinct from Stage 4 port
+proliferation (new interaction modes with applicability conditions).
+
 ## Stage 2 — Neural representations and generalization
 
 1. **Demand:** Continuous inputs, nonlinear contextual effects, or sparse
